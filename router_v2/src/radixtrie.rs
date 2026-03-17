@@ -1,3 +1,7 @@
+// NOTE: This file is currently unused — it is not declared as a module in lib.rs.
+// It contains a generic RadixTreeMap<K,V> that is independent of the RadixTreeBlockHash
+// in kvcache.rs. Kept for potential future use.
+
 use nohash_hasher::{BuildNoHashHasher, IntMap, IsEnabled};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64;

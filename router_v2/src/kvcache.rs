@@ -5,6 +5,8 @@ use std::mem::{self};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use xxhash_rust::xxh3::xxh3_64_with_seed;
+
 use crate::SpinLock;
 
 pub(crate) static DEFAULT_BLOCK_HASH: u64 = 42;
@@ -697,7 +699,6 @@ impl BlockHash for RadixTreeBlockHash {
 mod hashtable_block_hash {
     use super::*;
     use smallvec::{smallvec, SmallVec};
-    use xxhash_rust::xxh3::xxh3_64_with_seed;
 
     pub struct HashTableBlockHash {
         map: IntMap<u64, SmallVec<[u64; 1]>>, // hash -> block_id
@@ -798,162 +799,166 @@ mod hashtable_block_hash {
             }
         }
     }
+}
 
-    #[derive(Debug, Default)]
-    pub(crate) struct BlockHashState {
-        /// Calculated block hash values
-        block_hashes: Vec<u64>,
-        /// Materialized block index at backend
-        /// NOTE: since this request is still active, the backend should preserve these blocks
-        block_indices: Vec<u64>,
-        /// Number of blocks that occupied at backend, and synchronised with scheduler
-        sync_nblks: usize,
-        pred_hit_nblks: AtomicUsize,
-        real_hit_nblks: Option<usize>,
-        block_size: usize,
-        prev_hash: u64,
-        token_in_last_block: Vec<u32>,
+// ---------------------------------------------------------------------------
+// BlockHashState — per-request hash tracking, backend-agnostic.
+// Used by both `hashtable-blockhash` and `radixtree-blockhash` feature paths.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+pub(crate) struct BlockHashState {
+    /// Calculated block hash values
+    block_hashes: Vec<u64>,
+    /// Materialized block index at backend
+    /// NOTE: since this request is still active, the backend should preserve these blocks
+    block_indices: Vec<u64>,
+    /// Number of blocks that occupied at backend, and synchronised with scheduler
+    sync_nblks: usize,
+    pred_hit_nblks: AtomicUsize,
+    real_hit_nblks: Option<usize>,
+    block_size: usize,
+    prev_hash: u64,
+    token_in_last_block: Vec<u32>,
+}
+
+// Sentinel for uninitialized `pred_hit_nblks`, i.e., a MSB mask 0b1_000...000
+const NONE_SENTINEL: usize = isize::MIN as usize;
+
+impl BlockHashState {
+    pub fn new(input_tokens: &Vec<u32>, block_size: usize) -> Self {
+        let mut prev_hash = DEFAULT_BLOCK_HASH;
+        let nblk = input_tokens.len().div_ceil(block_size);
+        let mut block_hashes = Vec::with_capacity(nblk.next_power_of_two());
+        let block_indices = Vec::with_capacity(nblk.next_power_of_two());
+        let mut token_in_last_block = Vec::with_capacity(block_size);
+
+        for block in input_tokens.chunks(block_size) {
+            if block.len() < 16 {
+                token_in_last_block.extend_from_slice(block);
+                break;
+            }
+            let len = block.len() * std::mem::size_of::<u32>();
+            let ptr = block.as_ptr() as *const u8;
+            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len) };
+            prev_hash = xxh3_64_with_seed(bytes, prev_hash);
+            block_hashes.push(prev_hash);
+        }
+
+        BlockHashState {
+            block_hashes,
+            block_indices,
+            pred_hit_nblks: AtomicUsize::new(NONE_SENTINEL),
+            real_hit_nblks: None,
+            sync_nblks: 0,
+            block_size,
+            prev_hash,
+            token_in_last_block,
+        }
     }
 
-    // Private sentinel for uninitialized `pred_hit_nblks`,
-    // i.e., a MSB mask 0b1_000...000
-    const NONE_SENTINEL: usize = isize::MIN as usize;
+    /// This function must be called by scheduler
+    pub fn set_pred_block_hits(&self, hit_nblks: usize) {
+        let x = self.pred_hit_nblks.swap(hit_nblks & !NONE_SENTINEL, Ordering::AcqRel);
+        assert_eq!(x, NONE_SENTINEL);
+    }
 
-    impl BlockHashState {
-        pub fn new(input_tokens: &Vec<u32>, block_size: usize) -> Self {
-            let mut prev_hash = DEFAULT_BLOCK_HASH;
-            let nblk = input_tokens.len().div_ceil(block_size);
-            let mut block_hashes = Vec::with_capacity(nblk.next_power_of_two());
-            let block_indices = Vec::with_capacity(nblk.next_power_of_two());
-            let mut token_in_last_block = Vec::with_capacity(block_size);
+    /// This function must be called exactly once at return from Prefill
+    pub fn set_real_token_hits_get_diff(&mut self, hit_token_cnt: u64) -> isize {
+        assert!(hit_token_cnt as usize % self.block_size == 0);
+        let block_hits = (hit_token_cnt as usize) / self.block_size;
+        // NOTE: hit blocks has been synchronized by previous entries
+        self.sync_nblks = self.sync_nblks.max(block_hits);
+        self.real_hit_nblks = Some(block_hits);
+        // `self.pred_hit_nblks.unwrap()`, a set MSB indicates uninitialized state
+        let hit_nblks = self.pred_hit_nblks.load(Ordering::Acquire);
+        assert!(hit_nblks & NONE_SENTINEL == 0);
+        self.real_hit_nblks.unwrap() as isize - hit_nblks as isize
+    }
 
-            for block in input_tokens.chunks(block_size) {
-                if block.len() < 16 {
-                    token_in_last_block.extend_from_slice(block);
-                    break;
-                }
-                let len = block.len() * std::mem::size_of::<u32>();
-                let ptr = block.as_ptr() as *const u8;
-                let bytes: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len) };
-                prev_hash = xxh3_64_with_seed(bytes, prev_hash);
-                block_hashes.push(prev_hash);
-            }
+    /// Equivalent to `append_tokens ; get_hashes_onto_indices`
+    /// # Returns
+    /// slice of hash values for caller to further manipulate `PrefixBlockHash`
+    #[allow(unused)]
+    pub fn append(
+        &mut self,
+        new_tokens: &[u32],
+        cur_backend_bids: Vec<u64>,
+        new_backend_bids: &Vec<u64>,
+    ) -> Result<&[u64], &[u64]> {
+        self.append_tokens(new_tokens);
+        self.set_bids(cur_backend_bids);
+        self.get_onto_hashes(new_backend_bids)
+    }
 
-            BlockHashState {
-                block_hashes,
-                block_indices,
-                pred_hit_nblks: AtomicUsize::new(NONE_SENTINEL),
-                real_hit_nblks: None,
-                sync_nblks: 0,
-                block_size,
-                prev_hash,
-                token_in_last_block,
-            }
+    pub fn append_tokens(&mut self, new_tokens: &[u32]) {
+        self.token_in_last_block.extend_from_slice(new_tokens);
+        if self.token_in_last_block.len() >= self.block_size {
+            let block = self.token_in_last_block.drain(..self.block_size).collect::<Vec<_>>();
+            let len = block.len() * std::mem::size_of::<u32>();
+            let ptr = block.as_ptr() as *const u8;
+            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len) };
+            self.prev_hash = xxh3_64_with_seed(bytes, self.prev_hash);
+            self.block_hashes.push(self.prev_hash);
         }
+    }
 
-        /// This function must be called by scheduler
-        pub fn set_pred_block_hits(&self, hit_nblks: usize) {
-            let x = self.pred_hit_nblks.swap(hit_nblks & !NONE_SENTINEL, Ordering::AcqRel);
-            assert_eq!(x, NONE_SENTINEL);
+    /// Set block indices occupied at backends as backup
+    /// # Arguments:
+    /// `backend_bids` currently occupied blocks at backend, including prefix
+    pub fn set_bids(&mut self, backend_bids: Vec<u64>) {
+        assert!(backend_bids.is_empty() == false);
+        // `0` is an invalid bid at backend
+        let old = self.block_indices.get(self.sync_nblks).cloned().unwrap_or(0);
+        let new = backend_bids.get(self.sync_nblks).cloned().unwrap_or(0);
+        if (old != new) || old == 0 {
+            self.sync_nblks = 0;
         }
+        self.block_indices = backend_bids;
+    }
 
-        /// This function must be called exactly once at return from Prefill
-        pub fn set_real_token_hits_get_diff(&mut self, hit_token_cnt: u64) -> isize {
-            assert!(hit_token_cnt as usize % self.block_size == 0);
-            let block_hits = (hit_token_cnt as usize) / self.block_size;
-            // NOTE: hit blocks has been synchronized by previous entries
-            self.sync_nblks = self.sync_nblks.max(block_hits);
-            self.real_hit_nblks = Some(block_hits);
-            // `self.pred_hit_nblks.unwrap()`, a set MSB indicates uninitialized state
-            let hit_nblks = self.pred_hit_nblks.load(Ordering::Acquire);
-            assert!(hit_nblks & NONE_SENTINEL == 0);
-            self.real_hit_nblks.unwrap() as isize - hit_nblks as isize
-        }
-
-        /// Equivalent to `append_tokens ; get_hashes_onto_indices`
-        /// # Returns
-        /// slice of hash values for caller to further manipulate `PrefixBlockHash`
-        #[allow(unused)]
-        pub fn append(
-            &mut self,
-            new_tokens: &[u32],
-            cur_backend_bids: Vec<u64>,
-            new_backend_bids: &Vec<u64>,
-        ) -> Result<&[u64], &[u64]> {
-            self.append_tokens(new_tokens);
-            self.set_bids(cur_backend_bids);
-            self.get_onto_hashes(new_backend_bids)
-        }
-
-        pub fn append_tokens(&mut self, new_tokens: &[u32]) {
-            self.token_in_last_block.extend_from_slice(new_tokens);
-            if self.token_in_last_block.len() >= self.block_size {
-                let block = self.token_in_last_block.drain(..self.block_size).collect::<Vec<_>>();
-                let len = block.len() * std::mem::size_of::<u32>();
-                let ptr = block.as_ptr() as *const u8;
-                let bytes: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len) };
-                self.prev_hash = xxh3_64_with_seed(bytes, self.prev_hash);
-                self.block_hashes.push(self.prev_hash);
-            }
-        }
-
-        /// Set block indices occupied at backends as backup
-        /// # Arguments:
-        /// `backend_bids` currently occupied blocks at backend, including prefix
-        pub fn set_bids(&mut self, backend_bids: Vec<u64>) {
-            assert!(backend_bids.is_empty() == false);
-            // `0` is an invalid bid at backend
-            let old = self.block_indices.get(self.sync_nblks).cloned().unwrap_or(0);
-            let new = backend_bids.get(self.sync_nblks).cloned().unwrap_or(0);
-            if (old != new) || old == 0 {
-                self.sync_nblks = 0;
-            }
-            self.block_indices = backend_bids;
-        }
-
-        /// Get block hashes mapped onto newly occupied blocks at backend
-        ///
-        /// # Returns:
-        /// `Ok` => onto hashes at Router
-        /// `Err` => all marked occupied bids at Router
-        pub fn get_onto_hashes(&mut self, new_backend_bids: &Vec<u64>) -> Result<&[u64], &[u64]> {
-            // Common (fast) path
-            // 0 is an invalid bid, vLLM's BlockHash uses 1-base indexing
-            if self.block_indices[self.sync_nblks] == new_backend_bids.first().cloned().unwrap_or(0)
-            {
-                let begin = self.sync_nblks;
-                let end = begin + new_backend_bids.len();
-                if &self.block_indices[begin..end] == new_backend_bids.as_slice() {
-                    self.sync_nblks = end;
-                    return Ok(&self.block_hashes[begin..end]);
-                }
-            }
-            // Corner (slow) path
-            if let Some(begin) = self
-                .block_indices
-                .windows(new_backend_bids.len())
-                .position(|backend_bids| backend_bids == new_backend_bids.as_slice())
-            {
-                let end = begin + new_backend_bids.len();
+    /// Get block hashes mapped onto newly occupied blocks at backend
+    ///
+    /// # Returns:
+    /// `Ok` => onto hashes at Router
+    /// `Err` => all marked occupied bids at Router
+    pub fn get_onto_hashes(&mut self, new_backend_bids: &Vec<u64>) -> Result<&[u64], &[u64]> {
+        // Common (fast) path
+        // 0 is an invalid bid, vLLM's BlockHash uses 1-base indexing
+        if self.block_indices[self.sync_nblks] == new_backend_bids.first().cloned().unwrap_or(0)
+        {
+            let begin = self.sync_nblks;
+            let end = begin + new_backend_bids.len();
+            if &self.block_indices[begin..end] == new_backend_bids.as_slice() {
                 self.sync_nblks = end;
                 return Ok(&self.block_hashes[begin..end]);
             }
-
-            Err(&self.block_indices)
+        }
+        // Corner (slow) path
+        if let Some(begin) = self
+            .block_indices
+            .windows(new_backend_bids.len())
+            .position(|backend_bids| backend_bids == new_backend_bids.as_slice())
+        {
+            let end = begin + new_backend_bids.len();
+            self.sync_nblks = end;
+            return Ok(&self.block_hashes[begin..end]);
         }
 
-        pub fn get_hashes(&self) -> &[u64] {
-            &self.block_hashes
-        }
+        Err(&self.block_indices)
+    }
 
-        pub fn get_block_size(&self) -> usize {
-            self.block_size
-        }
+    pub fn get_hashes(&self) -> &[u64] {
+        &self.block_hashes
+    }
+
+    pub fn get_block_size(&self) -> usize {
+        self.block_size
     }
 }
 
 #[cfg(feature = "hashtable-blockhash")]
-pub(crate) use hashtable_block_hash::{BlockHashState, HashTableBlockHash as PrefixBlockHash};
+pub(crate) use hashtable_block_hash::HashTableBlockHash as PrefixBlockHash;
 #[cfg(feature = "radixtree-blockhash")]
 pub(crate) use RadixTreeBlockHash as PrefixBlockHash;
 
