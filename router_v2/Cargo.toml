@@ -12,6 +12,7 @@ name = "router_v2"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = "0.1"
 async-stream = "0.3.5"
 axum = { version = "0.6.20", features = ["json"] }
 axum-tracing-opentelemetry = "0.14.1"

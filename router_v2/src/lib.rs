@@ -77,6 +77,7 @@ mod stub;
 mod vllmlet;
 #[cfg(feature = "zmq-backend")]
 pub mod zmq_engine;
+pub(crate) mod engine_client;
 
 pub use replica::*;
 pub use stub::*;
