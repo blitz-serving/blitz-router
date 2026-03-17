@@ -1,0 +1,36 @@
+# Rust
+target/
+Cargo.lock
+
+# Build
+build/
+.cache/
+compile_commands.json
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+log/
+log_home
+log-home*/
+server_log
+log.*/
+*.log
+
+# Data
+dataset_home
+*.csv
+*.jsonl
+
+# Python
+__pycache__/
+
+# Temp
+temp/
+tmp/
+output/
+
+# Profiling
+*.nsys-rep

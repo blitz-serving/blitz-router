@@ -1,0 +1,229 @@
+# ========== 1. 启动 8 个 vLLM 实例 ==========
+[runtime.raw]
+config = [
+    # vllm 实例 1
+    # { app = "vllm5", envs = { CUDA_VISIBLE_DEVICES = "4", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm6", envs = { CUDA_VISIBLE_DEVICES = "5", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm7", envs = { CUDA_VISIBLE_DEVICES = "6", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm8", envs = { CUDA_VISIBLE_DEVICES = "7", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true, block_keyword = "Available route" },
+    { app = "router", envs = { RUST_BACKTRACE = "full", LOG_LEVEL = "info" }, background = true, block_keyword = "ready" },
+    { app = "client1", background = true },
+    { app = "client2"},
+]
+[app.vllm1]
+executable = ["/data/zkx/vllm_env_origin/myenv/bin/vllm", "serve"]
+extra_args = [
+    "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50180",
+]
+
+
+[app.vllm2]
+executable = ["/data/zkx/vllm_env_origin/myenv/bin/vllm", "serve"]
+extra_args = [
+    "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50181",
+]
+
+[app.vllm3]
+executable = ["/data/zkx/vllm_env_origin/myenv/bin/vllm", "serve"]
+extra_args = [
+    "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50182",
+]
+
+[app.vllm4]
+executable = ["/data/zkx/vllm_env_origin/myenv/bin/vllm", "serve"]
+extra_args = [
+    "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50183",
+]
+
+[app.vllm5]
+executable = ["/data/zkx/vllm_env_origin/myenv/bin/vllm", "serve"]
+extra_args = [
+    "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50184",
+]
+
+[app.vllm6]
+executable = ["/data/zkx/vllm_env_origin/myenv/bin/vllm", "serve"]
+extra_args = [
+    "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50185",
+]
+
+[app.vllm7]
+executable = ["/data/zkx/vllm_env_origin/myenv/bin/vllm", "serve"]
+extra_args = [
+    "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50186",
+]
+
+[app.vllm8]
+executable = ["/data/zkx/vllm_env_origin/myenv/bin/vllm", "serve"]
+extra_args = [
+    "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50187",
+]
+
+
+[app.router]
+executable = ["/data/zkx/blitz-infer-pack/target/debug/router_v2"]
+extra_args = ["--use-tokenizer"]
+
+[app.router.macro_rules]
+"--hostname" = "hostname"
+"--port" = "port"
+"--deployment" = "deploy"
+"--tokenizer-name" = "tokenizer"
+"--model-name" = "model"
+"--model-path" = "model_path"
+"--parameter-size" = "param_size"
+"--client-config" = "cli_stub_cfg"
+"--deployment-config-path" = "deploy_cfg"
+"--log-path" = "log_path"
+"--max-input-length" = "context_length"
+"--max-total-tokens" = "total_tokens"
+"--max-concurrent-requests" = "concurrent_req"
+"--tokens-prefilled-per-sec" = "prefill_thpt"
+"--tokens-transferred-per-sec" = "network_thpt"
+"--max-blocks-per-replica" = "block_num"
+"--max-prefill-num" = "max_prefill"
+"--max-decode-num" = "max_decode"
+"--min-prefill-num" = "min_prefill"
+"--min-decode-num" = "min_decode"
+"--prefill-lower-bound" = "prefill_scale_down_threshold"
+"--prefill-upper-bound" = "prefill_scale_out_threshold"
+"--decode-lower-bound" = "decode_scale_down_threshold"
+"--decode-upper-bound" = "decode_scale_up_threshold"
+"--migration-lower-bound" = "migrate_scale_down_threshold"
+"--migration-upper-bound" = "migrate_scale_up_threshold"
+"--scale-down-threshold-millis" = "time_to_leave"
+"--num-hidden-layers" = "model_layers"
+"--num-gpus-per-node" = "gpu_num_per_node"
+"--mock-load-millis" = "mock_load_time"
+"--mock-transfer-millis" = "mock_transfer_time"
+"--tensor-parallel-size" = "tp_size"
+
+[app.router.config]
+hostname = "localhost"
+port = "58006"
+deploy = "colocation"
+model = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/"
+model_path = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct"
+tokenizer = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct"
+param_size = 16
+cli_stub_cfg = "/data/zkx/blitz-infer-pack/exps/blitz-run/configs/config-stubs-1.json"
+deploy_cfg = "/data/zkx/blitz-infer-pack/exps/blitz-run/configs/config-router.json"
+log_path = "/tmp/router.log"
+context_length = 4090
+total_tokens = 4096
+concurrent_req = 4096
+prefill_thpt = 13000
+network_thpt = 30000
+block_num = 8000
+max_prefill = 7
+max_decode = 7
+min_prefill = 1
+min_decode = 1
+prefill_scale_down_threshold = 0.3
+prefill_scale_out_threshold = 0.6
+decode_scale_down_threshold = 0.66
+decode_scale_up_threshold = 0.9
+migrate_scale_down_threshold = 0.2
+migrate_scale_up_threshold = 0.4
+time_to_leave = 1000
+model_layers = 32
+gpu_num_per_node = 8
+mock_load_time = 0
+mock_transfer_time = 0
+tp_size = 1
+
+
+[app.client1]
+executable = ["/data/zkx/blitz-infer-pack/target/release/client"]
+extra_args = ["--replay-mode"]
+
+[app.client1.macro_rules]
+"--tokenizer" = "tokenizer"
+"--endpoint" = "endpoint"
+"--protocol" = "protocol"
+"--scale-factor" = "scale_factor"
+"--dataset-type" = "dataset_type"
+"--dataset-path" = "dataset_path"
+"--time-in-secs" = "time_in_secs"
+"--truncate" = "truncate"
+"--output-path" = "output_path"
+
+[app.client1.config]
+tokenizer = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/tokenizer.json"
+endpoint = "http://localhost:58006/generate"
+protocol = "st"
+scale_factor = 1.0
+dataset_type = "azure"
+dataset_path = "/data/huggingface/datasets/AzurePublicDataset/AzureLLMInferenceTrace_code.csv"
+time_in_secs = 120
+truncate = 4095
+output_path = "/tmp/client.jsonl"
+
+
+
+
+[app.client2]
+executable = ["/data/zkx/blitz-infer-pack/target/release/client"]
+extra_args = ["--replay-mode"]
+
+[app.client2.macro_rules]
+"--tokenizer" = "tokenizer"
+"--endpoint" = "endpoint"
+"--protocol" = "protocol"
+"--scale-factor" = "scale_factor"
+"--dataset-type" = "dataset_type"
+"--dataset-path" = "dataset_path"
+"--time-in-secs" = "time_in_secs"
+"--truncate" = "truncate"
+"--output-path" = "output_path"
+
+[app.client2.config]
+tokenizer = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/tokenizer.json"
+endpoint = "http://localhost:58006/generate"
+protocol = "st"
+scale_factor = 2.0
+dataset_type = "azure"
+dataset_path = "/data/huggingface/datasets/AzurePublicDataset/AzureLLMInferenceTrace_conv.csv"
+time_in_secs = 120
+truncate = 4095
+output_path = "/tmp/client.jsonl"

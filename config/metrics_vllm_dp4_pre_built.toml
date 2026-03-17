@@ -1,0 +1,303 @@
+# ========== 1. 启动 8 个 vLLM 实例 ==========
+[runtime.raw]
+config = [
+    # vllm 实例 1
+    { app = "vllm1", envs = { CUDA_VISIBLE_DEVICES = "0" }, background = true },
+    { app = "vllm2", envs = { CUDA_VISIBLE_DEVICES = "1" }, background = true },
+    { app = "vllm3", envs = { CUDA_VISIBLE_DEVICES = "2" }, background = true },
+    { app = "vllm4", envs = { CUDA_VISIBLE_DEVICES = "3" }, background = false },
+    # { app = "vllm5", envs = { CUDA_VISIBLE_DEVICES = "4", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm6", envs = { CUDA_VISIBLE_DEVICES = "5", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm7", envs = { CUDA_VISIBLE_DEVICES = "6", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm8", envs = { CUDA_VISIBLE_DEVICES = "7", TORCH_CUDA_ARCH_LIST = "8.0" } },
+    # , background = true, block_keyword = "Available route"
+    # { app = "router", envs = { RUST_BACKTRACE = "full", LOG_LEVEL = "info" }, background = true, block_keyword = "Statistic path is not set" },
+    #{ app = "client_code_1", background = true },
+    # { app = "client_code_2", background = true },
+    #{ app = "client_conv_1", background = true},
+    #{ app = "client_conv_2"},
+]
+[app.vllm1]
+executable = ["/mnt/debugger/hjb/pre-built/modified-vllm/.venv/bin/vllm", "serve"]
+extra_args = [
+    "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50180",
+    "> /mnt/debugger/hjb/lmmetric-logs/vllm1.log 2>&1"
+]
+
+
+[app.vllm2]
+executable = ["/mnt/debugger/hjb/pre-built/modified-vllm/.venv/bin/vllm", "serve"]
+extra_args = [
+    "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50181",
+    "> /mnt/debugger/hjb/lmmetric-logs/vllm2.log 2>&1"
+]
+
+[app.vllm3]
+executable = ["/mnt/debugger/hjb/pre-built/modified-vllm/.venv/bin/vllm", "serve"]
+extra_args = [
+    "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50200",
+    "> /mnt/debugger/hjb/lmmetric-logs/vllm3.log 2>&1"
+]
+
+[app.vllm4]
+executable = ["/mnt/debugger/hjb/pre-built/modified-vllm/.venv/bin/vllm", "serve"]
+extra_args = [
+    "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50183",
+    "> /mnt/debugger/hjb/lmmetric-logs/vllm4.log 2>&1"
+]
+
+[app.vllm5]
+executable = ["/mnt/debugger/hjb/pre-built/modified-vllm/.venv/bin/vllm", "serve"]
+extra_args = [
+    "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50184",
+    "> /mnt/debugger/hjb/lmmetric-logs/vllm5.log 2>&1"
+]
+
+[app.vllm6]
+executable = ["/mnt/debugger/hjb/pre-built/modified-vllm/.venv/bin/vllm", "serve"]
+extra_args = [
+    "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50185",
+    "> /mnt/debugger/hjb/lmmetric-logs/vllm6.log 2>&1"
+]
+
+[app.vllm7]
+executable = ["/mnt/debugger/hjb/pre-built/modified-vllm/.venv/bin/vllm", "serve"]
+extra_args = [
+    "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50186",
+    "> /mnt/debugger/hjb/lmmetric-logs/vllm7.log 2>&1"
+]
+
+[app.vllm8]
+executable = ["/mnt/debugger/hjb/pre-built/modified-vllm/.venv/bin/vllm", "serve"]
+extra_args = [
+    "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens",
+    "1024",
+    "--port",
+    "50187",
+    "> /mnt/debugger/hjb/lmmetric-logs/vllm8.log 2>&1"
+]
+
+
+[app.router]
+executable = ["/data/zkx/blitz-infer-pack/target/debug/router_v2"]
+extra_args = ["--use-tokenizer", " > /tmp/router_lwl_v2.log 2>&1"]
+
+[app.router.macro_rules]
+"--hostname" = "hostname"
+"--port" = "port"
+"--deployment" = "deploy"
+"--tokenizer-name" = "tokenizer"
+"--model-name" = "model"
+"--model-path" = "model_path"
+"--parameter-size" = "param_size"
+"--client-config" = "cli_stub_cfg"
+"--deployment-config-path" = "deploy_cfg"
+"--log-path" = "log_path"
+"--max-input-length" = "context_length"
+"--max-total-tokens" = "total_tokens"
+"--max-concurrent-requests" = "concurrent_req"
+"--tokens-prefilled-per-sec" = "prefill_thpt"
+"--tokens-transferred-per-sec" = "network_thpt"
+"--max-blocks-per-replica" = "block_num"
+"--max-prefill-num" = "max_prefill"
+"--max-decode-num" = "max_decode"
+"--min-prefill-num" = "min_prefill"
+"--min-decode-num" = "min_decode"
+"--prefill-lower-bound" = "prefill_scale_down_threshold"
+"--prefill-upper-bound" = "prefill_scale_out_threshold"
+"--decode-lower-bound" = "decode_scale_down_threshold"
+"--decode-upper-bound" = "decode_scale_up_threshold"
+"--migration-lower-bound" = "migrate_scale_down_threshold"
+"--migration-upper-bound" = "migrate_scale_up_threshold"
+"--scale-down-threshold-millis" = "time_to_leave"
+"--num-hidden-layers" = "model_layers"
+"--num-gpus-per-node" = "gpu_num_per_node"
+"--mock-load-millis" = "mock_load_time"
+"--mock-transfer-millis" = "mock_transfer_time"
+"--tensor-parallel-size" = "tp_size"
+"--max-batch-prefill-tokens" = "mbpt"
+
+[app.router.config]
+hostname = "localhost"
+port = "58009"
+deploy = "colocation"
+model = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/"
+model_path = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct"
+tokenizer = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct"
+param_size = 16
+cli_stub_cfg = "/data/zkx/blitz-infer-pack/exps/blitz-run/configs/config-stubs.json"
+deploy_cfg = "/data/zkx/blitz-infer-pack/exps/blitz-run/configs/config-router.json"
+log_path = "/tmp/router_lwl_v2.log"
+context_length = 15999
+total_tokens = 16000
+concurrent_req = 4096
+prefill_thpt = 13000
+network_thpt = 30000
+block_num = 8000
+max_prefill = 7
+max_decode = 7
+min_prefill = 1
+min_decode = 1
+prefill_scale_down_threshold = 0.3
+prefill_scale_out_threshold = 0.6
+decode_scale_down_threshold = 0.66
+decode_scale_up_threshold = 0.9
+migrate_scale_down_threshold = 0.2
+migrate_scale_up_threshold = 0.4
+time_to_leave = 1000
+model_layers = 32
+gpu_num_per_node = 8
+mock_load_time = 0
+mock_transfer_time = 0
+tp_size = 1
+mbpt = 19999
+
+
+[app.client_code_1]
+executable = ["/data/zkx/blitz-infer-pack/target/release/client"]
+extra_args = ["--replay-mode"]
+
+[app.client_code_1.macro_rules]
+"--tokenizer" = "tokenizer"
+"--endpoint" = "endpoint"
+"--protocol" = "protocol"
+"--scale-factor" = "scale_factor"
+"--dataset-type" = "dataset_type"
+"--dataset-path" = "dataset_path"
+"--time-in-secs" = "time_in_secs"
+"--truncate" = "truncate"
+"--output-path" = "output_path"
+
+[app.client_code_1.config]
+tokenizer = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/tokenizer.json"
+endpoint = "http://localhost:58009/generate"
+protocol = "st"
+scale_factor = 2.0
+dataset_type = "azure"
+dataset_path = "/data/huggingface/datasets/AzurePublicDataset/AzureLLMInferenceTrace_code.csv"
+time_in_secs = 120
+truncate = 16000
+# output_path = "/data/lmetric/client_lwl_code_v4.jsonl"
+output_path = "/data/lmetric/pack/new_lwl_4_2/client_lwl_code_1.jsonl"
+
+
+
+[app.client_code_2]
+executable = ["/data/zkx/blitz-infer-pack/target/release/client"]
+extra_args = ["--replay-mode"]
+
+[app.client_code_2.macro_rules]
+"--tokenizer" = "tokenizer"
+"--endpoint" = "endpoint"
+"--protocol" = "protocol"
+"--scale-factor" = "scale_factor"
+"--dataset-type" = "dataset_type"
+"--dataset-path" = "dataset_path"
+"--time-in-secs" = "time_in_secs"
+"--truncate" = "truncate"
+"--output-path" = "output_path"
+
+[app.client_code_2.config]
+tokenizer = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/tokenizer.json"
+endpoint = "http://localhost:58009/generate"
+protocol = "st"
+scale_factor = 2.0
+dataset_type = "azure"
+dataset_path = "/data/huggingface/datasets/AzurePublicDataset/AzureLLMInferenceTrace_code.csv"
+time_in_secs = 120
+truncate = 16000
+# output_path = "/data/lmetric/client_lwl_code_v4.jsonl"
+output_path = "/data/lmetric/pack/new_lwl_4_2/client_lwl_code_2.jsonl"
+
+
+
+[app.client_conv_1]
+executable = ["/data/zkx/blitz-infer-pack/target/release/client"]
+extra_args = ["--replay-mode"]
+
+[app.client_conv_1.macro_rules]
+"--tokenizer" = "tokenizer"
+"--endpoint" = "endpoint"
+"--protocol" = "protocol"
+"--scale-factor" = "scale_factor"
+"--dataset-type" = "dataset_type"
+"--dataset-path" = "dataset_path"
+"--time-in-secs" = "time_in_secs"
+"--truncate" = "truncate"
+"--output-path" = "output_path"
+
+[app.client_conv_1.config]
+tokenizer = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/tokenizer.json"
+endpoint = "http://localhost:58009/generate"
+protocol = "st"
+scale_factor = 2.0
+dataset_type = "azure"
+dataset_path = "/data/huggingface/datasets/AzurePublicDataset/AzureLLMInferenceTrace_conv.csv"
+time_in_secs = 120
+truncate = 16000
+# output_path = "/data/lmetric/client_lwl_conv_v4.jsonl"
+output_path = "/data/lmetric/pack/new_lwl_4_2/client_lwl_conv_1.jsonl"
+
+[app.client_conv_2]
+executable = ["/data/zkx/blitz-infer-pack/target/release/client"]
+extra_args = ["--replay-mode"]
+
+[app.client_conv_2.macro_rules]
+"--tokenizer" = "tokenizer"
+"--endpoint" = "endpoint"
+"--protocol" = "protocol"
+"--scale-factor" = "scale_factor"
+"--dataset-type" = "dataset_type"
+"--dataset-path" = "dataset_path"
+"--time-in-secs" = "time_in_secs"
+"--truncate" = "truncate"
+"--output-path" = "output_path"
+
+[app.client_conv_2.config]
+tokenizer = "/data/huggingface/hub/models--LLM-Research--Meta-Llama-3.1-8B-Instruct/tokenizer.json"
+endpoint = "http://localhost:58009/generate"
+protocol = "st"
+scale_factor = 2.0
+dataset_type = "azure"
+dataset_path = "/data/huggingface/datasets/AzurePublicDataset/AzureLLMInferenceTrace_conv.csv"
+time_in_secs = 120
+truncate = 16000
+# output_path = "/data/lmetric/client_lwl_conv_v4.jsonl"
+output_path = "/data/lmetric/pack/new_lwl_4_2/client_lwl_conv_2.jsonl"

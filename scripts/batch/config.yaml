@@ -1,0 +1,64 @@
+cuda_devices: [0,1,2,3,4,5,6,7]
+
+dataset_home: "./dataset_home"
+
+inter_node_server:
+  enabled: true 
+  config:
+    g0001: "10.254.0.10"
+    g0002: "10.254.0.09"
+
+default_settings:
+  # set min prefill number and min decode number
+  init_prefill_num: 1
+  init_decode_num: 1
+  max_prefill_num: 7
+  max_decode_num: 7
+  min_prefill_num: 1
+  min_decode_num: 1
+  prefill_lower_bound: 0.3
+  prefill_upper_bound: 0.6
+  decode_lower_bound: 0.66
+  decode_upper_bound: 0.90
+  migration_lower_bound: 0.2
+  migration_upper_bound: 0.4
+  scale_down_threshold_millis: 1500
+  scale_factor: 0.6
+  num_gpus_per_node: 4
+  client_request_time_in_secs: 30
+
+model_configs:
+  llama2_7b:
+    tensor_parallel_size: 1
+    init_status: ["Prefill", "Decode"] # init status, if prefill/decode number < min prefill/decode, will add some active instances
+    traces:
+      Full:
+        # - "AzureCode-moti-pick-1"
+        # - "AzureCode-pick-11"
+        - "AzureCode2023-2min"
+      Half: []
+  # mistral_24b:
+  #   tensor_parallel_size: 2
+  #   init_status: ["Prefill", "Decode"]
+  #   traces:
+  #     Full:
+  #       - "AzureCode-motiv-pick-1"
+
+feature_configs:
+  # TODO: check feature
+  # xserve: "ngrok,sched_zag,unidirect,mutate"
+  # motiv: "ngrok,impl_sllm,mock_load"
+  # baseline_rdma: "ngrok,sched_naive,optimize_op_loading"
+  # baseline_rdma_optimal: "ngrok,sched_naive,optimize_op_loading,optimize_network_interference"
+  # baseline_cache_hit: "ngrok,sched_naive,optimize_op_loading,mock_cache_hit"
+  # baseline_ssd: "ngrok,sched_naive,optimize_op_loading,mock_load"
+  # xserve_hierarchical: "ngrok,sched_zag,unidirect,mutate,impl_nvl"
+  # baseline_cache: "ngrok,sched_naive,optimize_op_loading,enable_cache"
+  # sllm_ssd: "ngrok,impl_sllm,mock_load"
+  sllm_cache_replace: "ngrok,impl_sllm,cache_replace"
+  sllm_cache_all_hit_mutate: "ngrok,impl_sllm,cache_all_hit,mutate"
+  blitz_tanz: "ngrok,impl_blitz,impl_fast_pro"
+  # blitz_enable_nvlink: "ngrok,sched_zag,mutate,impl_nvl"
+
+extra_settings:
+  mock_load_millis: 5 # for motivation test, plz don't delete qwq

@@ -1,0 +1,34 @@
+
+# mpirun two hello_world processes
+# python runner.py --toml <path/to/toml> [--rt mpi]
+#    rt is not required since there's only one runtime definition
+
+
+[runtime]
+
+[runtime.mpi]
+executable = ["mpirun"]
+# macro_rules will read data in config, in this case, it will first read 2 then 3
+macro_rules = { "-n" = "start_num" } 
+extra_args = ["--allow-run-as-root"]
+
+[[runtime.mpi.config]]
+app = "hello"
+start_num = 2
+
+
+[[runtime.mpi.config]]
+app = "hello"
+start_num = 3
+
+#----------------------------------------------------------------------------
+
+
+[app]
+
+[app.hello]
+executable = ["python3", "/nvme/ly/blitz-scale/scripts/batchv3/hello.py"]
+macro_rules = {}
+extra_args = []
+
+[app.hello.config]

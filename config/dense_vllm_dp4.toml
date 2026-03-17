@@ -1,0 +1,184 @@
+# ========== 启动配置 ==========
+[runtime.raw]
+config = [
+    # 动态生成 vLLM 实例 (vllm1-vllm8)
+    { app = "vllm_template", envs = { CUDA_VISIBLE_DEVICES = "0", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true, base_port=59180, port_offset = 0 },
+    { app = "vllm_template", envs = { CUDA_VISIBLE_DEVICES = "1", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true, base_port=59180, port_offset = 1 },
+    { app = "vllm_template", envs = { CUDA_VISIBLE_DEVICES = "2", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true, base_port=59180, port_offset = 2 },
+    { app = "vllm_template", envs = { CUDA_VISIBLE_DEVICES = "3", TORCH_CUDA_ARCH_LIST = "8.0" }, background = false,  base_port=59180, port_offset = 3 },
+    #{ app = "vllm_template", envs = { CUDA_VISIBLE_DEVICES = "4", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true, port_offset = 4 },
+    #{ app = "vllm_template", envs = { CUDA_VISIBLE_DEVICES = "5", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true, port_offset = 5 },
+    #{ app = "vllm_template", envs = { CUDA_VISIBLE_DEVICES = "6", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true, port_offset = 6 },
+    #{ app = "vllm_template", envs = { CUDA_VISIBLE_DEVICES = "7", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true, port_offset = 7 },
+
+    # 客户端任务
+    #{ app = "client_code_1", background = true },
+    #{ app = "client_code_2", background = true },
+    #{ app = "client_conv_1", background = false },
+    #{ app = "client_conv_2", background = false },
+]
+
+# 公共变量（方便统一修改）
+[variables]
+model_path = "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/"
+tokenizer_path = "/home/admin/resource/model/464482ce.Qwen2.5-7B-Instruct/1.0/tokenizer.json"
+vllm_executable = "/mnt/debugger/hjb/modified-vllm/.venv/bin/vllm serve"
+client_executable = "/mnt/debugger/hjb/blitz-infer-pack/target/release/client"
+base_vllm_port = 59180
+log_dir = "/mnt/debugger/hjb/lmmetric-logs"
+dataset_dir = "/mnt/debugger/hjb/AzurePublicDataset/data"
+output_dir = "/mnt/debugger/hjb/lmmetric-logs/dp4_4code_2conv/rr"
+blitzdir = "/mnt/debugger/hjb/blitz-infer-pack"
+
+# ========== 模板定义 ==========
+#  "--base-port", "${base_vllm_port}",
+
+[app.vllm_template]
+executable = ["${vllm_executable}"]
+extra_args = [
+    "${model_path}",
+    "--no-enable-prefix-caching",
+    "--max-num-batched-tokens", "1024",
+    "--port", "${port}",
+    "> ${log_file} 2>&1"
+]
+
+# ========== 路由器配置（不变）==========
+[app.router]
+executable = ["/mnt/debugger/hjb/blitz-infer-pack/target/debug/router_v2"]
+extra_args = ["--use-tokenizer"]
+
+[app.router.macro_rules]
+"--hostname" = "hostname"
+"--port" = "port"
+"--deployment" = "deploy"
+"--tokenizer-name" = "tokenizer"
+"--model-name" = "model"
+"--model-path" = "model_path"
+"--parameter-size" = "param_size"
+"--client-config" = "cli_stub_cfg"
+"--deployment-config-path" = "deploy_cfg"
+"--log-path" = "log_path"
+"--max-input-length" = "context_length"
+"--max-total-tokens" = "total_tokens"
+"--max-concurrent-requests" = "concurrent_req"
+"--tokens-prefilled-per-sec" = "prefill_thpt"
+"--tokens-transferred-per-sec" = "network_thpt"
+"--max-blocks-per-replica" = "block_num"
+"--max-prefill-num" = "max_prefill"
+"--max-decode-num" = "max_decode"
+"--min-prefill-num" = "min_prefill"
+"--min-decode-num" = "min_decode"
+"--prefill-lower-bound" = "prefill_scale_down_threshold"
+"--prefill-upper-bound" = "prefill_scale_out_threshold"
+"--decode-lower-bound" = "decode_scale_down_threshold"
+"--decode-upper-bound" = "decode_scale_up_threshold"
+"--migration-lower-bound" = "migrate_scale_down_threshold"
+"--migration-upper-bound" = "migrate_scale_up_threshold"
+"--scale-down-threshold-millis" = "time_to_leave"
+"--num-hidden-layers" = "model_layers"
+"--num-gpus-per-node" = "gpu_num_per_node"
+"--mock-load-millis" = "mock_load_time"
+"--mock-transfer-millis" = "mock_transfer_time"
+"--tensor-parallel-size" = "tp_size"
+"--max-batch-prefill-tokens" = "mbpt"
+
+[app.router.config]
+hostname = "localhost"
+port = "58009"
+deploy = "colocation"
+model = "${model_path}"
+model_path = "${model_path}"
+tokenizer = "${model_path}"
+param_size = 16
+cli_stub_cfg = "/mnt/debugger/hjb/blitz-infer-pack/exps/blitz-run/configs/config-stubs.json"
+deploy_cfg = "/mnt/debugger/hjb/blitz-infer-pack/exps/blitz-run/configs/config-router.json"
+log_path = "${log_dir}/router_lwl_v2.log"
+context_length = 15999
+total_tokens = 16000
+concurrent_req = 4096
+prefill_thpt = 13000
+network_thpt = 30000
+block_num = 8000
+max_prefill = 7
+max_decode = 7
+min_prefill = 1
+min_decode = 1
+prefill_scale_down_threshold = 0.3
+prefill_scale_out_threshold = 0.6
+decode_scale_down_threshold = 0.66
+decode_scale_up_threshold = 0.9
+migrate_scale_down_threshold = 0.2
+migrate_scale_up_threshold = 0.4
+time_to_leave = 1000
+model_layers = 32
+gpu_num_per_node = 8
+mock_load_time = 0
+mock_transfer_time = 0
+tp_size = 1
+mbpt = 19999
+
+# ========== 通用客户端模板 ==========
+[app.client_template]
+executable = ["${client_executable}"]
+extra_args = ["--replay-mode"]
+
+[app.client_template.macro_rules]
+"--tokenizer" = "tokenizer"
+"--endpoint" = "endpoint"
+"--protocol" = "protocol"
+"--scale-factor" = "scale_factor"
+"--dataset-type" = "dataset_type"
+"--dataset-path" = "dataset_path"
+"--time-in-secs" = "time_in_secs"
+"--truncate" = "truncate"
+"--output-path" = "output_path"
+
+# ========== 具体客户端实例 ==========
+[app.client_code_1]
+inherit = "client_template"
+config.tokenizer = "${tokenizer_path}"
+config.endpoint = "http://localhost:58009/generate"
+config.protocol = "st"
+config.scale_factor = 2.0
+config.dataset_type = "azure"
+config.dataset_path = "${dataset_dir}/AzureLLMInferenceTrace_code.csv"
+config.time_in_secs = 120
+config.truncate = 16000
+config.output_path = "${output_dir}/client_lwl_code_1.jsonl"
+
+[app.client_code_2]
+inherit = "client_template"
+config.tokenizer = "${tokenizer_path}"
+config.endpoint = "http://localhost:58009/generate"
+config.protocol = "st"
+config.scale_factor = 2.0
+config.dataset_type = "azure"
+config.dataset_path = "${dataset_dir}/AzureLLMInferenceTrace_code.csv"
+config.time_in_secs = 120
+config.truncate = 16000
+config.output_path = "${output_dir}/client_lwl_code_2.jsonl"
+
+[app.client_conv_1]
+inherit = "client_template"
+config.tokenizer = "${tokenizer_path}"
+config.endpoint = "http://localhost:58009/generate"
+config.protocol = "st"
+config.scale_factor = 2.0
+config.dataset_type = "azure"
+config.dataset_path = "${dataset_dir}/AzureLLMInferenceTrace_conv.csv"
+config.time_in_secs = 120
+config.truncate = 16000
+config.output_path = "${output_dir}/client_lwl_conv_1.jsonl"
+
+[app.client_conv_2]
+inherit = "client_template"
+config.tokenizer = "${tokenizer_path}"
+config.endpoint = "http://localhost:58009/generate"
+config.protocol = "st"
+config.scale_factor = 2.0
+config.dataset_type = "azure"
+config.dataset_path = "${dataset_dir}/AzureLLMInferenceTrace_conv.csv"
+config.time_in_secs = 120
+config.truncate = 16000
+config.output_path = "${output_dir}/client_lwl_conv_2.jsonl"

@@ -1,0 +1,131 @@
+# ========== 1. 启动 8 个 vLLM 实例 ==========
+[runtime.raw]
+config = [
+    # vllm 实例 1
+    # { app = "vllm1", envs = { CUDA_VISIBLE_DEVICES = "0", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm2", envs = { CUDA_VISIBLE_DEVICES = "1", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm3", envs = { CUDA_VISIBLE_DEVICES = "2", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm4", envs = { CUDA_VISIBLE_DEVICES = "3", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm5", envs = { CUDA_VISIBLE_DEVICES = "4", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm6", envs = { CUDA_VISIBLE_DEVICES = "5", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm7", envs = { CUDA_VISIBLE_DEVICES = "6", TORCH_CUDA_ARCH_LIST = "8.0" }, background = true },
+    # { app = "vllm8", envs = { CUDA_VISIBLE_DEVICES = "7", TORCH_CUDA_ARCH_LIST = "8.0" } },
+    # , background = true, block_keyword = "Available route"
+    # { app = "router", envs = { RUST_BACKTRACE = "full", LOG_LEVEL = "info" }, background = true, block_keyword = "Statistic path is not set" },
+    { app = "client_code_1", background = true },
+    # { app = "client_code_2", background = true },
+    { app = "client_conv_1", background = false },
+    # { app = "client_conv_2" },
+]
+
+# 公共变量（方便统一修改）
+[variables]
+tokenizer_path = "/nvme/models/Meta-Llama-3-8B-Instruct/tokenizer.json"
+# client_executable = " /nvme/zkx/blitz-infer-pack/target/release/client"
+client_executable = " /nvme/zkx/request-sim/target/release/client"
+base_vllm_port = 59180
+log_dir = "/nvme/lmetric/logs"
+dataset_dir = "/nvme/lmetric/datasets"
+# output_dir = "/nvme/lmetric/logs/dp8_2code_2conv/lwl"
+output_dir = "${output_dir}"
+blitzdir = "/nvme/zkx/blitz-infer-pack"
+conv_trace_name = "AzureLLMInferenceTrace_conv_2023.csv"
+code_trace_name = "AzureLLMInferenceTrace_code.csv"
+
+# special token
+tokenizer_config_path = "/nvme/models/Meta-Llama-3-8B-Instruct/tokenizer_config.json"
+
+# sampler producer-consumer
+# producer: 16 token - 0.2ms
+# 5000 16
+num_producer = 10
+
+channel_capacity = 1024
+
+
+# ========== 通用客户端模板 ==========
+[app.client_template]
+executable = ["${client_executable}"]
+extra_args = ["--replay-mode"]
+
+[app.client_template.macro_rules]
+"--tokenizer" = "tokenizer"
+"--endpoint" = "endpoint"
+# "--protocol" = "protocol"
+"--scale-factor" = "scale_factor"
+"--api" = "api"
+# "--dataset-type" = "dataset_type"
+"--dataset" = "dataset_type"
+"--dataset-path" = "dataset_path"
+"--time-in-secs" = "time_in_secs"
+# "--truncate" = "truncate"
+"--output-path" = "output_path"
+"--num-producer" = "num_producer"
+"--channel-capacity" = "channel_capacity"
+"--tokenizer-config" = "tokenizer_config"
+
+
+# ========== 具体客户端实例 ==========
+[app.client_code_1]
+inherit = "client_template"
+config.tokenizer = "${tokenizer_path}"
+config.tokenizer_config = "${tokenizer_config_path}"
+config.num_producer = "${num_producer}"
+config.channel_capacity = "${channel_capacity}"
+config.endpoint = "http://localhost:58009/generate"
+config.protocol = "st"
+config.api = "tgi"
+config.scale_factor = 3.0
+config.dataset_type = "azure"
+config.dataset_path = "${dataset_dir}/${code_trace_name}"
+config.time_in_secs = 1200
+config.truncate = 16000
+config.output_path = "${output_dir}/client_code_1.jsonl"
+
+[app.client_code_2]
+inherit = "client_template"
+config.tokenizer = "${tokenizer_path}"
+config.endpoint = "http://localhost:58009/generate"
+config.tokenizer_config = "${tokenizer_config_path}"
+config.num_producer = "${num_producer}"
+config.channel_capacity = "${channel_capacity}"
+config.protocol = "st"
+config.scale_factor = 2.0
+config.api = "tgi"
+config.dataset_type = "azure"
+config.dataset_path = "${dataset_dir}/${code_trace_name}"
+config.time_in_secs = 120
+config.truncate = 16000
+config.output_path = "${output_dir}/client_code_2.jsonl"
+
+[app.client_conv_1]
+inherit = "client_template"
+config.tokenizer = "${tokenizer_path}"
+config.endpoint = "http://localhost:58009/generate"
+config.protocol = "st"
+config.tokenizer_config = "${tokenizer_config_path}"
+config.num_producer = "${num_producer}"
+config.channel_capacity = "${channel_capacity}"
+config.scale_factor = 1.5
+config.api = "tgi"
+config.dataset_type = "azure"
+config.dataset_path = "${dataset_dir}/${conv_trace_name}"
+config.time_in_secs = 1200
+config.truncate = 16000
+config.output_path = "${output_dir}/client_conv_1.jsonl"
+
+[app.client_conv_2]
+inherit = "client_template"
+config.tokenizer = "${tokenizer_path}"
+config.tokenizer_config = "${tokenizer_config_path}"
+config.num_producer = "${num_producer}"
+config.channel_capacity = "${channel_capacity}"
+config.endpoint = "http://localhost:58009/generate"
+config.protocol = "st"
+config.scale_factor = 2.0
+config.api = "tgi"
+config.dataset_type = "azure"
+config.dataset_path = "${dataset_dir}/${conv_trace_name}"
+config.time_in_secs = 120
+config.truncate = 16000
+config.output_path = "${output_dir}/client_conv_2.jsonl"

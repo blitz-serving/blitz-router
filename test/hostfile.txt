@@ -1,0 +1,2 @@
+g0001 slots=1 max_slots=1
+g0002 slots=1 max_slots=1
