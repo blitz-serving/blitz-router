@@ -1,38 +1,59 @@
 # BlitzScale Router - Distributed LLM Inference Router
 
 ## Overview
-BlitzScale Router (blitz-router) is a research-grade distributed LLM inference router and scheduler, written in **Rust**. It routes client requests to backend engines (vLLM or BlitzLLM), manages KV cache state, and dynamically scales replicas. Extracted from `blitz-infer-pack` — the C++ inference engine (BlitzTransformer) lives separately and communicates via gRPC.
+BlitzScale Router (blitz-router) is the **routing component** of the lmetric distributed LLM inference system. Written in Rust, it routes client requests to backend **yaullm** engines (a patched vLLM), manages KV cache state via RadixTree prefix matching, and dynamically scales replicas.
+
+This repo was extracted from `blitz-infer-pack`, retaining only the Rust router. The C++ inference engine (BlitzTransformer) is not part of the lmetric system.
+
+## Communication Protocol — IMPORTANT
+
+**lmetric uses HTTP + SSE, NOT gRPC.**
+
+The router supports two backend modes selected at compile time via Cargo features:
+
+| | `vllm-backend` (lmetric) | `blitzllm-backend` (BlitzScale legacy) |
+|---|---|---|
+| **Engine** | yaullm (patched vLLM) | BlitzTransformer (C++) |
+| **Inference transport** | HTTP (OpenAI-compatible API) | gRPC (`TextGenerationService`) |
+| **Metrics transport** | SSE push (`/v1/metrics`) | gRPC response fields |
+| **Entry point** | `vllmlet.rs` → `VllmClient` | `stub.rs` → `Stub` (gRPC) |
+| **Used by lmetric?** | **YES** | No |
+
+### Why proto/ and rust-proto/ still exist
+The protobuf-generated types (`Tokens`, `GeneratedText`, `Batch`, `Request`, `CachedBatch`, etc.) are used as **internal data structures** throughout the router (queue, infer, validation, replica) regardless of backend mode. They are NOT used as a wire protocol in lmetric — the actual transport is HTTP/SSE via `VllmClient` in `vllmlet.rs`.
+
+### lmetric Data Flow
+```
+Client (HTTP) → Router (Axum server.rs)
+    → [Validation] → [Queue + BlockHashState] → [Replica Selection]
+    → VllmClient (vllmlet.rs) → HTTP → yaullm engine
+    ← HTTP streaming response ← yaullm
+    ← SSE metrics push (/v1/metrics) ← yaullm  [async, separate connection]
+```
+
+### SSE Metrics Consumption
+The router connects to each yaullm engine's `/v1/metrics` SSE endpoint and receives per-step metrics:
+```json
+{
+    "outputs": [{"request_id": "req-123", "new_token_ids": [456], "state": "RUNNING", "num_cached_tokens": 128}],
+    "latency": 45,
+    "prefill_token_budget": 2048,
+    "evicted_block_ids": [10, 11, 12]
+}
+```
+This drives cache-aware routing (via `evicted_block_ids`) and scheduling decisions (via latency, request states).
 
 ## Comparison with AI-Dynamo & AIBrix
 
-| Aspect | BlitzScale | AI-Dynamo | AIBrix |
+| Aspect | BlitzScale (lmetric) | AI-Dynamo | AIBrix |
 |--------|-----------|-----------|--------|
-| Language | Rust | Python/C++ | Python/Go |
-| P/D Disaggregation | Layer-wise split with Zigzag scaling | Co-located | Separated |
-| KV Cache Routing | RadixTree prefix matching at router | Simplified | Cache-aware |
-| Scaling | Zigzag (incremental layer loading) | Ring-based | Static disaggregation |
+| Router language | Rust | Python/C++ | Python/Go |
+| Engine | yaullm (patched vLLM) | Custom | Custom |
+| Router↔Engine protocol | HTTP + SSE | gRPC / custom | gRPC / custom |
+| KV Cache Routing | RadixTree prefix matching | Simplified | Cache-aware |
 | Scheduling Policies | 8+ compile-time switchable | Fixed | Fixed |
-| Broadcast | NVLink / RDMA / Tanz (tree+ring hybrid) | N/A | Specialized |
-| Metrics | Comprehensive real-time (lmetric) | Basic | Limited telemetry |
-| Config Polymorphism | 165 Cargo feature flags (zero-overhead) | Runtime config | Runtime config |
-
-### Key Differentiators
-1. **Zigzag Scaling**: Incrementally loads model layers on new replicas while old ones continue serving — no full model broadcast needed.
-2. **Prefix Cache Integration**: Router's RadixTree tracks per-replica block hashes for O(log L) prefix matching, enabling cache-aware routing decisions.
-3. **Compile-Time Polymorphism**: 165 feature flags allow different system configurations (scheduling, hashing, scaling) without runtime overhead.
-4. **Request Migration**: Mid-stream request migration between replicas with batch state transfer.
-
-## Architecture
-
-```
-Client Request → [Validation] → [Queue + BlockHashState] → [Replica Selection]
-    → [Prefill Phase] → [KV Cache Tracking] → [Decode Phase] → [Response Streaming]
-    → [Migration if needed]
-```
-
-### Deployment Modes (compile-time)
-- **Colocation** (`vllm-backend`): Full model per replica, direct token generation
-- **Disaggregation** (`blitzllm-backend`): Separate prefill/decode replicas, parameter transfer via NCCL/RDMA
+| Metrics | Real-time SSE push per engine step | Basic | Limited telemetry |
+| Config Polymorphism | Cargo feature flags (zero-overhead) | Runtime config | Runtime config |
 
 ## Project Structure
 
@@ -40,27 +61,27 @@ Client Request → [Validation] → [Queue + BlockHashState] → [Replica Select
 blitz-router/
 ├── router_v2/src/           # Rust router (~8,400 LOC)
 │   ├── main.rs              # CLI args & entry point
-│   ├── server.rs            # HTTP/gRPC server (Axum), /generate, /info, /health, /metrics
+│   ├── server.rs            # HTTP server (Axum): /generate, /info, /health, /metrics
 │   ├── infer.rs             # Inference orchestration (730 LOC)
 │   ├── queue.rs             # Request queue & scheduling policies (1,653 LOC)
 │   ├── kvcache.rs           # KV cache tracking with BlockHashState (1,373 LOC)
 │   ├── radixtrie.rs         # Patricia trie for prefix matching (1,072 LOC)
-│   ├── stub.rs              # gRPC client stubs to backends
+│   ├── vllmlet.rs           # ** yaullm/vLLM HTTP+SSE backend (lmetric path) **
+│   ├── stub.rs              # gRPC stubs (blitzllm-backend only, NOT lmetric)
 │   ├── validation.rs        # Request validation
-│   ├── vllmlet.rs           # vLLM backend integration
 │   └── replica/             # Replica state machine & controllers (~4,500 LOC)
 │       ├── config.rs         # DisaggregationConfig
 │       ├── metrics.rs        # SystemMetric (AtomicUsize counters), 20+ replica states
 │       ├── disaggregation.rs # P-D disaggregation controller
-│       ├── colocation.rs     # Co-location controller
+│       ├── colocation.rs     # Co-location controller (vllm-backend)
 │       ├── steersman.rs      # Replica lifecycle management
 │       └── cybernetics/      # Dynamic scaling planner & execution
-│           ├── planner.rs    # ScalePlan generation (prefill/decode thresholds)
-│           ├── exec_blitz.rs # Zigzag, multicast, NVLink/RDMA execution (114K!)
+│           ├── planner.rs    # ScalePlan generation
+│           ├── exec_blitz.rs # Scaling execution (114K)
 │           └── exec_serverless.rs
-├── proto/generate.proto     # gRPC definitions (TextGenerationService)
-├── rust-grpc/               # gRPC metadata injection
-├── rust-proto/              # Protobuf generated Rust code
+├── proto/generate.proto     # Protobuf type definitions (used as internal data structures)
+├── rust-proto/              # Protobuf codegen (internal types, NOT wire protocol in lmetric)
+├── rust-grpc/               # gRPC metadata injection (blitzllm-backend only)
 ├── request-sim/             # Request simulator (git submodule, main branch)
 ├── config/                  # 39 TOML configs (lmetric*, metrics_*, dense_*, eval_*)
 ├── scripts/                 # e2e tests, batch utils, debug tools
@@ -84,6 +105,7 @@ blitz-router/
 - **Hash Algorithms**: `default-hash-algo` (single u64) or `sha256-hash-algo` (4x u64 SHA256)
 - **Implementations**: `radixtree-blockhash` (tree) or `hashtable-blockhash` (hash table)
 - Each request carries `BlockHashState` for cache-aware routing
+- **Eviction tracking**: Router receives `evicted_block_ids` from yaullm SSE and updates its RadixTree accordingly
 
 ### Replica State Machine (20+ states)
 ```
@@ -94,28 +116,19 @@ Prefill → MutatingToDecode → Decode → ShuttingDecode → Inactive
 Broadcasting: NvlCasting, RdmaCasting, TanzCasting, RdmaSending, RdmaLoading
 ```
 
-### Scaling Mechanisms
-- **Zigzag** (`impl_live`/`impl_live_pro`): Incremental layer-wise model loading
-- **Multicast** (`impl_fast`/`impl_fast_pro`): One-to-many parameter broadcast
-- **NVLink** (`impl_nvl`): Intra-node GPU-to-GPU broadcast
-- **RDMA** (`impl_rdma`): Inter-node InfiniBand broadcast
-- **Tanz** (`impl_tanz`): Hybrid tree+ring topology broadcast
-
-### gRPC Protocol (proto/generate.proto)
-Key RPCs on `TextGenerationService`:
-- `Prefill`, `Decode`, `PrefillV2`, `DecodeV2`, `ZagPrefill` — inference
-- `SendParams`, `RecvParams`, `LoadParams` — parameter transfer
-- `Migrate`, `Immigrate`, `MigratePartial`, `ImmigratePartial` — request migration
-- `NvlBroadcast`, `RdmaBroadcast`, `TanzBroadcast` — broadcast
-- `Health`, `Info`, `ServiceDiscovery`, `ClearCache`, `FilterBatch`, `Warmup`
+### Conditional Compilation (backend selection)
+The backend is selected at compile time. Key `#[cfg]` guards:
+- `main.rs`: `VllmClient::new()` (vllm-backend) vs `Stub::connect()` (blitzllm-backend)
+- `infer.rs`: `Infer` struct definition differs per backend
+- `server.rs`: Backend-specific imports and handler parameters
 
 ## Build
 
 ```bash
-# Build the full workspace
-cargo build --release
+# lmetric build (vllm-backend with a scheduling policy)
+cargo build -p router_v2 --features vllm-backend,join-shortest-q
 
-# Build router with specific features
+# Full feature build (legacy, for blitzllm + scaling)
 cargo build -p router_v2 --features impl_blitz,impl_fast_pro,impl_live_pro
 ```
 
@@ -162,8 +175,8 @@ envs = { CUDA_VISIBLE_DEVICES = "0" }
 - `scripts/e2e/eval_azure.sh` — E2E evaluation orchestrator
 
 ## Related Projects
-- **[yaullm](https://github.com/blitz-serving/yaullm)** — Patched vLLM engine with step-level SSE metrics
-- **[blitz-infer-pack](https://github.com/blitz-serving/blitz-infer-pack)** — Full system (router + C++ BlitzTransformer engine)
+- **[yaullm](https://github.com/blitz-serving/yaullm)** (branch `lmetric/step-reporter-v2`) — Patched vLLM engine; provides HTTP inference API + SSE metrics push at `/v1/metrics`
+- **[blitz-infer-pack](https://github.com/blitz-serving/blitz-infer-pack)** — Original monorepo (router + C++ BlitzTransformer engine, gRPC-based)
 
 ## License
 Apache-2.0. Code derived from Hugging Face Text Generation Inference (TGI).
