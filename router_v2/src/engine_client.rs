@@ -109,7 +109,7 @@ pub struct EngineStepOutput {
 ///   POST and receives per-step metrics via SSE stream.
 /// - `ZmqEngineClient` (ZMQ, feature `zmq-backend`): sends requests via ZMQ
 ///   DEALER socket and receives outputs via ZMQ PULL socket.
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 pub trait EngineClient: Send {
     /// Send an inference request to the engine.
     ///
@@ -257,7 +257,7 @@ mod vllm_impl {
         }
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl EngineClient for VllmEngineClient {
         async fn add_request(
             &mut self,
@@ -395,7 +395,7 @@ mod zmq_impl {
         }
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl EngineClient for ZmqEngineClientAdapter {
         async fn add_request(
             &mut self,

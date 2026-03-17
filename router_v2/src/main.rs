@@ -24,8 +24,11 @@ use opentelemetry_otlp::WithExportConfig;
 use router_v2::error::ClientError;
 use router_v2::{
     parse_deployment, server, ControllerArgs, Deployment, HubModelInfo, Model,
-    TokenizerRender, VllmClient, MAX_BLOCKS_PER_REPLICA,
+    TokenizerRender, MAX_BLOCKS_PER_REPLICA,
 };
+#[cfg(feature = "vllm-backend")]
+use router_v2::VllmClient;
+use router_v2::engine_client::EngineClient;
 use thiserror::Error;
 #[allow(unused_imports)]
 use tokenizers::{FromPretrainedParameters, Tokenizer};
@@ -335,11 +338,55 @@ fn main() -> Result<(), RouterError> {
         .map_err(|e| RouterError::Connection(e))?;
 
         #[cfg(feature = "vllm-backend")]
-        let vllm_clients: Vec<VllmClient> = serde_json::from_str::<Vec<String>>(buf.as_str())
-            .unwrap()
-            .into_iter()
-            .map(|uri| VllmClient::new(uri.as_str(), &model_name))
-            .collect();
+        let engine_clients: Vec<Box<dyn EngineClient>> = {
+            use router_v2::engine_client::VllmEngineClient;
+            serde_json::from_str::<Vec<String>>(buf.as_str())
+                .unwrap()
+                .into_iter()
+                .map(|uri| {
+                    let vllm_client = VllmClient::new(uri.as_str(), &model_name);
+                    Box::new(VllmEngineClient::new(vllm_client)) as Box<dyn EngineClient>
+                })
+                .collect()
+        };
+
+        // ZMQ backend: create engine clients from IPC/TCP socket addresses.
+        // The deployment config is expected to contain an array of
+        // [input_addr, output_addr] pairs as JSON strings.
+        #[cfg(feature = "zmq-backend")]
+        let engine_clients: Vec<Box<dyn EngineClient>> = {
+            use router_v2::engine_client::ZmqEngineClientAdapter;
+            use router_v2::zmq_engine::ZmqEngineClient;
+
+            // Parse socket address pairs from the config buffer.
+            // Expected format: [["ipc:///tmp/vllm-engine-8000-input", "ipc:///tmp/vllm-engine-8000-output"], ...]
+            let addr_pairs: Vec<(String, String)> =
+                serde_json::from_str::<Vec<Vec<String>>>(buf.as_str())
+                    .expect("ZMQ backend expects JSON array of [input_addr, output_addr] pairs")
+                    .into_iter()
+                    .map(|pair| {
+                        assert_eq!(pair.len(), 2, "Each ZMQ address entry must be [input, output]");
+                        (pair[0].clone(), pair[1].clone())
+                    })
+                    .collect();
+
+            let mut clients = Vec::with_capacity(addr_pairs.len());
+            for (input_addr, output_addr) in addr_pairs {
+                let mut zmq_client = ZmqEngineClient::new();
+                // Block on connect since we're in async context
+                zmq_client
+                    .connect(&input_addr, &output_addr)
+                    .await
+                    .expect(&format!(
+                        "Failed to connect ZMQ engine client to {} / {}",
+                        input_addr, output_addr
+                    ));
+                clients.push(
+                    Box::new(ZmqEngineClientAdapter::new(zmq_client)) as Box<dyn EngineClient>,
+                );
+            }
+            clients
+        };
 
         // Get info from the shard
         tracing::warn!("The shard info is not set properly by the st-server");
@@ -378,7 +425,7 @@ fn main() -> Result<(), RouterError> {
         #[cfg(feature = "blitzllm-backend")]
         let mut temp_vec = Vec::with_capacity(stubs.len());
         #[cfg(feature = "vllm-backend")]
-        let mut temp_vec = Vec::with_capacity(vllm_clients.len());
+        let mut temp_vec = Vec::with_capacity(engine_clients.len());
         let _map_fn = |index: usize, t: Option<u32>| {
             let max_supported_batch_total_tokens = match t {
                 // Older models do not support automatic max-batch-total-tokens
@@ -441,8 +488,8 @@ fn main() -> Result<(), RouterError> {
             max_batch_prefill_tokens,
             max_supported_batch_total_tokens,
             max_waiting_tokens,
-            #[cfg(feature = "vllm-backend")]
-            vllm_clients,
+            #[cfg(feature = "colocation")]
+            engine_clients,
             deployment,
             kvcache_block_size,
             deployment_config_path,

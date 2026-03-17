@@ -1,11 +1,10 @@
 use crate::{
+    engine_client::EngineClient,
     queue::TaskAssigner,
-    vllmlet::{VllmClient, VllmClientError},
     LMetric, ScheduleContext, THROTTLE_THLD, TPOT_THRESHOLD, TPS_THRESHOLD,
 };
-use reqwest::Response;
 use std::sync::Arc;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::sync::Mutex;
 
 pub(crate) struct ColocationController {
     pub all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>>,
@@ -20,18 +19,18 @@ pub(crate) enum ExtExcept {
     FrontendAbort,
 
     #[error("backend error: {0}")]
-    BackendFault(#[from] VllmClientError),
+    BackendFault(String),
 }
 
 pub(crate) fn start_vllm_colocation_event_loop(
     queue: TaskAssigner,
-    all_vllm_clients: Vec<VllmClient>,
+    all_engine_clients: Vec<Box<dyn EngineClient>>,
     all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>>,
 ) -> Arc<ColocationController> {
-    for (replica_index, vllm_client) in all_vllm_clients.into_iter().enumerate() {
+    for (replica_index, engine_client) in all_engine_clients.into_iter().enumerate() {
         tokio::spawn(task_assignment::work_event_loop(
             replica_index,
-            vllm_client,
+            engine_client,
             queue.clone(),
             all_schedule_contexts[replica_index].clone(),
         ));
@@ -40,8 +39,6 @@ pub(crate) fn start_vllm_colocation_event_loop(
     let controller = ColocationController { batching_queue: queue, all_schedule_contexts };
     Arc::new(controller)
 }
-
-type VllmClientResp = JoinHandle<Result<Response, VllmClientError>>;
 
 #[deprecated]
 fn throttle_for_decoding(idx: usize, lmetric: &LMetric, throttled: &mut bool) {
@@ -65,26 +62,23 @@ fn throttle_for_decoding(idx: usize, lmetric: &LMetric, throttled: &mut bool) {
 }
 
 mod task_assignment {
-    use eventsource_client as es;
-    use futures::StreamExt;
     use nohash_hasher::{BuildNoHashHasher, IntMap};
     use pb::generate::v2 as proto;
-    use reqwest::Response;
     use tokio::sync::mpsc::{self, channel, error::SendError, Receiver};
     use tokio::sync::Mutex;
-    use tokio::task::{yield_now, JoinHandle};
+    use tokio::task::yield_now;
     use tokio::time::Duration;
 
     use core::panic;
     use std::sync::Arc;
 
     use super::except_management::{ExtContext, ExtState};
-    use super::{ScheduleContext, VllmClientResp};
+    use super::ScheduleContext;
     use crate::{
+        engine_client::{EngineClient, RequestStepOutput},
         infer::{InferError, InferStreamResponse},
         kvcache::BlockHash,
         queue::{Entry, QueuePro},
-        vllmlet::{VllmClient, VllmClientError, VllmMetric, VllmRequestStatus},
         ExtExcept, LMetricDec, Token,
     };
 
@@ -176,23 +170,31 @@ mod task_assignment {
         }
     }
 
-    /// Control the workload level of delegated instance
+    /// Control the workload level of delegated instance.
+    ///
+    /// Accepts a `Box<dyn EngineClient>` that is split: the error receiver
+    /// goes to the completion event loop, and the client itself is shared
+    /// via an `Arc<Mutex<..>>` between work and completion loops.
     pub async fn work_event_loop<Q: QueuePro>(
         replica_index: usize,
-        mut vllm_client: VllmClient,
+        mut engine_client: Box<dyn EngineClient>,
         queue: Q,
         schedule_context: Arc<Mutex<ScheduleContext>>,
     ) {
-        // Channel: work queue -> completion queue
-        let (wq_tx, cq_wqe_rx) = channel::<(Entry, VllmClientResp)>(64);
+        // Channel: work queue -> completion queue (only carries Entry now)
+        let (wq_tx, cq_wqe_rx) = channel::<Entry>(64);
         let wqe_mtx = Arc::new(Mutex::new(()));
 
+        // Extract error receiver before wrapping in Arc<Mutex>
+        let cq_error_rx = engine_client.get_error_rx();
+
+        // Wrap client in Arc<Mutex> so both loops can use it
+        let engine_client = Arc::new(Mutex::new(engine_client));
+
         // Init completion queue poller
-        let cq_error_rx = vllm_client.get_error_rx();
-        let vllm = vllm_client.clone();
         tokio::spawn(completion_event_loop(
             replica_index,
-            vllm,
+            engine_client.clone(),
             wqe_mtx.clone(),
             cq_wqe_rx,
             cq_error_rx,
@@ -205,24 +207,30 @@ mod task_assignment {
                 Ok(permit) => {
                     if let Some((id, entry)) = queue.next_request(replica_index).await {
                         // NOTE: before-or-after atomicity to avoid RAW-like problem when using channel,
-                        //       i.e., http request is posted, but WQE has not put into channel
+                        //       i.e., request is dispatched, but WQE has not been put into channel
                         let _g = wqe_mtx.lock().await;
-                        let resp_from_vllm_client =
-                            vllm_client.add_request(id, &entry.request).await;
+                        let mut client = engine_client.lock().await;
+                        if let Err(e) = client.add_request(id, &entry.request).await {
+                            tracing::error!(
+                                "Request_{id} failed to add to engine#{replica_index}: {e}"
+                            );
+                            // Let the error propagate through the error channel
+                        }
+                        drop(client);
                         tracing::info!(
-                            "Request_{id} queued {}us, with input length {} output length {}, added to vLLM#{replica_index}",
+                            "Request_{id} queued {}us, with input length {} output length {}, added to engine#{replica_index}",
                             entry.batch_time.unwrap().duration_since(entry.queue_time).as_micros(),
                             entry.request.input_length,
                             entry.request.stopping_parameters.max_new_tokens,
                         );
                         // The receiver won't actively drop channel
-                        let _ = permit.send((entry, resp_from_vllm_client));
+                        let _ = permit.send(entry);
                     } else {
                         yield_now().await;
                     }
                 }
                 Err(SendError(_)) => {
-                    unreachable!("vLLM#{replica_index} WQ channel closed by receiver at CQ");
+                    unreachable!("engine#{replica_index} WQ channel closed by receiver at CQ");
                 }
             }
         }
@@ -233,7 +241,6 @@ mod task_assignment {
     /// their lifecycle phase as `Excepted`.
     fn on_frontend_abort(
         entries: &mut IntMap<u64, Entry>,
-        vllm_resps: &mut IntMap<u64, JoinHandle<Result<Response, VllmClientError>>>,
         cancel_req_ids: &mut Vec<u64>,
         skip_entries: &mut (Vec<u64>, Vec<Entry>),
         except_context: &mut ExtContext,
@@ -241,11 +248,6 @@ mod task_assignment {
     ) {
         while let Some(id) = cancel_req_ids.pop() {
             tracing::warn!("Request_{id} is cancelling...");
-            vllm_resps
-                .remove(&id)
-                .expect(format!("JoinHandle of Request_{} has been moved!", id).as_str())
-                .abort();
-            tracing::debug!("Request_{id} has aborted handle.");
             skip_entries.0.push(id);
             let entry = entries
                 .remove(&id)
@@ -264,7 +266,6 @@ mod task_assignment {
     /// `except_context` and marks their lifecycle phase as `Excepted`.
     async fn on_backend_fault(
         entries: &mut IntMap<u64, Entry>,
-        vllm_resps: &mut IntMap<u64, JoinHandle<Result<Response, VllmClientError>>>,
         error_rx: &mut mpsc::UnboundedReceiver<u64>,
         skip_entries: &(Vec<u64>, Vec<Entry>),
         except_context: &mut ExtContext,
@@ -274,22 +275,17 @@ mod task_assignment {
             if skip_entries.0.contains(&id) {
                 continue;
             }
-            // `response.await.unwrap()` := the spawned task nethier panics nor is not cancelled
-            // `response.await.map()` := only handles `Ok` value
-            let _ = vllm_resps.remove(&id).unwrap().await.map(|resp| {
-                tracing::info!(
-                    "Request_{id} has error {} at backend, notifying frontend...",
-                    resp.unwrap_err()
-                );
-            });
-            // NOTE: tolerent the error request occurs in the same SSE event, but no more
+            tracing::info!(
+                "Request_{id} has error at backend, notifying frontend..."
+            );
+            // NOTE: tolerant the error request occurs in the same step output, but no more
             let entry = entries
                 .remove(&id)
                 .expect(format!("Request_{} not found in entries. This is a bug.", id).as_str());
             // NOTE: skip possible `SendError`, backend resource has been freed
             let _ = entry
                 .response_tx
-                .send(Err(InferError::GenerationError("Vllm refused to serve!".to_string())));
+                .send(Err(InferError::GenerationError("Engine refused to serve!".to_string())));
             // Mark phase as excepted before moving to exception context
             if let Some(phase) = request_phases.get_mut(&id) {
                 *phase = RequestPhase::Excepted;
@@ -353,69 +349,44 @@ mod task_assignment {
 
     /// # Precondition:
     ///   + `ctx` is clean, no lock is held
-    async fn on_finish_request(
+    ///
+    /// With the trait-based EngineClient, completion is detected via
+    /// `recv_step()` reporting `is_finished=true`. No HTTP response
+    /// JoinHandle is needed.
+    fn on_finish_request(
         replica_index: usize,
         entry: Entry,
-        response: JoinHandle<Result<Response, VllmClientError>>,
         request_id: u64,
-    ) -> Option<Entry> {
+    ) {
         let id = request_id;
         tracing::info!(
-            "Vllm#{replica_index}::Request_{id} is finished generating {} tokens",
+            "engine#{replica_index}::Request_{id} is finished generating {} tokens",
             entry.generated_token_cnt
         );
-        match response.await {
-            // Spawned POST task has a return value
-            Ok(resp) => match resp {
-                // vLLM's response is OK
-                Ok(resp) => {
-                    let _generation = resp.bytes().await.unwrap();
-                    let _skip = entry.response_tx.send(Ok(InferStreamResponse::End {
-                        token: Token::default(),
-                        top_tokens: Vec::default(),
-                        generated_text: proto::GeneratedText::default(),
-                        start: entry.batch_time.unwrap(),
-                        queued: entry.queue_time,
-                        max_time_between_tokens: entry.max_time_between_tokens,
-                    }));
-                    // NOTE: skip possible `SendError`, backend resource has been freed
-                    None
-                }
-                // vLLM's response is Error
-                Err(_e) => {
-                    // NOTE: skip this error here, since inner `vllm_client` has already
-                    // put `request_id` into cancel list
-                    Some(entry)
-                }
-            },
-            // Spawned POST task is cancelled
-            Err(e) if e.is_cancelled() => {
-                tracing::info!(
-                    "Vllm#{replica_index}::Request_{id} HTTP request has been cancelled."
-                );
-                None
-            }
-            // Spawned POST task panics
-            Err(e) => {
-                tracing::error!("Vllm#{}::Request_{} join error: {}.", replica_index, id, e);
-                let _ = entry.response_tx.send(Err(InferError::GenerationError(e.to_string())));
-                None
-            }
-        }
+        let _skip = entry.response_tx.send(Ok(InferStreamResponse::End {
+            token: Token::default(),
+            top_tokens: Vec::default(),
+            generated_text: proto::GeneratedText::default(),
+            start: entry.batch_time.unwrap(),
+            queued: entry.queue_time,
+            max_time_between_tokens: entry.max_time_between_tokens,
+        }));
+        // NOTE: skip possible `SendError`, backend resource has been freed
     }
 
-    /// Poll backend instance's event stream, and enable callbacks
+    /// Poll backend engine's step outputs and enable callbacks.
+    ///
+    /// This is the core event loop that processes `EngineStepOutput` from
+    /// any backend (HTTP+SSE or ZMQ) via the `EngineClient` trait.
     async fn completion_event_loop(
         replica_index: usize,
-        vllm: VllmClient,
+        engine_client: Arc<Mutex<Box<dyn EngineClient>>>,
         wqe_mtx: Arc<Mutex<()>>,
-        mut cq_wqe_rx: Receiver<(Entry, VllmClientResp)>,
+        mut cq_wqe_rx: Receiver<Entry>,
         mut cq_error_rx: mpsc::UnboundedReceiver<u64>,
         schedule_context: Arc<Mutex<ScheduleContext>>,
     ) {
         let mut entries =
-            IntMap::with_capacity_and_hasher(256, BuildNoHashHasher::<u64>::default());
-        let mut vllm_resps =
             IntMap::with_capacity_and_hasher(256, BuildNoHashHasher::<u64>::default());
         // Request lifecycle phase tracking (debug invariant enforcement)
         let mut request_phases: IntMap<u64, RequestPhase> =
@@ -427,41 +398,29 @@ mod task_assignment {
         let mut temp_leaving_entries = (Vec::with_capacity(8), Vec::with_capacity(8));
         let mut skipped_fault_entries = (Vec::with_capacity(8), Vec::with_capacity(8));
 
-        // Init sse stream
-        let sse_client = vllm
-            .init_sse_client()
-            .await
-            .expect(format!("Vllm#{} failed to initialize metric sse!", replica_index).as_str());
-        let mut sse_stream = sse_client.stream();
+        // Main event loop: receive step outputs from the engine client
+        loop {
+            let step_result = {
+                let mut client = engine_client.lock().await;
+                client.recv_step().await
+            };
 
-        match sse_stream.next().await.unwrap() {
-            Ok(cnnt) => {
-                if let es::SSE::Connected(connection_details) = cnnt {
-                    let response = connection_details.response();
-                    assert_eq!(
-                        response.status(),
-                        200,
-                        "Vllm#{} metric sse erroneous status {}",
-                        replica_index,
-                        response.status()
-                    );
+            let m = match step_result {
+                Ok(step) => step,
+                Err(e) => {
+                    tracing::error!("engine#{} recv_step error: {}", replica_index, e);
+                    // For stream-ended errors, break out of the loop
+                    if matches!(e, crate::engine_client::EngineClientError::StreamEnded) {
+                        break;
+                    }
+                    continue;
                 }
-            }
-            Err(e) => {
-                tracing::error!("Vllm#{} metric sse error: {}", replica_index, e);
-                panic!("Vllm#{} failed to connect metric sse!", replica_index);
-            }
-        }
+            };
 
-        // Error message slot for debugging
-        let mut error_event: Option<VllmMetric> = None;
-
-        // Main event loop
-        'raise_err: while let Some(sse) = sse_stream.next().await {
             // Adds newly posted requests
             {
                 let _g = wqe_mtx.lock().await;
-                while let Ok((entry, vllm_respd)) = cq_wqe_rx.try_recv() {
+                while let Ok(entry) = cq_wqe_rx.try_recv() {
                     let rid = entry.request.request_id;
                     debug_assert!(
                         !entries.contains_key(&rid),
@@ -472,293 +431,258 @@ mod task_assignment {
                         "Request_{rid} in except_context when being inserted into entries"
                     );
                     entries.insert(rid, entry);
-                    vllm_resps.insert(rid, vllm_respd);
                     request_phases.insert(rid, RequestPhase::Waiting);
                 }
             }
-            // postcond: all requests in sse are visible to CQ
+            // postcond: all requests in step output are visible to CQ
 
-            let mut term_requests = Vec::new();
-            match sse {
-                Ok(es::SSE::Event(e)) => {
-                    let es::Event { event_type: _, data, id: _, retry: _ } = e;
-                    let m: VllmMetric = serde_json::from_str(&data).expect(
-                        format!("vLLM#{} es::Event::data = {:?}", replica_index, data).as_str(),
-                    );
-                    tracing::trace!("vLLM#{}::Event::data received {:?}", replica_index, m);
+            tracing::trace!("engine#{}::step received {:?}", replica_index, m);
 
-                    if !m.preempted_ids.is_empty() {
-                        m.preempted_ids.iter().for_each(|&id| {
-                            tracing::warn!("Request_{id} is preempted at backend!");
-                        });
+            if !m.preempted_ids.is_empty() {
+                m.preempted_ids.iter().for_each(|&id| {
+                    tracing::warn!("Request_{id} is preempted at backend!");
+                });
+            }
+
+            // fast path: update metrics
+            let tbt = Duration::from_millis(m.latency);
+            let mut metric_delta = LMetricDec::new(&tbt);
+            // NOTE: `prefill_tokens` doesn't count hit tokens, while
+            //       `all_tokens` does count hit tokens
+            metric_delta.prefill_tokens_dec = m.prefill_tokens as isize;
+            for request_status in &m.outputs {
+                let RequestStepOutput {
+                    request_id,
+                    new_token_ids: ref new_tokens,
+                    ref state,
+                    is_finished,
+                    hit_token_cnt,
+                } = *request_status;
+                match state.as_str() {
+                    "PREFILL" => {
+                        metric_delta.waiting_reqs_dec += 1;
+                        if is_finished {
+                            if let Some(entry) = entries.get_mut(&request_id) {
+                                let input_length = entry.request.input_length as isize;
+                                metric_delta.bs_dec += 1;
+                                metric_delta.all_tokens_inc -= input_length as isize;
+                            } else if let Some(entry) =
+                                // `unwrap` inside, `entry` must be either in `entries` or `except_context`
+                                except_context
+                                    .put(ExtState::Exit(request_id))
+                            {
+                                let input_length = entry.request.input_length as isize;
+                                metric_delta.bs_dec += 1;
+                                metric_delta.all_tokens_inc -= input_length as isize;
+                                // NOTE:
+                                temp_leaving_entries.0.push(request_id);
+                                temp_leaving_entries.1.push(entry);
+                            }
+                        } else {
+                            metric_delta.all_tokens_inc += new_tokens.len() as isize;
+                            let entry = entries.get_mut(&request_id).unwrap_or_else(|| {
+                                except_context.put(ExtState::Live(request_id));
+                                except_context.entries.get_mut(&request_id).unwrap()
+                            });
+                            let inc_hit_nblks = entry
+                                .block_hash_state
+                                .set_real_token_hits_get_diff(hit_token_cnt);
+                            tracing::info!(
+                                "engine#{replica_index}::Request_{} correct {} hit tokens",
+                                request_id,
+                                inc_hit_nblks
+                                    * entry.block_hash_state.get_block_size() as isize
+                            );
+                            metric_delta.prefill_tokens_dec += inc_hit_nblks
+                                * entry.block_hash_state.get_block_size() as isize;
+                            entry.append_state(new_tokens, &tbt);
+                        }
                     }
+                    "DECODE" => {
+                        if is_finished {
+                            if let Some(entry) = entries.get_mut(&request_id) {
+                                let request = &entry.request;
+                                metric_delta.bs_dec += 1;
+                                // NOTE: `generated_token_cnt` has not been appended, so just make decrement
+                                metric_delta.all_tokens_inc -= request.input_length
+                                    as isize
+                                    + entry.generated_token_cnt as isize;
+                            } else if let Some(entry) =
+                                // `unwrap` inside, `entry` must be either in `entries` or `except_context`
+                                except_context
+                                    .put(ExtState::Exit(request_id))
+                            {
+                                let request = &entry.request;
+                                metric_delta.bs_dec += 1;
+                                // NOTE: `generated_token_cnt` has not been appended, so just make decrement
+                                metric_delta.all_tokens_inc -= request.input_length
+                                    as isize
+                                    + entry.generated_token_cnt as isize;
+                                // NOTE:
+                                temp_leaving_entries.0.push(request_id);
+                                temp_leaving_entries.1.push(entry);
+                            }
+                        } else {
+                            let entry = entries.get_mut(&request_id).unwrap_or_else(|| {
+                                except_context.put(ExtState::Live(request_id));
+                                except_context.entries.get_mut(&request_id).unwrap()
+                            });
+                            entry.append_state(new_tokens, &tbt);
+                            // postcond: `Some(entry.tpot)`
+                            metric_delta.all_tokens_inc += new_tokens.len() as isize;
+                            metric_delta.tpot +=
+                                entry.time_of_per_token.unwrap().as_secs_f32();
+                        }
+                    }
+                    _ => {
+                        eprintln!("Request_{request_id} invalid state: {state}!");
+                        panic!("engine#{replica_index}::step erroneous output {:?}", m);
+                    }
+                }
+            }
+            let mut sctx = schedule_context.lock().await;
 
-                    // fast path: update metrics
-                    let tbt = Duration::from_millis(m.latency);
-                    let mut metric_delta = LMetricDec::new(&tbt);
-                    // NOTE: `prefill_tokens` dosen't count hit tokens, while
-                    //       `all_tokens` does count hit tokens
-                    metric_delta.prefill_tokens_dec = m.prefill_tokens as isize;
-                    for request_status in &m.outputs {
-                        let VllmRequestStatus {
+            // Update PrefixBlockHash
+            if !m.evicted_block_ids.is_empty() {
+                tracing::debug!("Backend removes bids {:?}", m.evicted_block_ids);
+            }
+            sctx.block_hash.remove(m.evicted_block_ids.clone());
+            for (rid, block_indices) in &m.cur_used_block_ids {
+                if block_indices.is_empty() {
+                    continue;
+                }
+                // Total backend bids
+                let entry = entries.get_mut(rid).unwrap_or_else(|| {
+                    except_context.entries.get_mut(rid).unwrap_or_else(|| {
+                        let i = temp_leaving_entries
+                            .0
+                            .iter()
+                            .position(|&eid| *rid == eid)
+                            .unwrap();
+                        temp_leaving_entries.1.get_mut(i).unwrap()
+                    })
+                });
+                tracing::debug!("Entry_{rid} update backend bids {:?}", block_indices);
+                entry.block_hash_state.set_bids(block_indices.clone());
+            }
+            for (rid, block_indices) in &m.new_block_hashes_ids {
+                if block_indices.is_empty() {
+                    continue;
+                }
+                let entry = entries.get_mut(rid).unwrap_or_else(|| {
+                    except_context.entries.get_mut(rid).unwrap_or_else(|| {
+                        let i = temp_leaving_entries
+                            .0
+                            .iter()
+                            .position(|&eid| *rid == eid)
+                            .unwrap();
+                        temp_leaving_entries.1.get_mut(i).unwrap()
+                    })
+                });
+                match entry.block_hash_state.get_onto_hashes(block_indices) {
+                    Ok(onto_hashes) => {
+                        tracing::debug!(
+                            "Entry_{rid} insert ({:?}) |-> [{:?}]",
+                            onto_hashes,
+                            block_indices
+                        );
+                        sctx.block_hash.insert(onto_hashes, block_indices.clone());
+                    }
+                    Err(backend_bids) => {
+                        let err_msg = format!("Entry_{rid} inconsistent bid: frontend marking occupied {:?} | backend newly committed {:?}", backend_bids, block_indices);
+                        // tracing::error!(err_msg);
+                        panic!("{err_msg}");
+                    }
+                }
+            }
+            // Publishes updated instance-level metric state
+            sctx.lmetric -= metric_delta;
+            drop(sctx);
+
+            // Aborted requests ACK-ed by backend
+            let term_requests = m.aborted_requests;
+
+            // slow path: pass generations
+            for request_status in m.outputs {
+                let RequestStepOutput {
+                    request_id,
+                    new_token_ids,
+                    state,
+                    is_finished,
+                    hit_token_cnt,
+                } = request_status;
+
+                // Update request lifecycle phase tracking
+                if let Some(phase) = request_phases.get_mut(&request_id) {
+                    let new_phase = phase.transition(state.as_str(), is_finished);
+                    *phase = new_phase;
+                }
+
+                match state.as_str() {
+                    "PREFILL" if entries.get(&request_id).is_some() => {
+                        let entry = entries.get_mut(&request_id).unwrap();
+                        if let Err(ExtExcept::FrontendAbort) = on_prefill(
+                            replica_index,
+                            entry,
                             request_id,
-                            new_token_ids: new_tokens,
-                            state,
-                            is_finished,
                             hit_token_cnt,
-                        } = request_status;
-                        match state.as_str() {
-                            "PREFILL" => {
-                                metric_delta.waiting_reqs_dec += 1;
-                                if *is_finished {
-                                    if let Some(entry) = entries.get_mut(request_id) {
-                                        let input_length = entry.request.input_length as isize;
-                                        metric_delta.bs_dec += 1;
-                                        metric_delta.all_tokens_inc -= input_length as isize;
-                                    } else if let Some(entry) =
-                                        // `unwrap` inside, `entry` must be either in `entries` or `except_context`
-                                        except_context
-                                            .put(ExtState::Exit(*request_id))
-                                    {
-                                        let input_length = entry.request.input_length as isize;
-                                        metric_delta.bs_dec += 1;
-                                        metric_delta.all_tokens_inc -= input_length as isize;
-                                        // NOTE:
-                                        temp_leaving_entries.0.push(*request_id);
-                                        temp_leaving_entries.1.push(entry);
-                                    }
-                                } else {
-                                    metric_delta.all_tokens_inc += new_tokens.len() as isize;
-                                    let entry = entries.get_mut(request_id).unwrap_or_else(|| {
-                                        except_context.put(ExtState::Live(*request_id));
-                                        except_context.entries.get_mut(request_id).unwrap()
-                                    });
-                                    let inc_hit_nblks = entry
-                                        .block_hash_state
-                                        .set_real_token_hits_get_diff(*hit_token_cnt);
-                                    tracing::info!(
-                                        "vLLM#{replica_index}::Request_{} correct {} hit tokens",
-                                        *request_id,
-                                        inc_hit_nblks
-                                            * entry.block_hash_state.get_block_size() as isize
-                                    );
-                                    metric_delta.prefill_tokens_dec += inc_hit_nblks
-                                        * entry.block_hash_state.get_block_size() as isize;
-                                    entry.append_state(new_tokens, &tbt);
-                                }
-                            }
-                            "DECODE" => {
-                                if *is_finished {
-                                    if let Some(entry) = entries.get_mut(request_id) {
-                                        let request = &entry.request;
-                                        metric_delta.bs_dec += 1;
-                                        // NOTE: `generated_token_cnt` has not been appeneded, so just make decrement
-                                        metric_delta.all_tokens_inc -= request.input_length
-                                            as isize
-                                            + entry.generated_token_cnt as isize;
-                                    } else if let Some(entry) =
-                                        // `unwrap` inside, `entry` must be either in `entries` or `except_context`
-                                        except_context
-                                            .put(ExtState::Exit(*request_id))
-                                    {
-                                        let request = &entry.request;
-                                        metric_delta.bs_dec += 1;
-                                        // NOTE: `generated_token_cnt` has not been appeneded, so just make decrement
-                                        metric_delta.all_tokens_inc -= request.input_length
-                                            as isize
-                                            + entry.generated_token_cnt as isize;
-                                        // NOTE:
-                                        temp_leaving_entries.0.push(*request_id);
-                                        temp_leaving_entries.1.push(entry);
-                                    }
-                                } else {
-                                    let entry = entries.get_mut(request_id).unwrap_or_else(|| {
-                                        except_context.put(ExtState::Live(*request_id));
-                                        except_context.entries.get_mut(request_id).unwrap()
-                                    });
-                                    entry.append_state(new_tokens, &tbt);
-                                    // postcond: `Some(entry.tpot)`
-                                    metric_delta.all_tokens_inc += new_tokens.len() as isize;
-                                    metric_delta.tpot +=
-                                        entry.time_of_per_token.unwrap().as_secs_f32();
-                                }
-                            }
-                            _ => {
-                                eprintln!("Request_{request_id} invalid state: {state}!");
-                                error_event = Some(m);
-                                break 'raise_err;
+                            &new_token_ids,
+                        )
+                        .await
+                        {
+                            cancel_req_ids.push(request_id);
+                        }
+                        if is_finished {
+                            let entry = entries.remove(&request_id).unwrap();
+                            request_phases.remove(&request_id);
+                            on_finish_request(
+                                replica_index,
+                                entry,
+                                request_id,
+                            );
+                            // NOTE: revokes FrontendAbort, since both channels are terminated
+                            if request_id
+                                == cancel_req_ids.last().copied().unwrap_or(!request_id)
+                            {
+                                cancel_req_ids.pop();
                             }
                         }
                     }
-                    let mut sctx = schedule_context.lock().await;
-
-                    // Update PrefixBlockHash
-                    if !m.evicted_block_ids.is_empty() {
-                        tracing::debug!("Backend removes bids {:?}", m.evicted_block_ids);
-                    }
-                    sctx.block_hash.remove(m.evicted_block_ids);
-                    for (rid, block_indices) in m.cur_used_block_ids {
-                        if block_indices.is_empty() {
-                            continue;
-                        }
-                        // Total backend bids
-                        let entry = entries.get_mut(&rid).unwrap_or_else(|| {
-                            except_context.entries.get_mut(&rid).unwrap_or_else(|| {
-                                let i = temp_leaving_entries
-                                    .0
-                                    .iter()
-                                    .position(|&eid| rid == eid)
-                                    .unwrap();
-                                temp_leaving_entries.1.get_mut(i).unwrap()
-                            })
-                        });
-                        tracing::debug!("Entry_{rid} update backend bids {:?}", block_indices);
-                        entry.block_hash_state.set_bids(block_indices);
-                    }
-                    for (rid, block_indices) in m.new_block_hashes_ids {
-                        if block_indices.is_empty() {
-                            continue;
-                        }
-                        let entry = entries.get_mut(&rid).unwrap_or_else(|| {
-                            except_context.entries.get_mut(&rid).unwrap_or_else(|| {
-                                let i = temp_leaving_entries
-                                    .0
-                                    .iter()
-                                    .position(|&eid| rid == eid)
-                                    .unwrap();
-                                temp_leaving_entries.1.get_mut(i).unwrap()
-                            })
-                        });
-                        match entry.block_hash_state.get_onto_hashes(&block_indices) {
-                            Ok(onto_hashes) => {
-                                tracing::debug!(
-                                    "Entry_{rid} insert ({:?}) |-> [{:?}]",
-                                    onto_hashes,
-                                    block_indices
-                                );
-                                sctx.block_hash.insert(onto_hashes, block_indices);
-                            }
-                            Err(backend_bids) => {
-                                let err_msg = format!("Entry_{rid} inconsistent bid: frontend marking occupied {:?} | backend newly committed {:?}", backend_bids, block_indices);
-                                // tracing::error!(err_msg);
-                                panic!("{err_msg}");
-                            }
-                        }
-                    }
-                    // Publishes updated instance-level metric state
-                    sctx.lmetric -= metric_delta;
-                    drop(sctx);
-
-                    // Aborted requests ACK-ed by backend
-                    term_requests = m.aborted_requests;
-
-                    // slow path: pass generations
-                    for request_status in m.outputs {
-                        let VllmRequestStatus {
-                            request_id,
-                            new_token_ids,
-                            state,
-                            is_finished,
-                            hit_token_cnt,
-                        } = request_status;
-
-                        // Update request lifecycle phase tracking
-                        if let Some(phase) = request_phases.get_mut(&request_id) {
-                            let new_phase = phase.transition(state.as_str(), is_finished);
-                            *phase = new_phase;
-                        }
-
-                        match state.as_str() {
-                            "PREFILL" if entries.get(&request_id).is_some() => {
-                                let entry = entries.get_mut(&request_id).unwrap();
-                                if let Err(ExtExcept::FrontendAbort) = on_prefill(
-                                    replica_index,
-                                    entry,
-                                    request_id,
-                                    hit_token_cnt,
-                                    &new_token_ids,
-                                )
+                    "DECODE" if entries.get(&request_id).is_some() => {
+                        let entry = entries.get_mut(&request_id).unwrap();
+                        if let Err(ExtExcept::FrontendAbort) =
+                            on_decode(replica_index, entry, request_id, &new_token_ids)
                                 .await
-                                {
-                                    cancel_req_ids.push(request_id);
-                                }
-                                if is_finished {
-                                    let entry = entries.remove(&request_id).unwrap();
-                                    let response = vllm_resps.remove(&request_id).unwrap();
-                                    request_phases.remove(&request_id);
-                                    if let Some(entry) = on_finish_request(
-                                        replica_index,
-                                        entry,
-                                        response,
-                                        request_id,
-                                    )
-                                    .await
-                                    {
-                                        skipped_fault_entries.0.push(request_id);
-                                        skipped_fault_entries.1.push(entry);
-                                    }
-                                    // NOTE: revokes FrontendAbort, since SSE & POST channels are both terminated
-                                    if request_id
-                                        == cancel_req_ids.last().copied().unwrap_or(!request_id)
-                                    {
-                                        cancel_req_ids.pop();
-                                    }
-                                }
-                            }
-                            "DECODE" if entries.get(&request_id).is_some() => {
-                                let entry = entries.get_mut(&request_id).unwrap();
-                                if let Err(ExtExcept::FrontendAbort) =
-                                    on_decode(replica_index, entry, request_id, &new_token_ids)
-                                        .await
-                                {
-                                    cancel_req_ids.push(request_id);
-                                }
-                                if is_finished {
-                                    let entry = entries.remove(&request_id).unwrap();
-                                    let response: VllmClientResp =
-                                        vllm_resps.remove(&request_id).unwrap();
-                                    request_phases.remove(&request_id);
-                                    if let Some(entry) = on_finish_request(
-                                        replica_index,
-                                        entry,
-                                        response,
-                                        request_id,
-                                    )
-                                    .await
-                                    {
-                                        skipped_fault_entries.0.push(request_id);
-                                        skipped_fault_entries.1.push(entry);
-                                    }
-                                    // NOTE: revokes FrontendAbort, since SSE & POST channels are both terminated
-                                    if request_id
-                                        == cancel_req_ids.last().copied().unwrap_or(!request_id)
-                                    {
-                                        cancel_req_ids.pop();
-                                    }
-                                }
-                            }
-                            "PREFILL" | "DECODE" => {
-                                debug_assert!(
-                                    except_context.entries.contains_key(&request_id)
-                                        || temp_leaving_entries.0.contains(&request_id),
-                                    "Request_{request_id} is missing!"
-                                );
-                            }
-                            _ => {
-                                eprintln!("Request_{request_id} invalid state: {state}!");
-                                unreachable!();
+                        {
+                            cancel_req_ids.push(request_id);
+                        }
+                        if is_finished {
+                            let entry = entries.remove(&request_id).unwrap();
+                            request_phases.remove(&request_id);
+                            on_finish_request(
+                                replica_index,
+                                entry,
+                                request_id,
+                            );
+                            // NOTE: revokes FrontendAbort, since both channels are terminated
+                            if request_id
+                                == cancel_req_ids.last().copied().unwrap_or(!request_id)
+                            {
+                                cancel_req_ids.pop();
                             }
                         }
                     }
-                }
-                Ok(es::SSE::Comment(c)) => {
-                    tracing::error!("Vllm#{} metric sse send comment {}", replica_index, c);
-                }
-                Ok(es::SSE::Connected(_)) => {
-                    unreachable!();
-                }
-                Err(e) => {
-                    tracing::error!("Vllm#{} metric sse error: {}", replica_index, e);
+                    "PREFILL" | "DECODE" => {
+                        debug_assert!(
+                            except_context.entries.contains_key(&request_id)
+                                || temp_leaving_entries.0.contains(&request_id),
+                            "Request_{request_id} is missing!"
+                        );
+                    }
+                    _ => {
+                        eprintln!("Request_{request_id} invalid state: {state}!");
+                        unreachable!();
+                    }
                 }
             }
 
@@ -767,7 +691,6 @@ mod task_assignment {
             // Newly canceled requests move to 1st commit phase
             on_frontend_abort(
                 &mut entries,
-                &mut vllm_resps,
                 &mut cancel_req_ids,
                 &mut skipped_fault_entries,
                 &mut except_context,
@@ -775,7 +698,6 @@ mod task_assignment {
             );
             on_backend_fault(
                 &mut entries,
-                &mut vllm_resps,
                 &mut cq_error_rx,
                 &skipped_fault_entries,
                 &mut except_context,
@@ -843,12 +765,6 @@ mod task_assignment {
                     }
                 }
             }
-        }
-
-        // Display message with erroneous event
-        if let Some(event) = error_event {
-            eprintln!("Vllm#{replica_index}::SSE erroneous event {:?}", event);
-            panic!();
         }
     }
 }
