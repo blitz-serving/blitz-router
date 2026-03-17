@@ -11,12 +11,12 @@
 #![allow(unused)]
 
 use crate::error::ClientError;
+use crate::engine_client::EngineClient;
 use crate::kvcache::{BlockHash, BlockHashState, PrefixBlockHash};
 use crate::queue::{QueuePro, TaskAssigner};
 use crate::replica::config::DisaggregationConfig;
 use crate::statistic::{statistic, increase_prefill_tokens};
 use crate::validation::{Validation, ValidationError};
-use crate::vllmlet::VllmClient;
 use crate::{
     start_disaggregation_event_loop, start_vllm_colocation_event_loop,
     ColocationController, ControllerArgs, DisaggregationController, Entry, LMetric, Model, Queue,
@@ -162,15 +162,15 @@ impl Infer {
     }
 
     pub(crate) fn create_vllm_colocation(
-        all_vllm_clients: Vec<VllmClient>,
+        all_engine_clients: Vec<Box<dyn EngineClient>>,
         block_size: usize,
         validation: Validation,
         max_batch_prefill_tokens: u32,
         max_concurrent_requests: usize,
         statistic_path: Option<String>,
     ) -> Self {
-        let all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>> = all_vllm_clients
-            .iter()
+        let num_replicas = all_engine_clients.len();
+        let all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>> = (0..num_replicas)
             .map(|_| {
                 Arc::new(Mutex::new(ScheduleContext {
                     lmetric: LMetric::default(),
@@ -180,11 +180,11 @@ impl Infer {
             })
             .collect();
 
-        let queue = TaskAssigner::new(all_vllm_clients.len(), all_schedule_contexts.clone());
+        let queue = TaskAssigner::new(num_replicas, all_schedule_contexts.clone());
 
         let controller = start_vllm_colocation_event_loop(
             queue.clone(),
-            all_vllm_clients,
+            all_engine_clients,
             all_schedule_contexts.clone(),
         );
 

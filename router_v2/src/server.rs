@@ -16,7 +16,7 @@ use crate::health::Health;
 use crate::infer::{InferError, InferResponse, InferStreamResponse};
 use crate::validation::ValidationError;
 #[cfg(feature = "vllm-backend")]
-use crate::vllmlet::VllmClient;
+use crate::engine_client::EngineClient;
 use crate::{
     BestOfSequence, CompatGenerateRequest, ControllerArgs, Deployment, Details, ErrorResponse,
     FinishReason, GenerateParameters, GenerateRequest, GenerateResponse, HubModelInfo, Infer, Info,
@@ -626,7 +626,7 @@ pub async fn run(
     max_batch_total_tokens: u32,
     max_waiting_tokens: usize,
     #[cfg(feature = "blitzllm-backend")] stubs: Vec<Stub>,
-    #[cfg(feature = "vllm-backend")] vllm_clients: Vec<VllmClient>,
+    #[cfg(feature = "colocation")] engine_clients: Vec<Box<dyn EngineClient>>,
     deployment: Deployment,
     kvcache_block_size: usize,
     config_path: String,
@@ -722,7 +722,7 @@ pub async fn run(
         }
         #[cfg(feature = "colocation")]
         Deployment::Colocation => Infer::create_vllm_colocation(
-            vllm_clients,
+            engine_clients,
             kvcache_block_size,
             validation,
             max_batch_prefill_tokens,

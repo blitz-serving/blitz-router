@@ -12,6 +12,7 @@
     feature = "impl_sllm",
     feature = "manually_scale",
     feature = "vllm-backend",
+    feature = "zmq-backend",
 )))]
 compile_error!("You must define how this system is running!");
 
@@ -46,7 +47,7 @@ compile_error!("Features 'mock_transfer' and 'enable_cache' cannot be enabled at
 const fn feat_sat_checker() {
     let serverless_llm = cfg!(feature = "impl_sllm");
     let blitz_scale = cfg!(feature = "impl_blitz");
-    if cfg!(feature = "vllm-backend") {
+    if cfg!(feature = "vllm-backend") || cfg!(feature = "zmq-backend") {
         assert!(!serverless_llm && !blitz_scale);
         return;
     }
@@ -74,6 +75,9 @@ mod replica;
 mod statistic;
 mod stub;
 mod vllmlet;
+#[cfg(feature = "zmq-backend")]
+pub mod zmq_engine;
+pub mod engine_client;
 
 pub use replica::*;
 pub use stub::*;
