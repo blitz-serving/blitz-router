@@ -88,6 +88,94 @@ mod task_assignment {
         ExtExcept, LMetricDec, Token,
     };
 
+    /// Tracks the lifecycle phase of each request within the event loop.
+    ///
+    /// # State Transition Diagram
+    ///
+    /// ```text
+    ///   (request arrives via WQ channel)
+    ///           |
+    ///           v
+    ///       Waiting
+    ///           |
+    ///           |--[SSE state="PREFILL"]--> Prefilling
+    ///           |
+    ///           v
+    ///       Prefilling
+    ///           |
+    ///           |--[SSE state="DECODE"]--> Decoding
+    ///           |--[is_finished=true]--> Finished
+    ///           |
+    ///           v
+    ///       Decoding
+    ///           |
+    ///           |--[is_finished=true]--> Finished
+    ///           |
+    ///           v
+    ///       Finished (removed from tracking)
+    /// ```
+    ///
+    /// Any phase may also transition to `Excepted` if the request enters
+    /// exception handling (frontend abort or backend fault).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RequestPhase {
+        /// Request has been submitted but no SSE status received yet.
+        Waiting,
+        /// First SSE event reported state="PREFILL".
+        Prefilling,
+        /// SSE event reported state="DECODE".
+        Decoding,
+        /// Request moved to exception handling (abort or fault).
+        Excepted,
+    }
+
+    impl RequestPhase {
+        /// Validate and apply a phase transition based on SSE-reported state.
+        /// Returns the new phase. Panics on invalid transitions in debug builds.
+        fn transition(self, sse_state: &str, is_finished: bool) -> RequestPhase {
+            match (self, sse_state) {
+                // Waiting -> Prefilling (first SSE report)
+                (RequestPhase::Waiting, "PREFILL") => {
+                    if is_finished { RequestPhase::Prefilling } else { RequestPhase::Prefilling }
+                }
+                // Prefilling -> Prefilling (continued prefill, e.g. chunked prefill)
+                (RequestPhase::Prefilling, "PREFILL") => RequestPhase::Prefilling,
+                // Waiting -> Decoding (prefill was so fast it was not observed)
+                (RequestPhase::Waiting, "DECODE") => {
+                    tracing::debug!(
+                        "Request skipped Prefilling phase (prefill not observed in SSE)"
+                    );
+                    RequestPhase::Decoding
+                }
+                // Prefilling -> Decoding (normal transition)
+                (RequestPhase::Prefilling, "DECODE") => RequestPhase::Decoding,
+                // Decoding -> Decoding (continued decode)
+                (RequestPhase::Decoding, "DECODE") => RequestPhase::Decoding,
+                // Invalid: Decoding -> Prefilling (should never happen)
+                (RequestPhase::Decoding, "PREFILL") => {
+                    debug_assert!(
+                        false,
+                        "Invalid phase transition: Decoding -> Prefilling"
+                    );
+                    // In release builds, tolerate gracefully
+                    RequestPhase::Prefilling
+                }
+                // Excepted requests should not receive phase transitions
+                (RequestPhase::Excepted, _) => {
+                    debug_assert!(
+                        false,
+                        "Phase transition on Excepted request (state={})",
+                        sse_state
+                    );
+                    RequestPhase::Excepted
+                }
+                (_, unknown) => {
+                    panic!("Unknown SSE state in phase transition: {}", unknown);
+                }
+            }
+        }
+    }
+
     /// Control the workload level of delegated instance
     pub async fn work_event_loop<Q: QueuePro>(
         replica_index: usize,
@@ -140,13 +228,16 @@ mod task_assignment {
         }
     }
 
-    /// First phase in abortion 2PC
+    /// First phase in abortion 2PC.
+    /// Moves aborted requests from `entries` into `except_context` and marks
+    /// their lifecycle phase as `Excepted`.
     fn on_frontend_abort(
         entries: &mut IntMap<u64, Entry>,
         vllm_resps: &mut IntMap<u64, JoinHandle<Result<Response, VllmClientError>>>,
         cancel_req_ids: &mut Vec<u64>,
         skip_entries: &mut (Vec<u64>, Vec<Entry>),
         except_context: &mut ExtContext,
+        request_phases: &mut IntMap<u64, RequestPhase>,
     ) {
         while let Some(id) = cancel_req_ids.pop() {
             tracing::warn!("Request_{id} is cancelling...");
@@ -159,19 +250,25 @@ mod task_assignment {
             let entry = entries
                 .remove(&id)
                 .expect(format!("Request_{} not found in entries. This is a bug.", id).as_str());
+            // Mark phase as excepted before moving to exception context
+            if let Some(phase) = request_phases.get_mut(&id) {
+                *phase = RequestPhase::Excepted;
+            }
             except_context.put(ExtState::Abort(id, entry));
         }
     }
 
-    /// Handle any request error at backend
+    /// Handle any request error at backend.
     ///
-    /// First phase in fault 2PC
+    /// First phase in fault 2PC. Moves faulted requests from `entries` into
+    /// `except_context` and marks their lifecycle phase as `Excepted`.
     async fn on_backend_fault(
         entries: &mut IntMap<u64, Entry>,
         vllm_resps: &mut IntMap<u64, JoinHandle<Result<Response, VllmClientError>>>,
         error_rx: &mut mpsc::UnboundedReceiver<u64>,
         skip_entries: &(Vec<u64>, Vec<Entry>),
         except_context: &mut ExtContext,
+        request_phases: &mut IntMap<u64, RequestPhase>,
     ) {
         while let Ok(id) = error_rx.try_recv() {
             if skip_entries.0.contains(&id) {
@@ -193,7 +290,10 @@ mod task_assignment {
             let _ = entry
                 .response_tx
                 .send(Err(InferError::GenerationError("Vllm refused to serve!".to_string())));
-            //
+            // Mark phase as excepted before moving to exception context
+            if let Some(phase) = request_phases.get_mut(&id) {
+                *phase = RequestPhase::Excepted;
+            }
             except_context.put(ExtState::Fault(id, entry));
         }
     }
@@ -317,6 +417,9 @@ mod task_assignment {
             IntMap::with_capacity_and_hasher(256, BuildNoHashHasher::<u64>::default());
         let mut vllm_resps =
             IntMap::with_capacity_and_hasher(256, BuildNoHashHasher::<u64>::default());
+        // Request lifecycle phase tracking (debug invariant enforcement)
+        let mut request_phases: IntMap<u64, RequestPhase> =
+            IntMap::with_capacity_and_hasher(256, BuildNoHashHasher::<u64>::default());
 
         // Handle frontend abortions and backend errors
         let mut cancel_req_ids = Vec::new();
@@ -360,8 +463,17 @@ mod task_assignment {
                 let _g = wqe_mtx.lock().await;
                 while let Ok((entry, vllm_respd)) = cq_wqe_rx.try_recv() {
                     let rid = entry.request.request_id;
+                    debug_assert!(
+                        !entries.contains_key(&rid),
+                        "Request_{rid} already in entries on insertion"
+                    );
+                    debug_assert!(
+                        !except_context.entries.contains_key(&rid),
+                        "Request_{rid} in except_context when being inserted into entries"
+                    );
                     entries.insert(rid, entry);
                     vllm_resps.insert(rid, vllm_respd);
+                    request_phases.insert(rid, RequestPhase::Waiting);
                 }
             }
             // postcond: all requests in sse are visible to CQ
@@ -549,6 +661,13 @@ mod task_assignment {
                             is_finished,
                             hit_token_cnt,
                         } = request_status;
+
+                        // Update request lifecycle phase tracking
+                        if let Some(phase) = request_phases.get_mut(&request_id) {
+                            let new_phase = phase.transition(state.as_str(), is_finished);
+                            *phase = new_phase;
+                        }
+
                         match state.as_str() {
                             "PREFILL" if entries.get(&request_id).is_some() => {
                                 let entry = entries.get_mut(&request_id).unwrap();
@@ -566,6 +685,7 @@ mod task_assignment {
                                 if is_finished {
                                     let entry = entries.remove(&request_id).unwrap();
                                     let response = vllm_resps.remove(&request_id).unwrap();
+                                    request_phases.remove(&request_id);
                                     if let Some(entry) = on_finish_request(
                                         replica_index,
                                         entry,
@@ -597,6 +717,7 @@ mod task_assignment {
                                     let entry = entries.remove(&request_id).unwrap();
                                     let response: VllmClientResp =
                                         vllm_resps.remove(&request_id).unwrap();
+                                    request_phases.remove(&request_id);
                                     if let Some(entry) = on_finish_request(
                                         replica_index,
                                         entry,
@@ -650,6 +771,7 @@ mod task_assignment {
                 &mut cancel_req_ids,
                 &mut skipped_fault_entries,
                 &mut except_context,
+                &mut request_phases,
             );
             on_backend_fault(
                 &mut entries,
@@ -657,6 +779,7 @@ mod task_assignment {
                 &mut cq_error_rx,
                 &skipped_fault_entries,
                 &mut except_context,
+                &mut request_phases,
             )
             .await;
             // Requests to be marked as terminated with backend abort ACK-ed
@@ -664,14 +787,18 @@ mod task_assignment {
             let mut all_tokens_inc = 0;
             term_requests
                 .into_iter()
-                .map(|term_id| except_context.put(ExtState::Term(term_id)))
+                .map(|term_id| {
+                    request_phases.remove(&term_id);
+                    except_context.put(ExtState::Term(term_id))
+                })
                 .filter_map(|x| x)
                 .for_each(|entry| {
                     bs_dec += 1;
                     all_tokens_inc -=
                         entry.request.input_length as isize + entry.generated_token_cnt as isize;
                 });
-            except_context.filter_drop().into_iter().for_each(|(_, entry)| {
+            except_context.filter_drop().into_iter().for_each(|(id, entry)| {
+                request_phases.remove(&id);
                 bs_dec += 1;
                 all_tokens_inc -=
                     entry.request.input_length as isize + entry.generated_token_cnt as isize;
@@ -687,6 +814,35 @@ mod task_assignment {
             temp_leaving_entries.1.clear();
             skipped_fault_entries.0.clear();
             skipped_fault_entries.1.clear();
+
+            // Invariant checks at event loop boundary
+            #[cfg(debug_assertions)]
+            {
+                // No request should exist in both `entries` and `except_context.entries`
+                for &id in entries.keys() {
+                    debug_assert!(
+                        !except_context.entries.contains_key(&id),
+                        "Request_{id} found in both entries and except_context.entries"
+                    );
+                }
+                // Every entry in `entries` should have a corresponding phase
+                for &id in entries.keys() {
+                    debug_assert!(
+                        request_phases.contains_key(&id),
+                        "Request_{id} in entries but missing from request_phases"
+                    );
+                }
+                // No phase should be non-Excepted for requests in except_context
+                for &id in except_context.entries.keys() {
+                    if let Some(&phase) = request_phases.get(&id) {
+                        debug_assert!(
+                            phase == RequestPhase::Excepted,
+                            "Request_{id} in except_context but phase is {:?}, expected Excepted",
+                            phase
+                        );
+                    }
+                }
+            }
         }
 
         // Display message with erroneous event
@@ -702,71 +858,152 @@ mod except_management {
 
     use crate::Entry;
 
-    use std::ops::Not;
-
+    /// Events that drive the exception state machine.
+    ///
+    /// These are the *inputs* to the state machine, not the states themselves.
+    /// Each variant triggers a well-defined transition in `ExtStInner`.
     pub(super) enum ExtState {
+        /// Frontend aborted the request; entry moves into exception tracking.
         Abort(u64, Entry),
+        /// Backend reported an error for the request; entry moves into exception tracking.
         Fault(u64, Entry),
+        /// Backend ACK-ed the abort (termination signal received).
         Term(u64),
+        /// SSE stream reported the request as finished (is_finished=true).
         Exit(u64),
+        /// SSE stream still references this request (keeps it alive one more cycle).
         Live(u64),
     }
 
+    /// Exception state machine for a single request.
+    ///
+    /// # State Transition Diagram
+    ///
+    /// ```text
+    ///   Abort(entry)          Fault(entry)
+    ///       |                      |
+    ///       v                      v
+    ///   WaitingTerm           FaultedLive
+    ///       |                      |
+    ///       |--[Live]--> WaitingTermLive    |--[end-of-cycle/no Live]--> DropReady --> (dropped)
+    ///       |                      |
+    ///       |--[Exit]--> WaitingTermExited  |--[Live]--> FaultedLive (stay)
+    ///       |                      |
+    ///       |--[Term]--> (removed,         |--[Exit]--> FaultedExited
+    ///       |             entry returned)   |
+    ///       |                              |--[Term]--> (removed, impossible for Fault)
+    ///       v
+    ///   WaitingTermLive
+    ///       |--[Exit]--> WaitingTermExited
+    ///       |--[Term]--> (removed, entry returned)
+    ///       |--[end-of-cycle]--> WaitingTerm (clear live flag)
+    ///
+    ///   WaitingTermExited
+    ///       |--[Term]--> (removed, no entry -- already taken on Exit)
+    ///
+    ///   FaultedExited
+    ///       |--[end-of-cycle]--> DropReady --> (dropped)
+    ///       (entry already taken on Exit)
+    /// ```
+    ///
+    /// The `live` flag is transient: set by `Live`, cleared at end of each SSE cycle
+    /// by `clear_live_flag()`. It prevents premature dropping of faulted requests
+    /// that are still referenced in the current SSE event.
     #[derive(Debug, PartialEq, Clone, Copy)]
-    struct ExtStInner(u64);
+    enum ExtStInner {
+        /// Frontend abort initiated; waiting for backend Term ACK.
+        /// Entry is held in `entries` map.
+        WaitingTerm { live: bool },
+
+        /// Backend fault; entry is held but may be dropped if not referenced
+        /// in the next SSE cycle.
+        /// `live=true` means the request was referenced in the current SSE event.
+        Faulted { live: bool },
+
+        /// SSE stream finished this request (Exit received).
+        /// Entry has been removed from `entries` (returned to caller on Exit).
+        /// For Abort path: still waiting for backend Term ACK.
+        /// For Fault path: will be dropped at end of cycle.
+        Exited { waiting_term: bool },
+    }
 
     impl ExtStInner {
-        /// Init state of backend error,
-        /// and is dropped if not occurs in current SSE event,
-        /// i.e., `WAIT_CLOSE` unset.
-        const DROP_NEXT: ExtStInner = ExtStInner(0);
-        /// Init state of frontend abort,
-        /// where a termination signal is expected.
-        const WAIT_TERM: ExtStInner = ExtStInner(1 << 0);
-        /// Occurs in current SSE event,
-        /// and unset this mask at the end of SSE stream.
-        const WAIT_CLOSE: ExtStInner = ExtStInner(1 << 1);
-        // SSE stream finishes, ownership has been moved
-        const EXITED: ExtStInner = ExtStInner(1 << 2);
-    }
+        /// Apply the `Live` event: mark the request as referenced in current SSE cycle.
+        fn on_live(&mut self) {
+            match self {
+                ExtStInner::WaitingTerm { live, .. } => *live = true,
+                ExtStInner::Faulted { live, .. } => *live = true,
+                ExtStInner::Exited { .. } => {
+                    // Already exited; Live after Exit is benign (SSE may still
+                    // contain references to a finished request in the same event).
+                }
+            }
+        }
 
-    impl Not for ExtStInner {
-        type Output = ExtStInner;
+        /// Apply the `Exit` event: SSE stream says the request is finished.
+        /// Returns `true` if this is the first Exit (entry should be removed and returned).
+        /// Returns `false` if already exited (double finish -- log error).
+        fn on_exit(&mut self) -> bool {
+            match *self {
+                ExtStInner::WaitingTerm { .. } => {
+                    *self = ExtStInner::Exited { waiting_term: true };
+                    true
+                }
+                ExtStInner::Faulted { .. } => {
+                    *self = ExtStInner::Exited { waiting_term: false };
+                    true
+                }
+                ExtStInner::Exited { .. } => {
+                    // Double finish -- caller should log error
+                    false
+                }
+            }
+        }
 
-        fn not(self) -> Self::Output {
-            ExtStInner(!self.0)
+        /// Apply the `Term` event: backend ACK-ed the abort.
+        /// Returns `true` if the entry is still in `entries` (not yet exited)
+        /// and should be removed and returned.
+        /// Returns `false` if the entry was already taken on Exit.
+        ///
+        /// After Term, the state entry should be removed from the states vec.
+        fn on_term(&self) -> bool {
+            match *self {
+                ExtStInner::WaitingTerm { .. } => {
+                    // Not yet exited; entry still in `entries`
+                    true
+                }
+                ExtStInner::Exited { waiting_term: true } => {
+                    // Already exited; entry was taken on Exit
+                    false
+                }
+                ExtStInner::Faulted { .. } => {
+                    debug_assert!(false, "Term received for Faulted request (should not happen)");
+                    true
+                }
+                ExtStInner::Exited { waiting_term: false } => {
+                    debug_assert!(
+                        false,
+                        "Term received for Faulted+Exited request (should not happen)"
+                    );
+                    false
+                }
+            }
+        }
+
+        /// Clear the `live` flag at the end of an SSE cycle.
+        fn clear_live_flag(&mut self) {
+            match self {
+                ExtStInner::WaitingTerm { live, .. } => *live = false,
+                ExtStInner::Faulted { live, .. } => *live = false,
+                ExtStInner::Exited { .. } => {}
+            }
+        }
+
+        /// Returns true if this entry should be dropped (faulted, not live, not exited).
+        fn is_drop_ready(&self) -> bool {
+            matches!(self, ExtStInner::Faulted { live: false })
         }
     }
-
-    macro_rules! impl_fmt_span_bit_op {
-        ($trait:ident, $func:ident, $op:tt) => {
-            impl std::ops::$trait for ExtStInner {
-                type Output = ExtStInner;
-
-                fn $func(self, rhs: Self) -> Self::Output {
-                    ExtStInner(self.0 $op rhs.0)
-                }
-            }
-        };
-    }
-
-    macro_rules! impl_fmt_span_bit_assign_op {
-        ($trait:ident, $func:ident, $op:tt) => {
-            impl std::ops::$trait for ExtStInner {
-                fn $func(&mut self, rhs: Self) {
-                    *self = ExtStInner(self.0 $op rhs.0)
-                }
-            }
-        };
-    }
-
-    impl_fmt_span_bit_op!(BitAnd, bitand, &);
-    impl_fmt_span_bit_op!(BitOr, bitor, |);
-    impl_fmt_span_bit_op!(BitXor, bitxor, ^);
-
-    impl_fmt_span_bit_assign_op!(BitAndAssign, bitand_assign, &);
-    impl_fmt_span_bit_assign_op!(BitOrAssign, bitor_assign, |);
-    impl_fmt_span_bit_assign_op!(BitXorAssign, bitxor_assign, ^);
 
     pub(super) struct ExtContext {
         pub entries: IntMap<u64, Entry>,
@@ -784,18 +1021,28 @@ mod except_management {
         pub fn put(&mut self, st: ExtState) -> Option<Entry> {
             match st {
                 ExtState::Abort(id, entry) => {
+                    debug_assert!(
+                        !self.entries.contains_key(&id),
+                        "Request_{id} already in exception context on Abort"
+                    );
                     self.entries.insert(id, entry);
-                    self.states.push((id, ExtStInner::WAIT_TERM));
+                    self.states.push((id, ExtStInner::WaitingTerm { live: false }));
                     None
                 }
                 ExtState::Fault(id, entry) => {
+                    debug_assert!(
+                        !self.entries.contains_key(&id),
+                        "Request_{id} already in exception context on Fault"
+                    );
                     self.entries.insert(id, entry);
-                    self.states.push((id, ExtStInner::WAIT_CLOSE)); // pessimistically wait 1 cycle
+                    // Pessimistically mark as live for the current cycle;
+                    // if not refreshed by Live next cycle, becomes drop-ready.
+                    self.states.push((id, ExtStInner::Faulted { live: true }));
                     None
                 }
                 ExtState::Live(id) => {
                     if let Some((_, st)) = self.states.iter_mut().find(|(eid, _)| *eid == id) {
-                        *st |= ExtStInner::WAIT_CLOSE;
+                        st.on_live();
                     }
                     None
                 }
@@ -804,58 +1051,55 @@ mod except_management {
                         format!("Request_{} not captured in exception context!", id).as_str(),
                     );
                     let (_, st) = self.states.get_mut(i).unwrap();
-                    if *st & ExtStInner::EXITED == ExtStInner::EXITED {
+                    if st.on_exit() {
+                        tracing::info!("Request_{id} exits exception context.");
+                        self.entries.remove(&id)
+                    } else {
                         tracing::error!("Request_{id} double finish!");
                         None
-                    } else {
-                        tracing::info!("Request_{id} exits exception context.");
-                        *st |= ExtStInner::EXITED;
-                        self.entries.remove(&id)
                     }
                 }
                 ExtState::Term(id) => {
                     let i = self.states.iter().position(|(eid, _)| *eid == id).expect(
                         format!("Request_{} not captured in exception context!", id).as_str(),
                     );
-                    let (_, st) = self.states.get_mut(i).unwrap();
-                    if *st & ExtStInner::EXITED == ExtStInner::DROP_NEXT {
+                    let (_, st) = self.states.get(i).unwrap();
+                    let has_entry = st.on_term();
+                    if has_entry {
                         tracing::info!("Request_{id} terminates in exception context.");
-                        // not yet Exit => Term -> safely drop
-                        self.states.remove(i);
-                        self.entries.remove(&id)
                     } else {
                         tracing::debug!("Request_{id} terminates after exited.");
-                        // Exit => Term
-                        self.states.remove(i);
-                        None
                     }
+                    self.states.remove(i);
+                    if has_entry { self.entries.remove(&id) } else { None }
                 }
             }
         }
 
+        /// End-of-cycle cleanup: drop faulted requests that are no longer referenced
+        /// by SSE, and clear the live flag for all remaining entries.
         pub fn filter_drop(&mut self) -> Vec<(u64, Entry)> {
             let mut rem = Vec::new();
-            let mut drop = Vec::new();
-            // clear WAIT_CLOSE bitmask
-            let unset_mask = !ExtStInner::WAIT_CLOSE;
+            let mut dropped = Vec::new();
 
-            self.states.iter().for_each(|&(id, st)| {
-                if st == ExtStInner::DROP_NEXT {
+            for &(id, st) in self.states.iter() {
+                if st.is_drop_ready() {
                     tracing::info!("Request_{id} is dropped from exception context.");
-                    drop.push((
+                    dropped.push((
                         id,
                         self.entries.remove(&id).expect(
                             format!("Request_{} not captured in exception context!", id).as_str(),
                         ),
                     ));
                 } else {
-                    // {WAIT_TERM | EXITED, WAIT_TERM, DROP_NEXT} | WAIT_CLOSE
-                    rem.push((id, st & unset_mask));
+                    let mut next_st = st;
+                    next_st.clear_live_flag();
+                    rem.push((id, next_st));
                 }
-            });
+            }
 
             self.states = rem;
-            drop
+            dropped
         }
     }
 }
