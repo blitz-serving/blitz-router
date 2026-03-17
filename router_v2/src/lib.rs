@@ -69,6 +69,7 @@ const fn feat_sat_checker() {
 const VALID_FEATURE: () = feat_sat_checker();
 
 mod kvcache;
+mod policies;
 mod replica;
 mod statistic;
 mod stub;
@@ -88,7 +89,8 @@ pub mod server;
 mod validation;
 
 use infer::Infer;
-use queue::{Entry, Queue};
+use policies::Entry;
+use queue::Queue;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validation::{Validation, ValidationError};
