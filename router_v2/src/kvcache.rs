@@ -802,7 +802,7 @@ mod hashtable_block_hash {
     #[derive(Debug, Default)]
     pub(crate) struct BlockHashState {
         /// Calculated block hash values
-        block_hashes: Vec<u64>,
+        pub block_hashes: Vec<u64>,
         /// Materialized block index at backend
         /// NOTE: since this request is still active, the backend should preserve these blocks
         block_indices: Vec<u64>,
@@ -885,7 +885,7 @@ mod hashtable_block_hash {
             self.get_onto_hashes(new_backend_bids)
         }
 
-        pub fn append_tokens(&mut self, new_tokens: &[u32]) {
+        pub fn append_tokens(&mut self, new_tokens: &[u32]) -> Option<u64> {
             self.token_in_last_block.extend_from_slice(new_tokens);
             if self.token_in_last_block.len() >= self.block_size {
                 let block = self.token_in_last_block.drain(..self.block_size).collect::<Vec<_>>();
@@ -894,7 +894,9 @@ mod hashtable_block_hash {
                 let bytes: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len) };
                 self.prev_hash = xxh3_64_with_seed(bytes, self.prev_hash);
                 self.block_hashes.push(self.prev_hash);
+                return Some(self.prev_hash);
             }
+            None
         }
 
         /// Set block indices occupied at backends as backup

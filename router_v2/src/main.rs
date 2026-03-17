@@ -22,9 +22,10 @@ use opentelemetry::sdk::Resource;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use router_v2::error::ClientError;
+use router_v2::simulator::config::SimulationConfig;
 use router_v2::{
-    parse_deployment, server, ControllerArgs, Deployment, HubModelInfo, Model,
-    TokenizerRender, VllmClient, MAX_BLOCKS_PER_REPLICA,
+    parse_deployment, server, ControllerArgs, Deployment, HubModelInfo, Model, TokenizerRender,
+    VllmClient, MAX_BLOCKS_PER_REPLICA,
 };
 use thiserror::Error;
 #[allow(unused_imports)]
@@ -34,7 +35,6 @@ use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
-
 /// App Configuration
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -149,11 +149,13 @@ struct Args {
     #[clap(long, default_value_t = 0)]
     mock_transfer_millis: u64,
 
-    #[clap(long, default_value_t = 1)]
-    tensor_parallel_size: usize,
-
+    // #[clap(long, default_value_t = 1)]
+    // tensor_parallel_size: usize,
     #[clap(long, default_value_t = 16)]
     kvcache_block_size: usize,
+
+    #[command(flatten)]
+    simulator_config: SimulationConfig,
 }
 
 fn main() -> Result<(), RouterError> {
@@ -211,11 +213,12 @@ fn main() -> Result<(), RouterError> {
         num_gpus_per_node,
         mock_load_millis,
         mock_transfer_millis,
-        tensor_parallel_size,
-
+        // tensor_parallel_size,
         model_name,
         model_path,
         parameter_size,
+
+        simulator_config,
     } = args;
 
     // Validate args
@@ -284,7 +287,7 @@ fn main() -> Result<(), RouterError> {
 
     let server_future = async {
         // Move _guard inside an async block to enable OTLP
-        // TODO@Healthcliff-Ding, #24 this may cause tracing guard abort earlier 
+        // TODO@Healthcliff-Ding, #24 this may cause tracing guard abort earlier
         let _guard = init_logging(otlp_endpoint, json_output, log_path);
 
         if tokenizer.is_none() {
@@ -367,7 +370,8 @@ fn main() -> Result<(), RouterError> {
             num_gpus_per_node,
             mock_transfer_millis,
             mock_load_millis,
-            tensor_parallel_size,
+            // tensor_parallel_size,
+            tensor_parallel_size: 1,
         };
 
         assert!(
@@ -457,6 +461,7 @@ fn main() -> Result<(), RouterError> {
             false,
             disaggregation_controller_args,
             statistic_path,
+            simulator_config,
         )
         .await?;
         Ok(())

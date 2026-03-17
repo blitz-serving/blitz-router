@@ -1,16 +1,20 @@
 use crate::infer::{InferError, InferStreamResponse};
 use crate::kvcache::{BlockHash, BlockHashState};
 use crate::queue::queue_plus_plus::{AssignScore, NumHitKvBlock, QueuePlusPlus};
+use crate::simulator::batch::Request as SimulatorRequest;
+use crate::simulator::metrics::SystemMetrics;
 use crate::validation::ValidGenerateRequest;
 use crate::{select_best_replica, step, step_w_sampler, weigh_replica};
-use crate::{LMetricInc, ScheduleContext};
-
+use crate::{LMetricInc, ScheduleContext, SystemMetric};
 use rand::{thread_rng, Rng};
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::AddAssign;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
+#[cfg(feature = "slo-serve-impl-q")]
+use std::usize::MAX;
 
 use nohash_hasher::{BuildNoHashHasher, IntMap};
 use pb::generate::v2::*;
@@ -47,9 +51,9 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
-    pub fn append_state(&mut self, new_tokens: &Vec<u32>, tbt: &Duration) {
+    pub fn append_state(&mut self, new_tokens: &Vec<u32>, tbt: &Duration) -> Option<u64> {
         self.append_tbt_to_tpot(tbt);
-        self.block_hash_state.append_tokens(new_tokens);
+        self.block_hash_state.append_tokens(new_tokens)
     }
 
     fn append_tbt_to_tpot(&mut self, tbt: &Duration) {
@@ -268,6 +272,10 @@ mod queue_plus_plus {
                 select_best_replica!($ty; $entry, $qctx, $all_sctx).await
             {
                 let request = &$entry.request;
+                #[cfg(feature = "simulator-cap")]
+                let ScheduleContext { lmetric, block_hash, simulator } =
+                    &mut *$all_sctx[replica_idx].lock().await;
+                #[cfg(not(feature = "simulator-cap"))]
                 let ScheduleContext { lmetric, block_hash } =
                     &mut *$all_sctx[replica_idx].lock().await;
 
@@ -293,6 +301,37 @@ mod queue_plus_plus {
                 };
                 (*lmetric) += metric_inc;
 
+                tracing::info!("Assigning Request_{} to Replica#{}", request.request_id, replica_idx);
+                #[cfg(feature = "simulator-cap")]{
+                    simulator.add_request(SimulatorRequest {
+                        request_id: request.request_id,
+                        prompt_len: request.input_length,
+                        generation_len: Some(request.stopping_parameters.max_new_tokens),
+                        processed_tokens: 0,
+                        arrival_time: Some(SystemTime::now()),
+                        num_token_per_output: 1,
+                        hashes: Some($entry.block_hash_state.block_hashes.clone()),
+
+                        max_generation_len: 16384,
+                        hit_token_cnt: 0,
+                        ttft: None,
+                    }).await;
+                }
+
+        //         let result: SystemMetrics = sctx.simulator.query_sim(SimulatorRequest {
+        //     request_id: entry.request.request_id,
+        //     prompt_len: entry.request.input_length,
+        //     generation_len: Some(entry.request.stopping_parameters.max_new_tokens),
+        //     processed_tokens: 0,
+        //     arrival_time: None,
+        //     num_token_per_output: 1,
+        //     hashes: Some(entry.block_hash_state.block_hashes.clone()),
+
+        //     max_generation_len: 16384,
+        //     hit_token_cnt: 0,
+        //     ttft: None,
+        // });
+
                 Some(replica_idx)
             } else {
                 tracing::info!("Cluster overloaded!");
@@ -317,7 +356,11 @@ mod queue_plus_plus {
                     $sampler(all_scores, lower_bound, upper_bound);
 
                 let request = &$entry.request;
+                #[cfg(not(feature = "simulator-cap"))]
                 let ScheduleContext { lmetric, block_hash } =
+                    &mut *$all_sctx[replica_idx].lock().await;
+                #[cfg(feature = "simulator-cap")]
+                let ScheduleContext { lmetric, block_hash, simulator } =
                     &mut *$all_sctx[replica_idx].lock().await;
 
                 let hit_nblks: usize = if hit_nblks.is_none() {
@@ -333,6 +376,7 @@ mod queue_plus_plus {
                     "vLLM#{replica_idx}::Request_{} hits {hit_nblks} kvcache blocks",
                     request.request_id
                 );
+                tracing::info!("Assigning Request_{} to Replica#{}", request.request_id, replica_idx);
 
                 let metric_inc = LMetricInc {
                     bs_inc: 1,
@@ -341,7 +385,21 @@ mod queue_plus_plus {
                     all_tokens_inc: request.input_tokens.len(),
                 };
                 (*lmetric) += metric_inc;
+                #[cfg(feature = "simulator-cap")]{
+                    simulator.add_request(SimulatorRequest {
+                        request_id: request.request_id,
+                        prompt_len: request.input_length,
+                        generation_len: Some(request.stopping_parameters.max_new_tokens),
+                        processed_tokens: 0,
+                        arrival_time: Some(SystemTime::now()),
+                        num_token_per_output: 1,
+                        hashes: Some($entry.block_hash_state.block_hashes.clone()),
 
+                        max_generation_len: 16384,
+                        hit_token_cnt: 0,
+                        ttft: None,
+                    }).await;
+                }
                 Some(replica_idx)
             }
         }};
@@ -457,9 +515,20 @@ macro_rules! impl_queue_with_task {
                                 step!($t; entry, queue_context.clone(), all_schedule_context)
                             {
                                 let entry = uncommit_buffer.pop_front().unwrap();
+                                // all_schedule_context[replica_idx].lock().await.simulator.add_request(SimulatorRequest {
+                                //     request_id: entry.request.request_id,
+                                //     prompt_len: entry.request.input_length,
+                                //     generation_len: Some(entry.request.stopping_parameters.max_new_tokens),
+                                //     processed_tokens: 0,
+                                //     arrival_time: None,
+                                //     num_token_per_output: 1,
+                                //     hashes: Some(entry.block_hash_state.block_hashes.clone()),
+
+                                // });
                                 all_commit_req_buffers[replica_idx]
                                     .push_back((entry.request.request_id, entry));
                                 queue_context += (replica_idx, num_replicas);
+
                             }
                         }
                         QueueCommandPro::NextBatch(replica_idx, response_sender) => {
@@ -859,6 +928,10 @@ impl DbgRRQueue {
                     queue_ctx.next_replica_id = (queue_ctx.next_replica_id + 1) % num_replicas;
                     // brief: calculate and apply metric increments here
                     {
+                        #[cfg(feature = "simulator-cap")]
+                        let ScheduleContext { lmetric, block_hash, simulator } =
+                            &mut *all_schedule_context[replica_idx].lock().await;
+                        #[cfg(not(feature = "simulator-cap"))]
                         let ScheduleContext { lmetric, block_hash } =
                             &mut *all_schedule_context[replica_idx].lock().await;
                         let hit_nblks = block_hash.get(entry.block_hash_state.get_hashes());
@@ -975,6 +1048,7 @@ impl DbgRRQueue {
 /// ------ ······· DbgRRQueue ······· ------ ///
 
 /// ----- Round Robin Queue as Demo ----- ///
+#[cfg(feature = "round-robin-q")]
 #[derive(Clone)]
 pub(crate) struct RRQueue {
     queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
@@ -989,6 +1063,7 @@ pub(crate) struct RRQueue {
 /// step#3: define the eligibility rule: if ineligible, return None; else return metric
 ///
 /// finally, use 2 impl macros for automatic code generation
+#[cfg(feature = "round-robin-q")]
 impl QueuePlusPlus for RRQueue {
     type QueueContext = RRContext;
     type Measure = ();
@@ -1008,19 +1083,24 @@ impl QueuePlusPlus for RRQueue {
     }
 }
 
+#[cfg(feature = "round-robin-q")]
 impl_queue_pro_trait!(RRQueue);
+#[cfg(feature = "round-robin-q")]
 impl_queue_with_task!(RRQueue);
 /// ------ ······· RRQueue ······· ------ ///
 
 /// ------ Join Bounded Most Hit Queue ------ ///
+#[cfg(feature = "bounded-most-hit-q")]
 use crate::WAITINGT_PREFILL_TOKEN_BOUND;
 
+#[cfg(feature = "bounded-most-hit-q")]
 #[derive(Clone)]
 pub(super) struct JBoundMostHitQ2 {
     /// Channel to communicate with the background queue task
     queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
 }
 
+#[cfg(feature = "bounded-most-hit-q")]
 impl QueuePlusPlus for JBoundMostHitQ2 {
     type QueueContext = EmptyContext;
     type Measure = usize;
@@ -1048,17 +1128,21 @@ impl QueuePlusPlus for JBoundMostHitQ2 {
     }
 }
 
+#[cfg(feature = "bounded-most-hit-q")]
 impl_queue_pro_trait!(JBoundMostHitQ2);
+#[cfg(feature = "bounded-most-hit-q")]
 impl_queue_with_task!(JBoundMostHitQ2);
 /// ------ ······· JBMHQueue ······· ------ ///
 
 /// ---- Least Prefill Tokens Queue ----- ///
+#[cfg(feature = "least-wait-token-q")]
 #[derive(Clone)]
 pub(super) struct JLeastWaitTokenQ {
     /// Channel to communicate with the background queue task
     queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
 }
 
+#[cfg(feature = "least-wait-token-q")]
 impl QueuePlusPlus for JLeastWaitTokenQ {
     type QueueContext = EmptyContext;
     type Measure = usize;
@@ -1086,16 +1170,20 @@ impl QueuePlusPlus for JLeastWaitTokenQ {
     }
 }
 
+#[cfg(feature = "least-wait-token-q")]
 impl_queue_pro_trait!(JLeastWaitTokenQ);
+#[cfg(feature = "least-wait-token-q")]
 impl_queue_with_task!(JLeastWaitTokenQ);
 
 /// ------ Join Shortest Queue Tuple ------ ///
+#[cfg(feature = "join-shortest-q-tuple")]
 #[derive(Clone)]
 pub(super) struct JShortestQTuple {
     /// Channel to communicate with the background queue task
     queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
 }
 
+#[cfg(feature = "join-shortest-q-tuple")]
 impl QueuePlusPlus for JShortestQTuple {
     type QueueContext = EmptyContext;
     type Measure = (usize, usize);
@@ -1117,18 +1205,75 @@ impl QueuePlusPlus for JShortestQTuple {
     }
 }
 
+#[cfg(feature = "join-shortest-q-tuple")]
 impl_queue_pro_trait!(JShortestQTuple);
+#[cfg(feature = "join-shortest-q-tuple")]
 impl_queue_with_task!(JShortestQTuple);
 
+/// ------ Join Shortest Queue ttft ------ ///
+#[derive(Clone)]
+#[cfg(feature = "join-shortest-q-ttft")]
+pub(super) struct JSQTTFTQueue {
+    /// Channel to communicate with the background queue task
+    queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
+}
+
+#[cfg(feature = "join-shortest-q-ttft")]
+impl QueuePlusPlus for JSQTTFTQueue {
+    type QueueContext = EmptyContext;
+    type Measure = u32;
+    type Weight = ();
+
+    fn eligible_with_kvblock_hit(
+        _replica_id: usize,
+        entry: &Entry,
+        _qctx: &Self::QueueContext,
+        sctx: &ScheduleContext,
+    ) -> Option<(AssignScore<Self::Measure, ()>, Option<NumHitKvBlock>)> {
+        // use futures::executor::block_on;
+
+        let ScheduleContext { lmetric, block_hash, simulator } = sctx;
+        let result: SystemMetrics = sctx.simulator.query_sim(SimulatorRequest {
+            request_id: entry.request.request_id,
+            prompt_len: entry.request.input_length,
+            generation_len: Some(entry.request.stopping_parameters.max_new_tokens),
+            processed_tokens: 0,
+            arrival_time: Some(SystemTime::now()),
+            num_token_per_output: 1,
+            hashes: Some(entry.block_hash_state.block_hashes.clone()),
+
+            max_generation_len: 16384,
+            hit_token_cnt: 0,
+            ttft: None,
+        });
+        let mut ttft = *result.ttft.last().unwrap();
+        ttft = if ttft.is_finite() && ttft > 0.0 { ttft } else { f32::INFINITY };
+
+        tracing::info!(
+            "Request_{} estimated ttft: {:.2} ms on Vllm#{}",
+            entry.request.request_id,
+            ttft,
+            _replica_id
+        );
+        Some((AssignScore::Least(ttft as u32), None))
+    }
+}
+
+#[cfg(feature = "join-shortest-q-ttft")]
+impl_queue_pro_trait!(JSQTTFTQueue);
+#[cfg(feature = "join-shortest-q-ttft")]
+impl_queue_with_task!(JSQTTFTQueue);
 /// --------------------------------- ///
 
 /// ------ Join Shortest Queue Weight ------ ///
+#[cfg(feature = "join-shortest-q-weight")]
 #[derive(Clone)]
 pub(super) struct JShortestQWeight {
     /// Channel to communicate with the background queue task
     queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
 }
 
+#[cfg(feature = "join-shortest-q-weight")]
 impl QueuePlusPlus for JShortestQWeight {
     type QueueContext = EmptyContext;
     type Measure = usize;
@@ -1150,12 +1295,497 @@ impl QueuePlusPlus for JShortestQWeight {
     }
 }
 
+#[cfg(feature = "join-shortest-q-weight")]
 impl_queue_pro_trait!(JShortestQWeight);
+#[cfg(feature = "join-shortest-q-weight")]
 impl_queue_with_task!(JShortestQWeight);
 
 /// --------------------------------- ///
 
+/// -------- SLO Serve's Impl --------- ///
+#[cfg(feature = "slo-serve-impl-q")]
+impl NaiiveLattice for (usize) {
+    fn meet(&self, other: &Self) -> Self {
+        (*self.min(other))
+    }
+
+    fn join(&self, other: &Self) -> Self {
+        (*self.max(other))
+    }
+
+    const TOP: Self = MAX;
+    const BOTTOM: Self = 0;
+}
+
+#[cfg(feature = "slo-serve-impl-q")]
+pub fn slo_sampler(
+    // (replica_id, (ttft_headroom, tpot_headroom), hit_nblks)
+    all_scores: Vec<(usize, (usize), Option<usize>)>,
+    lower_bound: (usize),
+    upper_bound: (usize),
+    // (replica_id, hitnblks)
+) -> (usize, Option<usize>) {
+    let mut rng = rand::thread_rng();
+    let mut without_violation =
+        all_scores.iter().filter(|(_, score, _)| *score == 0).collect::<Vec<_>>();
+
+    if !without_violation.is_empty() {
+        // all replicas are within SLOs, uniformly sample one
+        let choice_idx = rng.gen_range(0..without_violation.len());
+        let (replica_id, _, hit_nblks) = without_violation[choice_idx];
+        (*replica_id, *hit_nblks)
+    } else {
+        // all replicas violate SLOs, weighted sample one
+        all_scores
+            .iter()
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|a| return (a.0, a.2))
+            .unwrap()
+    }
+}
+
+#[cfg(feature = "slo-serve-impl-q")]
+#[derive(Clone)]
+pub(super) struct SloServeImplQ {
+    /// Channel to communicate with the background queue task
+    queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
+}
+
+#[cfg(feature = "slo-serve-impl-q")]
+impl QueuePlusPlus for SloServeImplQ {
+    type QueueContext = EmptyContext;
+    type Measure = ();
+    type Weight = (usize);
+
+    fn eligible_with_kvblock_hit(
+        _replica_id: usize,
+        entry: &Entry,
+        _qctx: &Self::QueueContext,
+        sctx: &ScheduleContext,
+    ) -> Option<(AssignScore<(), Self::Weight>, Option<NumHitKvBlock>)> {
+        use crate::TPOT_SLO;
+
+        let ScheduleContext { lmetric, block_hash, simulator } = sctx;
+
+        let systemMetric = simulator.query_sim(SimulatorRequest {
+            request_id: entry.request.request_id,
+            prompt_len: entry.request.input_length,
+            generation_len: Some(entry.request.stopping_parameters.max_new_tokens),
+            processed_tokens: 0,
+            arrival_time: Some(SystemTime::now()),
+            num_token_per_output: 1,
+            hashes: Some(entry.block_hash_state.block_hashes.clone()),
+
+            max_generation_len: 16384,
+            hit_token_cnt: 0,
+            ttft: None,
+        });
+        let mut ttft = *systemMetric.ttft.last().unwrap();
+        ttft = if ttft.is_finite() && ttft > 0.0 { ttft } else { f32::INFINITY };
+
+        tracing::info!(
+            "Request_{} estimated ttft: {:.2} ms on Vllm#{}",
+            entry.request.request_id,
+            ttft,
+            _replica_id
+        );
+
+        let tpot_violation = lmetric
+            .req_tpot
+            .iter()
+            .filter(|(_, value)| (**value) * 1_000.0 > TPOT_SLO as f32)
+            .count();
+        let ttft_violation = systemMetric.ttft.iter().filter(|&&v| v > TTFT_SLO as f32).count();
+        let violation_weight = ttft_violation + tpot_violation;
+        tracing::debug!(
+            "Request_{} on Vllm#{} ttft_violation: {}, tpot_violation: {}, total violation weight: {}",
+            entry.request.request_id,
+            _replica_id,
+            ttft_violation,
+            tpot_violation,
+            violation_weight
+        );
+        Some((AssignScore::Weighted((violation_weight)), None))
+    }
+}
+
+#[cfg(feature = "slo-serve-impl-q")]
+impl_queue_pro_trait!(SloServeImplQ);
+#[cfg(feature = "slo-serve-impl-q")]
+impl_queue_with_task_and_sampler!(SloServeImplQ, slo_sampler);
+
+/// -------- LLM-d Impl --------- ///
+use crate::{LLMD_ALPHA, LLMD_GAMMA, TPOT_SLO, TTFT_SLO};
+
+#[cfg(feature = "llmd-impl-q")]
+impl NaiiveLattice for (f32, f32) {
+    fn meet(&self, other: &Self) -> Self {
+        (self.0.min(other.0), self.1.min(other.1))
+    }
+
+    fn join(&self, other: &Self) -> Self {
+        (self.0.max(other.0), self.1.max(other.1))
+    }
+
+    const TOP: Self = (f32::INFINITY, f32::INFINITY);
+    const BOTTOM: Self = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+}
+
+/// 归一化到 [lower, upper] 区间
+fn normalize(value: f32, min_v: f32, max_v: f32, lower: f32, upper: f32) -> f32 {
+    if !value.is_finite() || !min_v.is_finite() || !max_v.is_finite() {
+        return (lower + upper) * 0.5;
+    }
+
+    if (max_v - min_v).abs() < f32::EPSILON {
+        // 所有值都一样，统一给中间值
+        return (lower + upper) * 0.5;
+    }
+
+    let mut t = (value - min_v) / (max_v - min_v);
+    if t < 0.0 {
+        t = 0.0;
+    } else if t > 1.0 {
+        t = 1.0;
+    }
+    lower + t * (upper - lower)
+}
+
+/// 带权随机，从 weights 中选一个索引
+fn weighted_choice(weights: &[f32], rng: &mut impl Rng) -> usize {
+    let total: f32 = weights.iter().copied().sum();
+    if total <= 0.0 {
+        // 退化：全是 0 权重，退回到均匀随机
+        return rng.gen_range(0..weights.len());
+    }
+
+    let mut r = rng.gen::<f32>() * total;
+    for (i, w) in weights.iter().enumerate() {
+        r -= *w;
+        if r <= 0.0 {
+            return i;
+        }
+    }
+    // 理论上不会到这儿，防御性写法
+    weights.len() - 1
+}
+
+#[cfg(feature = "llmd-impl-q")]
+pub fn llmd_sampler(
+    // (replica_id, (ttft_headroom, tpot_headroom), hit_nblks)
+    all_scores: Vec<(usize, (f32, f32), Option<usize>)>,
+    lower_bound: (f32, f32),
+    upper_bound: (f32, f32),
+    // (replica_id, hitnblks)
+) -> (usize, Option<usize>) {
+    assert!(!all_scores.is_empty(), "llmd_sampler called with empty all_scores");
+
+    let mut rng = thread_rng();
+
+    // 1. 按 headroom 正负分桶：
+    //    ttft >= 0 且 tpot >= 0 认为是 positive bucket，其余为 negative bucket
+    let mut positive = Vec::new();
+    let mut negative = Vec::new();
+
+    for (id, (ttft_hr, tpot_hr), hit) in all_scores.into_iter() {
+        if ttft_hr >= 0.0 && tpot_hr >= 0.0 {
+            positive.push((id, (ttft_hr, tpot_hr), hit));
+        } else {
+            negative.push((id, (ttft_hr, tpot_hr), hit));
+        }
+    }
+
+    // 2. 先做 cross-bucket 选择：99% 走 positive，1% 走 negative
+    let choose_positive = if !positive.is_empty() && !negative.is_empty() {
+        rng.gen::<f32>() < 0.99
+    } else if !positive.is_empty() {
+        true
+    } else {
+        // 没有 positive，只能走 negative（上层可在外面再接 fallback 逻辑）
+        false
+    };
+
+    if choose_positive {
+        // 3. Positive bucket：按 headroom 加权随机（spread 策略）
+        // 3.1 找出 TTFT/TPOT headroom 的 min/max，用于归一化
+
+        let (min_ttft, max_ttft, min_tpot, max_tpot) = positive.iter().fold(
+            (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY),
+            |(min_ttft, max_ttft, min_tpot, max_tpot), (_, (ttft_hr, tpot_hr), _)| {
+                (
+                    min_ttft.min(*ttft_hr),
+                    max_ttft.max(*ttft_hr),
+                    min_tpot.min(*tpot_hr),
+                    max_tpot.max(*tpot_hr),
+                )
+            },
+        );
+
+        // 3.2 计算 blendedScore，并作为权重（headroom 越大权重越高 → spread）
+        let mut weights = Vec::with_capacity(positive.len());
+        for (_, (ttft_hr, tpot_hr), _) in positive.iter() {
+            let norm_ttft = normalize(*ttft_hr, min_ttft, max_ttft, 0.0, 1.0);
+            let norm_tpot = normalize(*tpot_hr, min_tpot, max_tpot, 0.0, 1.0);
+
+            let blended = LLMD_ALPHA * norm_ttft + (1.0 - LLMD_ALPHA) * norm_tpot;
+
+            // spread：headroom 越大，权重越大
+            let weight = blended.max(0.0);
+            weights.push(weight);
+        }
+        tracing::debug!("Positive bucket blended scores: {:?}", weights);
+
+        let idx = weighted_choice(&weights, &mut rng);
+        let (id, _, hit) = positive[idx];
+        (id, hit)
+    } else {
+        // 4.2 分别找出 TTFT/TPOT deficit 的 min/max（只在有非零 deficit 的子集上计算）
+        let mut min_ttft_def = f32::INFINITY;
+        let mut max_ttft_def = f32::NEG_INFINITY;
+        let mut min_tpot_def = f32::INFINITY;
+        let mut max_tpot_def = f32::NEG_INFINITY;
+        let mut ttft_defs = Vec::new();
+        let mut tpot_defs = Vec::new();
+        for (_, (ttft_hr, tpot_hr), _) in negative.iter() {
+            let ttft_def = (-*ttft_hr).max(0.0); // headroom -> deficit
+            let tpot_def = (-*tpot_hr).max(0.0);
+
+            ttft_defs.push(ttft_def);
+            tpot_defs.push(tpot_def);
+
+            if ttft_def > 0.0 {
+                min_ttft_def = min_ttft_def.min(ttft_def);
+                max_ttft_def = max_ttft_def.max(ttft_def);
+            }
+            if tpot_def > 0.0 {
+                min_tpot_def = min_tpot_def.min(tpot_def);
+                max_tpot_def = max_tpot_def.max(tpot_def);
+            }
+        }
+
+        // 4.3 计算 blendedBadness，然后把「越小越好」转成「越大越好」的权重
+        let mut weights = Vec::with_capacity(negative.len());
+        for i in 0..negative.len() {
+            let ttft_def = ttft_defs[i];
+            let tpot_def = tpot_defs[i];
+
+            let norm_ttft_def = if ttft_def > 0.0 {
+                normalize(ttft_def, min_ttft_def, max_ttft_def, 0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            let norm_tpot_def = if tpot_def > 0.0 {
+                normalize(tpot_def, min_tpot_def, max_tpot_def, 0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            let blended_bad = LLMD_GAMMA * norm_ttft_def + (1.0 - LLMD_GAMMA) * norm_tpot_def;
+
+            // badness 越小，权重越大：
+            // 先找所有 blended_bad 的最大值，再做 (max_bad - bad)
+            weights.push(blended_bad);
+        }
+        tracing::debug!("Negative bucket blended badness: {:?}", weights);
+
+        let max_bad = weights.iter().copied().fold(f32::NEG_INFINITY, f32::max).max(0.0); // 至少 0
+
+        let weights: Vec<f32> =
+            weights.into_iter().map(|b| (max_bad - b).max(0.0) + f32::EPSILON).collect();
+
+        let idx = weighted_choice(&weights, &mut rng);
+        let (id, _, hit) = negative[idx];
+        (id, hit)
+    }
+}
+
+#[cfg(feature = "llmd-impl-q")]
+#[derive(Clone)]
+pub(super) struct LLMDImplQ {
+    /// Channel to communicate with the background queue task
+    queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
+}
+
+#[cfg(feature = "llmd-impl-q")]
+impl QueuePlusPlus for LLMDImplQ {
+    type QueueContext = EmptyContext;
+    type Measure = ();
+    type Weight = (f32, f32);
+
+    fn eligible_with_kvblock_hit(
+        _replica_id: usize,
+        entry: &Entry,
+        _qctx: &Self::QueueContext,
+        sctx: &ScheduleContext,
+    ) -> Option<(AssignScore<(), Self::Weight>, Option<NumHitKvBlock>)> {
+        let ScheduleContext { lmetric, block_hash, simulator } = sctx;
+
+        let systemMetric = simulator.query_sim(SimulatorRequest {
+            request_id: entry.request.request_id,
+            prompt_len: entry.request.input_length,
+            generation_len: Some(entry.request.stopping_parameters.max_new_tokens),
+            processed_tokens: 0,
+            arrival_time: Some(SystemTime::now()),
+            num_token_per_output: 1,
+            hashes: Some(entry.block_hash_state.block_hashes.clone()),
+
+            max_generation_len: 16384,
+            hit_token_cnt: 0,
+            ttft: None,
+        });
+
+        let ttft_headroom = TTFT_SLO - systemMetric.ttft.last().unwrap();
+        let tpot_headroom = TPOT_SLO - lmetric.tpot * 1_000.0;
+        let mut ttft = *systemMetric.ttft.last().unwrap();
+        ttft = if ttft.is_finite() && ttft > 0.0 { ttft } else { f32::INFINITY };
+
+        tracing::info!(
+            "Request_{} estimated ttft: {:.2} ms on Vllm#{}",
+            entry.request.request_id,
+            ttft,
+            _replica_id
+        );
+        Some((AssignScore::Weighted((ttft_headroom, tpot_headroom)), None))
+    }
+}
+
+#[cfg(feature = "llmd-impl-q")]
+impl_queue_pro_trait!(LLMDImplQ);
+#[cfg(feature = "llmd-impl-q")]
+impl_queue_with_task_and_sampler!(LLMDImplQ, llmd_sampler);
+
+/// -------- Poly-Serve Impl --------- ///
+
+#[cfg(feature = "poly-serve-impl-q")]
+impl NaiiveLattice for (f32, bool, usize) {
+    fn meet(&self, other: &Self) -> Self {
+        *self
+    }
+
+    fn join(&self, other: &Self) -> Self {
+        *self
+    }
+
+    const TOP: Self = (f32::INFINITY, false, 0);
+    const BOTTOM: Self = (f32::NEG_INFINITY, false, 0);
+}
+
+#[cfg(feature = "poly-serve-impl-q")]
+fn poly_serve_sampler(
+    // (replica_id, (ttft_headroom, tpot_headroom), hit_nblks)
+    all_scores: Vec<(usize, (f32, bool, usize), Option<usize>)>,
+    lower_bound: (f32, bool, usize),
+    upper_bound: (f32, bool, usize),
+    // (replica_id, hitnblks)
+) -> (usize, Option<usize>) {
+    // get satisfied replicas: bs > threshold && no tpot violation
+    tracing::debug!("All replicas scores: {:?}", all_scores);
+    let satisfied_replica = all_scores
+        .iter()
+        .filter(|(_, (tpot, tpot_violation, bs), _)| {
+            !tpot_violation && *bs > POLYSERVE_BS_THRESHOLD
+        })
+        .collect::<Vec<_>>();
+
+    tracing::debug!("Satisfied replicas: {:?}", satisfied_replica);
+    match satisfied_replica.is_empty() {
+        // get from satisfied replicas, max tpot but not violation
+        false => {
+            // sample from satisfied replicas
+            return satisfied_replica
+                .iter()
+                .max_by(|a, b| a.1 .0.partial_cmp(&b.1 .0).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(replica_id, _, hit_nblks)| (*replica_id, *hit_nblks))
+                .unwrap();
+        }
+        _ => {}
+    }
+
+    let mut rng = thread_rng();
+    // sample from replicas that bs <= threshold
+    let unutilized_replica = all_scores
+        .iter()
+        .filter(|(_, (_, _, bs), _)| *bs <= POLYSERVE_BS_THRESHOLD)
+        .collect::<Vec<_>>();
+
+    tracing::debug!("Unutilized replicas: {:?}", unutilized_replica);
+    match unutilized_replica.is_empty() {
+        // get from unutilized replicas, max bs
+        false => {
+            let idx = rng.gen_range(0..unutilized_replica.len());
+            let (replica_id, _, hit_nblks) = &unutilized_replica[idx];
+            return (*replica_id, *hit_nblks);
+        }
+        _ => {}
+    }
+
+    // sample from all replicas if no satisfied replicas
+    let idx = rng.gen_range(0..all_scores.len());
+    let (replica_id, _, hit_nblks) = &all_scores[idx];
+    (*replica_id, *hit_nblks)
+}
+
+#[cfg(feature = "poly-serve-impl-q")]
+#[derive(Clone)]
+pub(super) struct PolyServeImplQ {
+    /// Channel to communicate with the background queue task
+    queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
+}
+
+use crate::{POLYSERVE_BS_THRESHOLD, TPOT_THRESHOLD};
+
+#[cfg(feature = "poly-serve-impl-q")]
+impl QueuePlusPlus for PolyServeImplQ {
+    type QueueContext = EmptyContext;
+    type Measure = ();
+    type Weight = (f32, bool, usize);
+
+    fn eligible_with_kvblock_hit(
+        _replica_id: usize,
+        entry: &Entry,
+        _qctx: &Self::QueueContext,
+        sctx: &ScheduleContext,
+    ) -> Option<(AssignScore<(), Self::Weight>, Option<NumHitKvBlock>)> {
+        let ScheduleContext { lmetric, block_hash, simulator } = sctx;
+        let systemMetric = simulator.query_sim(SimulatorRequest {
+            request_id: entry.request.request_id,
+            prompt_len: entry.request.input_length,
+            generation_len: Some(entry.request.stopping_parameters.max_new_tokens),
+            processed_tokens: 0,
+            arrival_time: Some(SystemTime::now()),
+            num_token_per_output: 1,
+            hashes: Some(entry.block_hash_state.block_hashes.clone()),
+
+            max_generation_len: 16384,
+            hit_token_cnt: 0,
+            ttft: None,
+        });
+
+        let tpot_violation = lmetric.tpot * 1_000.0 > TPOT_SLO;
+        let ttft_violation = systemMetric.ttft.iter().any(|&v| v > TTFT_SLO as f32);
+        let slo_violation = tpot_violation || ttft_violation;
+
+        let mut ttft = *systemMetric.ttft.last().unwrap();
+        ttft = if ttft.is_finite() && ttft > 0.0 { ttft } else { f32::INFINITY };
+
+        tracing::info!(
+            "Request_{} estimated ttft: {:.2} ms on Vllm#{}",
+            entry.request.request_id,
+            ttft,
+            _replica_id
+        );
+        Some((AssignScore::Weighted((lmetric.tpot * 1_000.0, slo_violation, lmetric.bs)), None))
+    }
+}
+
+#[cfg(feature = "poly-serve-impl-q")]
+impl_queue_pro_trait!(PolyServeImplQ);
+#[cfg(feature = "poly-serve-impl-q")]
+impl_queue_with_task_and_sampler!(PolyServeImplQ, poly_serve_sampler);
+
 /// -------- Bailian's Impl --------- ///
+#[cfg(feature = "bailian-impl-q")]
 use crate::{BAILIAN_ALPHA, BAILIAN_BETA, BAILIAN_GAMMA};
 
 impl NaiiveLattice for (f32, f32, f32) {
@@ -1171,12 +1801,14 @@ impl NaiiveLattice for (f32, f32, f32) {
     const BOTTOM: Self = (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
 }
 
+#[cfg(feature = "bailian-impl-q")]
 #[derive(Clone)]
 pub(super) struct BailianImplQ {
     /// Channel to communicate with the background queue task
     queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
 }
 
+#[cfg(feature = "bailian-impl-q")]
 fn bailian_sampler(
     all_scores: Vec<(usize, (f32, f32, f32), Option<usize>)>,
     lower_bound: (f32, f32, f32),
@@ -1223,6 +1855,7 @@ fn bailian_sampler(
     ret
 }
 
+#[cfg(feature = "bailian-impl-q")]
 impl QueuePlusPlus for BailianImplQ {
     type QueueContext = EmptyContext;
     type Measure = ();
@@ -1248,18 +1881,22 @@ impl QueuePlusPlus for BailianImplQ {
     }
 }
 
+#[cfg(feature = "bailian-impl-q")]
 impl_queue_pro_trait!(BailianImplQ);
+#[cfg(feature = "bailian-impl-q")]
 impl_queue_with_task_and_sampler!(BailianImplQ, bailian_sampler);
 /// --------------------------------- ///
 
 /// -------- Random Weighted -------- ///
 
+#[cfg(feature = "random-q")]
 #[derive(Clone)]
 pub(super) struct RandomQ {
     /// Channel to communicate with the background queue task
     queue_sender: mpsc::UnboundedSender<QueueCommandPro>,
 }
 
+#[cfg(feature = "random-q")]
 impl QueuePlusPlus for RandomQ {
     type QueueContext = EmptyContext;
     type Measure = ();
@@ -1276,6 +1913,7 @@ impl QueuePlusPlus for RandomQ {
     }
 }
 
+#[cfg(feature = "random-q")]
 fn random_sampler(
     all_scores: Vec<(usize, (), Option<usize>)>, // (replica_id, Weight, kvcache_hit)
     _lower_bound: (),
@@ -1287,7 +1925,9 @@ fn random_sampler(
     (id, hit)
 }
 
+#[cfg(feature = "random-q")]
 impl_queue_pro_trait!(RandomQ);
+#[cfg(feature = "random-q")]
 impl_queue_with_task_and_sampler!(RandomQ, random_sampler);
 /// --------------------------------- ///
 
@@ -1651,3 +2291,15 @@ pub(crate) use JShortestQWeight as TaskAssigner;
 pub(crate) use RRQueue as TaskAssigner;
 #[cfg(feature = "random-q")]
 pub(crate) use RandomQ as TaskAssigner;
+
+#[cfg(feature = "join-shortest-q-ttft")]
+pub(crate) use JSQTTFTQueue as TaskAssigner;
+
+#[cfg(feature = "slo-serve-impl-q")]
+pub(crate) use SloServeImplQ as TaskAssigner;
+
+#[cfg(feature = "llmd-impl-q")]
+pub(crate) use LLMDImplQ as TaskAssigner;
+
+#[cfg(feature = "poly-serve-impl-q")]
+pub(crate) use PolyServeImplQ as TaskAssigner;

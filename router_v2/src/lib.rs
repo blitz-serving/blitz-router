@@ -70,6 +70,7 @@ const VALID_FEATURE: () = feat_sat_checker();
 
 mod kvcache;
 mod replica;
+pub mod simulator;
 mod statistic;
 mod stub;
 mod vllmlet;

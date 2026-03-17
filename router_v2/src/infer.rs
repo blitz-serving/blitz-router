@@ -14,13 +14,15 @@ use crate::error::ClientError;
 use crate::kvcache::{BlockHash, BlockHashState, PrefixBlockHash};
 use crate::queue::{QueuePro, TaskAssigner};
 use crate::replica::config::DisaggregationConfig;
-use crate::statistic::{statistic, increase_prefill_tokens};
+use crate::simulator::config::SimulationConfig;
+use crate::simulator::Simulator;
+use crate::statistic::{increase_prefill_tokens, statistic};
 use crate::validation::{Validation, ValidationError};
 use crate::vllmlet::VllmClient;
 use crate::{
-    start_disaggregation_event_loop, start_vllm_colocation_event_loop,
-    ColocationController, ControllerArgs, DisaggregationController, Entry, LMetric, Model, Queue,
-    ScheduleContext, Stub, Token, KV_BLOCK_SIZE,
+    start_disaggregation_event_loop, start_vllm_colocation_event_loop, ColocationController,
+    ControllerArgs, DisaggregationController, Entry, LMetric, Model, Queue, ScheduleContext, Stub,
+    Token, KV_BLOCK_SIZE,
 };
 
 use crate::{GenerateRequest, PrefillToken};
@@ -167,15 +169,26 @@ impl Infer {
         validation: Validation,
         max_batch_prefill_tokens: u32,
         max_concurrent_requests: usize,
+        simulator_config: Arc<SimulationConfig>,
         statistic_path: Option<String>,
     ) -> Self {
+        let predictor_arc = Arc::new(Box::new(crate::simulator::predictor::LlamaPredictor::new(
+            simulator_config.clone(),
+        )) as Box<dyn crate::simulator::predictor::Predictor>);
         let all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>> = all_vllm_clients
             .iter()
-            .map(|_| {
+            .enumerate()
+            .map(|(instance_id, _)| {
                 Arc::new(Mutex::new(ScheduleContext {
                     lmetric: LMetric::default(),
                     // FIXME(@Healthcliff-Ding): a hack for Qwen2.5-7B
                     block_hash: PrefixBlockHash::new(83000 + 1),
+                    #[cfg(feature = "simulator-cap")]
+                    simulator: Simulator::new(
+                        simulator_config.clone(),
+                        predictor_arc.clone(),
+                        instance_id,
+                    ),
                 }))
             })
             .collect();
@@ -397,10 +410,10 @@ impl Infer {
                     result_start = Some(start);
                     result_queued = Some(queued);
                     result_max_time_between_tokens = Some(max_time_between_tokens);
-                    // Removes a dummy startup duration. 
+                    // Removes a dummy startup duration.
                     //
                     // I guess the origin TGI designs a debug backdoor to visualize prefilled logits
-                    // similar to the training process in `enum::Prefill`. However, we pack `enum::Prefill` 
+                    // similar to the training process in `enum::Prefill`. However, we pack `enum::Prefill`
                     // and `enum::Intermediate` together.
                     time_between_tokens.remove(0);
                     output_length = result_tokens.len();
@@ -435,7 +448,7 @@ impl Infer {
                     .cloned()
                     .unwrap_or(Duration::from_micros(0));
                 result_max_time_between_tokens = Some(time_between_tokens.last().cloned().unwrap());
-                
+
                 let len = time_between_tokens.len();
                 avg_time_between_tokens = time_between_tokens.iter().sum::<Duration>() / len as u32;
                 p90_time_between_tokens = time_between_tokens[(len as f32 * 0.9) as usize];

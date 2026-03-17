@@ -1,12 +1,12 @@
 use crate::{
     queue::TaskAssigner,
+    simulator::{self, batch::Request, config::SimulationConfig, Simulator},
     vllmlet::{VllmClient, VllmClientError},
     LMetric, ScheduleContext, THROTTLE_THLD, TPOT_THRESHOLD, TPS_THRESHOLD,
 };
 use reqwest::Response;
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 use tokio::{sync::Mutex, task::JoinHandle};
-
 pub(crate) struct ColocationController {
     pub all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>>,
     pub batching_queue: TaskAssigner,
@@ -36,7 +36,6 @@ pub(crate) fn start_vllm_colocation_event_loop(
             all_schedule_contexts[replica_index].clone(),
         ));
     }
-
     let controller = ColocationController { batching_queue: queue, all_schedule_contexts };
     Arc::new(controller)
 }
@@ -76,7 +75,7 @@ mod task_assignment {
     use tokio::time::Duration;
 
     use core::panic;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::SystemTime};
 
     use super::except_management::{ExtContext, ExtState};
     use super::{ScheduleContext, VllmClientResp};
@@ -84,6 +83,7 @@ mod task_assignment {
         infer::{InferError, InferStreamResponse},
         kvcache::BlockHash,
         queue::{Entry, QueuePro},
+        simulator::{batch::Request, Simulator},
         vllmlet::{VllmClient, VllmClientError, VllmMetric, VllmRequestStatus},
         ExtExcept, LMetricDec, Token,
     };
@@ -102,13 +102,14 @@ mod task_assignment {
         // Init completion queue poller
         let cq_error_rx = vllm_client.get_error_rx();
         let vllm = vllm_client.clone();
+        let scdc_clone = schedule_context.clone();
         tokio::spawn(completion_event_loop(
             replica_index,
             vllm,
             wqe_mtx.clone(),
             cq_wqe_rx,
             cq_error_rx,
-            schedule_context,
+            scdc_clone,
         ));
 
         // flag for logging
@@ -119,6 +120,28 @@ mod task_assignment {
                         // NOTE: before-or-after atomicity to avoid RAW-like problem when using channel,
                         //       i.e., http request is posted, but WQE has not put into channel
                         let _g = wqe_mtx.lock().await;
+                        // schedule_context
+                        //     .lock()
+                        //     .await
+                        //     .simulator
+                        //     .add_request(Request {
+                        //         request_id: entry.request.request_id,
+                        //         prompt_len: entry.request.input_length,
+                        //         generation_len: Some(
+                        //             entry.request.stopping_parameters.max_new_tokens,
+                        //         ),
+                        //         processed_tokens: 0,
+                        //         arrival_time: Some(SystemTime::now()),
+                        //         num_token_per_output: 1,
+                        //         hashes: Some(entry.block_hash_state.block_hashes.clone()),
+                        //         max_generation_len: entry
+                        //             .request
+                        //             .stopping_parameters
+                        //             .max_new_tokens,
+                        //         hit_token_cnt: 0,
+                        //         ttft: None,
+                        //     })
+                        //     .await;
                         let resp_from_vllm_client =
                             vllm_client.add_request(id, &entry.request).await;
                         tracing::info!(
@@ -370,7 +393,7 @@ mod task_assignment {
             match sse {
                 Ok(es::SSE::Event(e)) => {
                     let es::Event { event_type: _, data, id: _, retry: _ } = e;
-                    let m: VllmMetric = serde_json::from_str(&data).expect(
+                    let mut m: VllmMetric = serde_json::from_str(&data).expect(
                         format!("vLLM#{} es::Event::data = {:?}", replica_index, data).as_str(),
                     );
                     tracing::trace!("vLLM#{}::Event::data received {:?}", replica_index, m);
@@ -387,13 +410,16 @@ mod task_assignment {
                     // NOTE: `prefill_tokens` dosen't count hit tokens, while
                     //       `all_tokens` does count hit tokens
                     metric_delta.prefill_tokens_dec = m.prefill_tokens as isize;
-                    for request_status in &m.outputs {
+                    for request_status in &mut m.outputs {
                         let VllmRequestStatus {
                             request_id,
                             new_token_ids: new_tokens,
                             state,
                             is_finished,
                             hit_token_cnt,
+                            prev_computed_tokens: _,
+                            new_block_hash,
+                            ttft: _,
                         } = request_status;
                         match state.as_str() {
                             "PREFILL" => {
@@ -432,7 +458,7 @@ mod task_assignment {
                                     );
                                     metric_delta.prefill_tokens_dec += inc_hit_nblks
                                         * entry.block_hash_state.get_block_size() as isize;
-                                    entry.append_state(new_tokens, &tbt);
+                                    *new_block_hash = entry.append_state(new_tokens, &tbt);
                                 }
                             }
                             "DECODE" => {
@@ -464,11 +490,17 @@ mod task_assignment {
                                         except_context.put(ExtState::Live(*request_id));
                                         except_context.entries.get_mut(request_id).unwrap()
                                     });
-                                    entry.append_state(new_tokens, &tbt);
+                                    *new_block_hash = entry.append_state(new_tokens, &tbt);
+
                                     // postcond: `Some(entry.tpot)`
                                     metric_delta.all_tokens_inc += new_tokens.len() as isize;
                                     metric_delta.tpot +=
                                         entry.time_of_per_token.unwrap().as_secs_f32();
+                                    #[cfg(feature = "slo-serve-impl-q")]
+                                    metric_delta.req_tpot.insert(
+                                        *request_id,
+                                        entry.time_of_per_token.unwrap().as_secs_f32(),
+                                    );
                                 }
                             }
                             _ => {
@@ -480,6 +512,10 @@ mod task_assignment {
                     }
                     let mut sctx = schedule_context.lock().await;
 
+                    #[cfg(feature = "simulator-cap")]
+                    {
+                        sctx.simulator.sync(m.clone()).await;
+                    }
                     // Update PrefixBlockHash
                     if !m.evicted_block_ids.is_empty() {
                         tracing::debug!("Backend removes bids {:?}", m.evicted_block_ids);
@@ -548,6 +584,9 @@ mod task_assignment {
                             state,
                             is_finished,
                             hit_token_cnt,
+                            prev_computed_tokens: _,
+                            new_block_hash,
+                            ttft: _,
                         } = request_status;
                         match state.as_str() {
                             "PREFILL" if entries.get(&request_id).is_some() => {

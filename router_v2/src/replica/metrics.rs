@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use crate::{kvcache::PrefixBlockHash, KV_BLOCK_SIZE};
+use crate::{kvcache::PrefixBlockHash, simulator::Simulator, KV_BLOCK_SIZE};
 
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -194,13 +194,20 @@ pub(crate) static BAILIAN_ALPHA: f32 = 0.33; // prefix cache hit block
 pub(crate) static BAILIAN_BETA: f32 = 0.33; // num requests on instance
 pub(crate) static BAILIAN_GAMMA: f32 = 0.33; // num tokens on instance
 
+pub(crate) static LLMD_ALPHA: f32 = 0.8;
+pub(crate) static LLMD_GAMMA: f32 = 0.8;
+
+pub(crate) static TTFT_SLO: f32 = 4_000.0; // in milisecond
+pub(crate) static TPOT_SLO: f32 = 50.0; // in milisecond
+
+pub(crate) static POLYSERVE_BS_THRESHOLD: usize = 10;
+
 fn serialize_f32_3<S>(x: &f32, s: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
     s.serialize_str(&format!("{:.3}", x))
 }
-
 #[derive(Debug, Serialize)]
 pub(crate) struct LMetric {
     /// Active request number, comform with Bailian's terminology.
@@ -229,6 +236,9 @@ pub(crate) struct LMetric {
     /// Number of token prefilled per milisecond, an estimation, just work around
     #[serde(skip_serializing)]
     pub prefill_token_freq: f32,
+    #[cfg(feature = "slo-serve-impl-q")]
+    // TODO
+    pub req_tpot: HashMap<u64, f32>,
 }
 
 impl Default for LMetric {
@@ -244,6 +254,9 @@ impl Default for LMetric {
             tbt: 0.,
             time_of_left_prefill: f32::default(),
             prefill_token_freq: f32::default(),
+
+            #[cfg(feature = "slo-serve-impl-q")]
+            req_tpot: HashMap::new(),
         }
     }
 }
@@ -282,6 +295,9 @@ pub(crate) struct LMetricDec {
     /// New TPOT, calculated delta iteratively, and derive requestwise
     /// ✓
     pub tpot: f32,
+
+    #[cfg(feature = "slo-serve-impl-q")]
+    pub req_tpot: HashMap<u64, f32>,
 }
 
 impl LMetricDec {
@@ -293,6 +309,8 @@ impl LMetricDec {
             all_tokens_inc: 0,
             tbt: tbt.as_secs_f32(),
             tpot: 0.,
+            #[cfg(feature = "slo-serve-impl-q")]
+            req_tpot: HashMap::new(),
         }
     }
 }
@@ -350,6 +368,11 @@ impl SubAssign<LMetricDec> for LMetric {
         // Replacements
         // TPOT
         self.tpot = rhs.tpot / self.bs as f32;
+        #[cfg(feature = "slo-serve-impl-q")]
+        {
+            self.req_tpot = rhs.req_tpot;
+        }
+
         // TPS: wrap around new 1 second interval
         let end = tokio::time::Instant::now();
         let d = tokio::time::Duration::from_secs(1);
@@ -387,6 +410,8 @@ impl AddAssign<LMetricInc> for LMetric {
 pub(crate) struct ScheduleContext {
     pub lmetric: LMetric,
     pub block_hash: PrefixBlockHash,
+    #[cfg(feature = "simulator-cap")]
+    pub simulator: Simulator,
 }
 
 // ----------------------------------- //

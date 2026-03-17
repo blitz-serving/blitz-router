@@ -149,7 +149,7 @@ impl VllmClient {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct VllmMetric {
     pub prefill_tokens: usize,
     pub prefill_token_budget: usize,
@@ -160,18 +160,40 @@ pub(crate) struct VllmMetric {
     pub evicted_block_ids: Vec<u64>,
     pub cur_used_block_ids: IntMap<u64, Vec<u64>>,
     pub new_block_hashes_ids: IntMap<u64, Vec<u64>>,
-    pub op_exec_log: Option<String>,
     pub preempted_ids: Vec<u64>,
+    pub op_exec_log: Option<String>,
     pub aborted_requests: Vec<u64>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+impl VllmMetric {
+    pub fn new() -> Self {
+        VllmMetric {
+            prefill_tokens: 0,
+            prefill_token_budget: 0,
+            latency: 0,
+            outputs: Vec::new(),
+            new_block_hashes: Vec::new(),
+            evicted_block_hashes: Vec::new(),
+            evicted_block_ids: Vec::new(),
+            cur_used_block_ids: IntMap::default(),
+            new_block_hashes_ids: IntMap::default(),
+            preempted_ids: Vec::new(),
+            op_exec_log: None,
+            aborted_requests: Vec::new(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct VllmRequestStatus {
     pub request_id: u64,
     pub new_token_ids: Vec<u32>,
     pub state: String,
     pub is_finished: bool,
     pub hit_token_cnt: u64,
+    pub prev_computed_tokens: u32,
+    pub new_block_hash: Option<u64>,
+    pub ttft: Option<f64>,
 }
 
 #[allow(unused)]

@@ -64,7 +64,7 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 minijinja = { version = "2.10.2", features = ["loader"] }
 minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 smallvec = { version = "1.15.1" }
-
+crossbeam = "0.8"
 [build-dependencies]
 vergen = { version = "8.2.5", features = ["build", "git", "gitcl"] }
 
@@ -119,6 +119,11 @@ least-wait-token-q = []
 bailian-impl-q = []
 join-shortest-q-tuple = []
 join-shortest-q-weight = []
+join-shortest-q-ttft = ["simulator-cap"]
+slo-serve-impl-q = ["simulator-cap"]
+poly-serve-impl-q = ["simulator-cap"]
+llmd-impl-q = ["simulator-cap"]
+simulator-cap = []
 
 stochastic-schedule = []
 determinent-schedule = []

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["tokenizer", "router_v2", "request-sim", "rust-grpc", "rust-proto"]
+members = ["tokenizer", "router_v2", "router-v3", "request-sim", "rust-grpc", "rust-proto"]
 
 [workspace.package]
 version = "0.1.0"

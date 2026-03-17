@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::health::Health;
 use crate::infer::{InferError, InferResponse, InferStreamResponse};
+use crate::simulator::config::SimulationConfig;
 use crate::validation::ValidationError;
 #[cfg(feature = "vllm-backend")]
 use crate::vllmlet::VllmClient;
@@ -641,6 +642,7 @@ pub async fn run(
     manually_modify_state_enabled: bool,
     controller_args: ControllerArgs,
     statistic_path: Option<String>,
+    simulator_config: SimulationConfig,
 ) -> Result<(), axum::BoxError> {
     // OpenAPI documentation
     #[derive(OpenApi)]
@@ -698,6 +700,7 @@ pub async fn run(
 
     let config_str = std::fs::read_to_string(config_path).expect("Failed to read config file");
 
+    let simulator_config = Arc::new(simulator_config);
     let infer = match deployment {
         #[cfg(feature = "disaggregation")]
         Deployment::Disaggregation => {
@@ -727,6 +730,7 @@ pub async fn run(
             validation,
             max_batch_prefill_tokens,
             max_concurrent_requests,
+            simulator_config,
             statistic_path,
         ),
     };
