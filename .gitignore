@@ -34,3 +34,4 @@ output/
 
 # Profiling
 *.nsys-rep
+formal/tlaplus/states/
