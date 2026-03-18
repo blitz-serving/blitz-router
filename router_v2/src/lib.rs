@@ -70,6 +70,8 @@ const fn feat_sat_checker() {
 const VALID_FEATURE: () = feat_sat_checker();
 
 mod kvcache;
+#[cfg(any(test, kani))]
+mod radixtrie;
 mod policies;
 mod replica;
 mod statistic;

@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4c2232bf45e6d03e5e1259c119ae42855bc5139c898fc610d58dbe4530bb5c7d # shrinks to hashes = [1, 1]
+cc bb8d9a67793615d13c4ba592f6c5b3ad6fd7db2783bcc4cda3931b20ada0a02a # shrinks to ops = [Insert { hashes: [0, 0], len: 2 }, Insert { hashes: [0], len: 1 }, Insert { hashes: [0], len: 1 }, Insert { hashes: [0], len: 1 }, Insert { hashes: [0], len: 1 }]
+cc 3def94a748878d05cdcbfc80c6f8d57a9b39ef488f09ca1145797eb0e831b8c4 # shrinks to seqs = [[0, 2]], queries = [[2]]
+cc 2a590882b713754b9fd8313fded264fd9f91f155d1d997018b558171ec7504b0 # shrinks to seqs = [[7843], [0, 7843]]
