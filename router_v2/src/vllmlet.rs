@@ -1,4 +1,4 @@
-use crate::{kvcache::BackendBlockHash, validation::ValidGenerateRequest, ChatMessage};
+use crate::{kvcache::BackendBlockHash, validation::ValidGenerateRequest};
 use axum::body::Bytes;
 use eventsource_client as es;
 use futures::{stream::FusedStream, StreamExt};
@@ -64,20 +64,22 @@ impl VllmClient {
     }
 
     /// event loop assigns task to this vllm instance
+    /// Sends pre-tokenized token IDs to /v1/completions — tokenization happens
+    /// exactly once in the router, the engine receives token IDs directly.
     pub(crate) async fn add_request(
         &self,
         id: u64,
         request: &ValidGenerateRequest,
     ) -> JoinHandle<Result<Response, VllmClientError>> {
         let request2vllm = Request2Vllm {
-            messages: request.messages.clone(),
+            prompt: request.input_tokens.clone(),
             model: self.model_name.clone(),
             stream: false,
             max_tokens: Some(request.stopping_parameters.max_new_tokens),
             min_tokens: Some(request.stopping_parameters.max_new_tokens),
             temperature: None,
         };
-        self.send_request("/v1/chat/completions", id, json!(request2vllm)).await
+        self.send_request("/v1/completions", id, json!(request2vllm)).await
     }
 
     /// XXX: just a work around!
@@ -103,7 +105,7 @@ impl VllmClient {
         let error_tx = self.error_req_ids_tx.clone();
 
         tokio::spawn(async move {
-            tracing::debug!("Request_{id} about to POST to chat/compleiton ...");
+            tracing::debug!("Request_{id} about to POST to completions ...");
             match request.send().await {
                 Ok(response) => {
                     if !response.status().is_success() {
@@ -151,27 +153,46 @@ impl VllmClient {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct VllmMetric {
+    #[serde(default)]
     pub prefill_tokens: usize,
+    #[serde(default)]
     pub prefill_token_budget: usize,
+    #[serde(default)]
     pub latency: u64,
+    #[serde(default)]
     pub outputs: Vec<VllmRequestStatus>,
+    #[serde(default)]
     pub new_block_hashes: Vec<BackendBlockHash>,
+    #[serde(default)]
     pub evicted_block_hashes: Vec<BackendBlockHash>,
+    #[serde(default)]
     pub evicted_block_ids: Vec<u64>,
+    #[serde(default)]
     pub cur_used_block_ids: IntMap<u64, Vec<u64>>,
+    #[serde(default)]
     pub new_block_hashes_ids: IntMap<u64, Vec<u64>>,
     pub op_exec_log: Option<String>,
+    #[serde(default)]
     pub preempted_ids: Vec<u64>,
+    #[serde(default)]
     pub aborted_requests: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct VllmRequestStatus {
     pub request_id: u64,
+    #[serde(default)]
     pub new_token_ids: Vec<u32>,
+    #[serde(default = "default_state")]
     pub state: String,
+    #[serde(default)]
     pub is_finished: bool,
+    #[serde(default)]
     pub hit_token_cnt: u64,
+}
+
+fn default_state() -> String {
+    "DECODE".to_string()
 }
 
 #[allow(unused)]
@@ -268,10 +289,12 @@ fn parse_json_inner(jstr: &str) -> Result<Option<(String, Option<String>)>, serd
 
 #[derive(Serialize, Clone)]
 struct Request2Vllm {
-    messages: Vec<ChatMessage>,
+    prompt: Vec<u32>,
     model: String,
     stream: bool,
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     min_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
 }

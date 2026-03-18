@@ -138,7 +138,9 @@ impl Validation {
                 ));
             }
 
-            Ok((vec![], inputs, input_length, max_new_tokens, vec![]))
+            // No tokenizer: wrap raw inputs as a chat message for the backend
+            let messages = vec![ChatMessage { role: "user".to_string(), content: inputs.clone() }];
+            Ok((messages, inputs, input_length, max_new_tokens, vec![]))
         }
     }
 
