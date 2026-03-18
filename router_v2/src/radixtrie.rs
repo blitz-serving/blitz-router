@@ -246,7 +246,7 @@ impl<K: Copy + Default + Eq + Hash + Debug + IsEnabled, V: Copy> RadixTreeMap<K,
                     //   + this is beacuse there are 16 children, and empty children can't exist,
                     //     it will be absorbed by its parent
                     let tmp: HashMap<K, *mut Node<K, V>, BuildNoHashHasher<K>> =
-                        v.iter().map(|&n| ((*n).value[0], n)).collect();
+                        v.iter().map(|&n| ((&(*n).value)[0], n)).collect();
                     let _ = mem::replace(&mut (*node).children, Children::Large(tmp));
                 }
             }
@@ -273,7 +273,7 @@ impl<K: Copy + Default + Eq + Hash + Debug + IsEnabled, V: Copy> RadixTreeMap<K,
             Children::Small(v) => {
                 let mut res = CommonPrefixInner::NoMatch(self.root);
                 for &child in v.iter() {
-                    if (*child).value[0] == key[0] {
+                    if (&(*child).value)[0] == key[0] {
                         res = Self::common_prefix(child, key);
                     }
                 }
@@ -373,9 +373,9 @@ impl<K: Copy + Default + Eq + Hash + Debug + IsEnabled, V: Copy> RadixTreeMap<K,
                     }
                     'next_child: for &child in v.iter() {
                         let mut i = 0;
-                        while i < (*child).value.len()
+                        while i < (&(*child).value).len()
                             && prefix_len + i < key.len()
-                            && (*child).value[i] == key[prefix_len + i]
+                            && (&(*child).value)[i] == key[prefix_len + i]
                         {
                             i += 1;
                         }
@@ -406,9 +406,9 @@ impl<K: Copy + Default + Eq + Hash + Debug + IsEnabled, V: Copy> RadixTreeMap<K,
                     if let Some(&child) = m.get(&key[prefix_len]) {
                         let mut i = 0;
                         // precond: matched
-                        while i < (*child).value.len()
+                        while i < (&(*child).value).len()
                             && prefix_len + i < key.len()
-                            && (*child).value[i] == key[prefix_len + i]
+                            && (&(*child).value)[i] == key[prefix_len + i]
                         {
                             i += 1;
                         }
@@ -435,7 +435,7 @@ impl<K: Copy + Default + Eq + Hash + Debug + IsEnabled, V: Copy> RadixTreeMap<K,
     fn common_prefix(node: *const Node<K, V>, key: &[K]) -> CommonPrefixInner<K, V> {
         let mut i = 0;
         unsafe {
-            while i < (*node).value.len() && i < key.len() && (*node).value[i] == key[i] {
+            while i < (&(*node).value).len() && i < key.len() && (&(*node).value)[i] == key[i] {
                 i += 1;
             }
             if i == 0 {
@@ -509,6 +509,8 @@ impl<K: Copy + Default + Eq + Hash + Debug + IsEnabled, V: Copy> Drop for RadixT
 #[cfg(test)]
 mod tests {
     use super::RadixTreeMap;
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn test_prefix_len_simple() {
@@ -537,6 +539,270 @@ mod tests {
         assert_eq!(t.prefix_len(&[1, 2, 5, 6]), 3);
         assert_eq!(t.prefix_len(&[1, 2, 3, 4, 9]), 4);
         assert_eq!(t.prefix_len(&[1, 2, 9]), 2);
+    }
+
+    // ==================== Property-Based Tests ====================
+
+    /// Oracle: compute the longest prefix of `query` that matches any inserted key prefix.
+    /// This is the ground truth for RadixTreeMap::prefix_len.
+    fn oracle_prefix_len(inserted_keys: &[Vec<u64>], query: &[u64]) -> usize {
+        let mut best = 0;
+        for key in inserted_keys {
+            let common = key.iter().zip(query.iter()).take_while(|(a, b)| a == b).count();
+            best = best.max(common);
+        }
+        best
+    }
+
+    /// Strategy: generate sequences with small alphabet to force prefix sharing and splits
+    fn small_alphabet_seq(max_len: usize) -> impl Strategy<Value = Vec<u64>> {
+        prop::collection::vec(0u64..8, 1..=max_len)
+    }
+
+    /// Strategy: generate sequences with medium alphabet
+    fn medium_alphabet_seq(max_len: usize) -> impl Strategy<Value = Vec<u64>> {
+        prop::collection::vec(0u64..64, 1..=max_len)
+    }
+
+    // --- Property 1: Insert-then-query returns full length ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        #[test]
+        fn prop_insert_then_prefix_len_is_full(
+            key in small_alphabet_seq(16)
+        ) {
+            let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            let val: Vec<u32> = (0..key.len() as u32).collect();
+            t.insert(&key, val);
+            prop_assert_eq!(t.prefix_len(&key), key.len(),
+                "After inserting key {:?}, prefix_len should be {}", key, key.len());
+        }
+    }
+
+    // --- Property 2: prefix_len is monotonically non-decreasing on prefix ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+
+        #[test]
+        fn prop_prefix_len_monotone_on_prefix(
+            key in small_alphabet_seq(16),
+            cut in 0usize..16,
+        ) {
+            let cut = cut.min(key.len());
+            let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            let val: Vec<u32> = (0..key.len() as u32).collect();
+            t.insert(&key, val);
+
+            let full = t.prefix_len(&key);
+            let prefix_query = &key[..cut];
+            let partial = t.prefix_len(prefix_query);
+
+            // prefix_len of a prefix of K should be <= prefix_len of K
+            prop_assert!(partial <= full,
+                "prefix_len({:?}) = {} > prefix_len({:?}) = {}", prefix_query, partial, key, full);
+            // And should equal the length of the prefix query
+            prop_assert_eq!(partial, cut,
+                "prefix_len of a true prefix should match its length");
+        }
+    }
+
+    // --- Property 3: Oracle agreement with multiple inserts ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn prop_oracle_agreement(
+            keys in prop::collection::vec(small_alphabet_seq(12), 1..=10),
+            queries in prop::collection::vec(small_alphabet_seq(12), 1..=10),
+        ) {
+            let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            for key in &keys {
+                let val: Vec<u32> = (0..key.len() as u32).collect();
+                t.insert(key, val);
+            }
+
+            for query in &queries {
+                let expected = oracle_prefix_len(&keys, query);
+                let actual = t.prefix_len(query);
+                prop_assert_eq!(actual, expected,
+                    "Oracle mismatch: keys={:?}, query={:?}", keys, query);
+            }
+        }
+    }
+
+    // --- Property 4: Insert order independence ---
+    // Inserting keys in any order should yield the same prefix_len results
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn prop_insert_order_independence(
+            keys in prop::collection::vec(small_alphabet_seq(10), 2..=6),
+            queries in prop::collection::vec(small_alphabet_seq(10), 1..=5),
+            seed in any::<u64>(),
+        ) {
+            use rand::seq::SliceRandom;
+            use rand::rngs::StdRng;
+            use rand::SeedableRng;
+
+            // Insert in original order
+            let mut t1: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            for key in &keys {
+                let val: Vec<u32> = (0..key.len() as u32).collect();
+                t1.insert(key, val);
+            }
+
+            // Insert in shuffled order
+            let mut shuffled = keys.clone();
+            let mut rng = StdRng::seed_from_u64(seed);
+            shuffled.shuffle(&mut rng);
+
+            let mut t2: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            for key in &shuffled {
+                let val: Vec<u32> = (0..key.len() as u32).collect();
+                t2.insert(key, val);
+            }
+
+            // Both should agree on all queries
+            for query in &queries {
+                let r1 = t1.prefix_len(query);
+                let r2 = t2.prefix_len(query);
+                prop_assert_eq!(r1, r2,
+                    "Order dependence detected: keys={:?}, shuffled={:?}, query={:?}", keys, shuffled, query);
+            }
+        }
+    }
+
+    // --- Property 5: Duplicate insertion is idempotent ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+
+        #[test]
+        fn prop_duplicate_insert_idempotent(
+            key in small_alphabet_seq(12),
+        ) {
+            let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            let val: Vec<u32> = (0..key.len() as u32).collect();
+
+            t.insert(&key, val.clone());
+            let pl1 = t.prefix_len(&key);
+
+            // Insert same key again
+            t.insert(&key, val.clone());
+            let pl2 = t.prefix_len(&key);
+
+            prop_assert_eq!(pl1, pl2,
+                "Duplicate insert changed prefix_len for {:?}", key);
+            prop_assert_eq!(pl1, key.len());
+        }
+    }
+
+    // --- Property 6: No false positives — unrelated keys don't match ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+
+        #[test]
+        fn prop_no_false_positive(
+            key in prop::collection::vec(0u64..4, 1..=8),
+            query in prop::collection::vec(5u64..9, 1..=8), // disjoint alphabet
+        ) {
+            let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            let val: Vec<u32> = (0..key.len() as u32).collect();
+            t.insert(&key, val);
+
+            // Disjoint alphabets => no prefix match
+            prop_assert_eq!(t.prefix_len(&query), 0,
+                "False positive: key={:?}, query={:?}", key, query);
+        }
+    }
+
+    // --- Property 7: Stress test with many overlapping prefixes ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(50))]
+
+        #[test]
+        fn prop_many_overlapping_prefixes(
+            base in prop::collection::vec(0u64..4, 4..=8),
+            suffixes in prop::collection::vec(
+                prop::collection::vec(0u64..4, 1..=4),
+                2..=20
+            ),
+        ) {
+            let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            let mut all_keys: Vec<Vec<u64>> = Vec::new();
+
+            // Insert base + each suffix
+            for suffix in &suffixes {
+                let mut key = base.clone();
+                key.extend_from_slice(suffix);
+                let val: Vec<u32> = (0..key.len() as u32).collect();
+                t.insert(&key, val);
+                all_keys.push(key);
+            }
+
+            // Check: base prefix should always match
+            prop_assert!(t.prefix_len(&base) >= base.len(),
+                "Base prefix {:?} should match fully", base);
+
+            // Check all inserted keys match oracle
+            for key in &all_keys {
+                let expected = oracle_prefix_len(&all_keys, key);
+                let actual = t.prefix_len(key);
+                prop_assert_eq!(actual, expected,
+                    "Mismatch for key {:?}", key);
+            }
+        }
+    }
+
+    // --- Property 8: Empty key always returns 0 ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_empty_key(
+            keys in prop::collection::vec(small_alphabet_seq(8), 0..=5),
+        ) {
+            let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            for key in &keys {
+                let val: Vec<u32> = (0..key.len() as u32).collect();
+                t.insert(key, val);
+            }
+            prop_assert_eq!(t.prefix_len(&[]), 0);
+        }
+    }
+
+    // --- Property 9: Children upgrade (Small -> Large) correctness ---
+    // Force >64 distinct first symbols to trigger HashMap upgrade
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+
+        #[test]
+        fn prop_children_upgrade_correctness(
+            suffix_len in 1usize..=4,
+        ) {
+            let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+            let mut all_keys: Vec<Vec<u64>> = Vec::new();
+
+            // Insert 80 keys with distinct first symbols (> SMALL_MAX=64)
+            for i in 0u64..80 {
+                let mut key = vec![i];
+                for j in 0..suffix_len as u64 {
+                    key.push(j + 100);
+                }
+                let val: Vec<u32> = (0..key.len() as u32).collect();
+                t.insert(&key, val);
+                all_keys.push(key);
+            }
+
+            // Verify all keys
+            for key in &all_keys {
+                let expected = oracle_prefix_len(&all_keys, key);
+                let actual = t.prefix_len(key);
+                prop_assert_eq!(actual, expected,
+                    "Mismatch after upgrade for {:?}", key);
+            }
+        }
     }
 }
 
@@ -684,7 +950,7 @@ impl RadixTreeBlockHash {
                     //   + this is beacuse there are 16 children, and empty children can't exist,
                     //     it will be absorbed by its parent
                     let tmp: IntMap<u64, *mut Node<u64, u64>> =
-                        v.iter().map(|&n| ((*n).value[0], n)).collect();
+                        v.iter().map(|&n| ((&(*n).value)[0], n)).collect();
                     let _ = mem::replace(&mut (*node).children, Children::<u64, u64>::Large(tmp));
                 }
             }
@@ -716,7 +982,7 @@ impl RadixTreeBlockHash {
             Children::Small(v) => {
                 let mut res = CommonPrefixInner::NoMatch(self.root);
                 for &child in v.iter() {
-                    if (*child).value[0] == key[0] {
+                    if (&(*child).value)[0] == key[0] {
                         res = self.common_prefix(child, key);
                     }
                 }
@@ -824,9 +1090,9 @@ impl RadixTreeBlockHash {
                     }
                     'next_child: for &child in v.iter() {
                         let mut i = 0;
-                        while i < (*child).value.len()
+                        while i < (&(*child).value).len()
                             && prefix_len + i < block_hashes.len()
-                            && (*child).value[i] == block_hashes[prefix_len + i]
+                            && (&(*child).value)[i] == block_hashes[prefix_len + i]
                         {
                             i += 1;
                         }
@@ -868,9 +1134,9 @@ impl RadixTreeBlockHash {
                         // postcond: matched
                         let mut i = 0;
                         // precond: matched
-                        while i < (*child).value.len()
+                        while i < (&(*child).value).len()
                             && prefix_len + i < block_hashes.len()
-                            && (*child).value[i] == block_hashes[prefix_len + i]
+                            && (&(*child).value)[i] == block_hashes[prefix_len + i]
                         {
                             i += 1;
                         }
@@ -901,9 +1167,9 @@ impl RadixTreeBlockHash {
     ) -> CommonPrefixInner<u64, u64> {
         let mut i = 0;
         unsafe {
-            while i < (*node).value.len() && i < key.len() && (*node).value[i] == key[i] {
+            while i < (&(*node).value).len() && i < key.len() && (&(*node).value)[i] == key[i] {
                 debug_assert_eq!(
-                    self.block_to_node[(*node).payload[i] as usize],
+                    self.block_to_node[(&(*node).payload)[i] as usize],
                     node as *mut Node<u64, u64>
                 );
                 i += 1;
@@ -958,7 +1224,7 @@ impl RadixTreeBlockHash {
             // precond: `node` is not nil
             // precond: `block_id` must exist in `node`
             let mut pos = 0;
-            while pos < (*node).payload.len() && (*node).payload[pos] != block_id {
+            while pos < (&(*node).payload).len() && (&(*node).payload)[pos] != block_id {
                 pos += 1;
             }
             // update `node` to valid state
@@ -1069,8 +1335,135 @@ impl PrefixCache {
     }
 
     pub(crate) fn evict_blocks(&mut self, block_ids: Vec<u64>) {
-        for id in block_ids.iter() {
-            self.inner.remove(id);
+        self.inner.remove(block_ids);
+    }
+}
+
+// ==================== Kani Proof Harnesses ====================
+// These use bounded model checking to verify memory safety and
+// functional correctness of the RadixTreeMap for all possible
+// inputs up to a given bound.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Oracle: compute longest matching prefix against inserted keys
+    fn oracle_prefix_len(keys: &[&[u64]], query: &[u64]) -> usize {
+        let mut best = 0;
+        for key in keys {
+            let common = key.iter().zip(query.iter()).take_while(|(a, b)| a == b).count();
+            if common > best {
+                best = common;
+            }
         }
+        best
+    }
+
+    // --- Proof 1: Memory safety of insert + drop ---
+    // Verifies no use-after-free, double-free, or memory leaks
+    // for single insert with bounded key length.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn proof_insert_memory_safety() {
+        let k0: u64 = kani::any();
+        kani::assume(k0 < 2);
+
+        let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+        t.insert(&[k0], vec![10]);
+        // Drop runs automatically — verifies no double-free or dangling ptrs
+    }
+
+    // --- Proof 2: insert-then-prefix_len returns full length ---
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn proof_insert_then_prefix_len() {
+        let k0: u64 = kani::any();
+        let k1: u64 = kani::any();
+        kani::assume(k0 < 4 && k1 < 4);
+
+        let key = [k0, k1];
+        let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+        t.insert(&key, vec![10, 20]);
+        let pl = t.prefix_len(&key);
+        assert!(pl == 2, "After inserting [k0, k1], prefix_len should be 2");
+    }
+
+    // --- Proof 3: Two inserts with shared prefix, then query ---
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn proof_two_inserts_oracle() {
+        let a0: u64 = kani::any();
+        let a1: u64 = kani::any();
+        let b0: u64 = kani::any();
+        let b1: u64 = kani::any();
+        let q0: u64 = kani::any();
+        let q1: u64 = kani::any();
+        kani::assume(a0 < 3 && a1 < 3 && b0 < 3 && b1 < 3 && q0 < 3 && q1 < 3);
+
+        let key_a = [a0, a1];
+        let key_b = [b0, b1];
+        let query = [q0, q1];
+
+        let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+        t.insert(&key_a, vec![1, 2]);
+        t.insert(&key_b, vec![3, 4]);
+
+        let actual = t.prefix_len(&query);
+        let expected = oracle_prefix_len(&[&key_a, &key_b], &query);
+        assert!(actual == expected,
+            "prefix_len mismatch with oracle");
+    }
+
+    // --- Proof 4: Prefix query on a subprefix returns correct length ---
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn proof_prefix_query() {
+        let k0: u64 = kani::any();
+        let k1: u64 = kani::any();
+        kani::assume(k0 < 4 && k1 < 4);
+
+        let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+        t.insert(&[k0, k1], vec![10, 20]);
+
+        // Query with just first element
+        let pl = t.prefix_len(&[k0]);
+        assert!(pl == 1, "Prefix of inserted key should match length 1");
+    }
+
+    // --- Proof 5: Node split correctness ---
+    // Insert [a, b] then [a, c] (b != c) forces a split at position 1
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn proof_split_correctness() {
+        let a: u64 = kani::any();
+        let b: u64 = kani::any();
+        let c: u64 = kani::any();
+        kani::assume(a < 4 && b < 4 && c < 4 && b != c);
+
+        let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+        t.insert(&[a, b], vec![1, 2]);
+        t.insert(&[a, c], vec![3, 4]);
+
+        // Both original keys should be findable
+        assert!(t.prefix_len(&[a, b]) == 2);
+        assert!(t.prefix_len(&[a, c]) == 2);
+        // Shared prefix should match
+        assert!(t.prefix_len(&[a]) == 1);
+    }
+
+    // --- Proof 6: Memory safety of multiple inserts + drop ---
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn proof_multi_insert_drop() {
+        let a: u64 = kani::any();
+        let b: u64 = kani::any();
+        let c: u64 = kani::any();
+        kani::assume(a < 3 && b < 3 && c < 3);
+
+        let mut t: RadixTreeMap<u64, u32> = RadixTreeMap::new();
+        t.insert(&[a, b], vec![1, 2]);
+        t.insert(&[a, c], vec![3, 4]);
+        t.insert(&[b, c], vec![5, 6]);
+        // Drop verifies no memory errors with split nodes
     }
 }

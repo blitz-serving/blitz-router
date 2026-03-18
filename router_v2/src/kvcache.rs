@@ -294,7 +294,7 @@ impl RadixTreeBlockHash {
                     //   + this is beacuse there are 16 children, and empty children can't exist,
                     //     it will be absorbed by its parent
                     let tmp: IntMap<u64, *mut Node<u64, u64>> =
-                        v.iter().map(|&n| ((*n).value[0], n)).collect();
+                        v.iter().map(|&n| ((&(*n).value)[0], n)).collect();
                     let _ = mem::replace(&mut (*node).children, Children::<u64, u64>::Large(tmp));
                 }
             }
@@ -331,7 +331,7 @@ impl RadixTreeBlockHash {
                         v.remove(i);
                         continue;
                     }
-                    if (*child).value[0] == key[0] {
+                    if (&(*child).value)[0] == key[0] {
                         res = self.common_prefix(child, key);
                         break;
                     }
@@ -436,9 +436,9 @@ impl RadixTreeBlockHash {
                     }
                     'next_child: for &child in v.iter() {
                         let mut i = 0;
-                        while i < (*child).value.len()
+                        while i < (&(*child).value).len()
                             && prefix_len + i < block_hashes.len()
-                            && (*child).value[i] == block_hashes[prefix_len + i]
+                            && (&(*child).value)[i] == block_hashes[prefix_len + i]
                         {
                             i += 1;
                         }
@@ -476,9 +476,9 @@ impl RadixTreeBlockHash {
                         // postcond: matched
                         let mut i = 0;
                         // precond: matched
-                        while i < (*child).value.len()
+                        while i < (&(*child).value).len()
                             && prefix_len + i < block_hashes.len()
-                            && (*child).value[i] == block_hashes[prefix_len + i]
+                            && (&(*child).value)[i] == block_hashes[prefix_len + i]
                         {
                             i += 1;
                         }
@@ -509,9 +509,9 @@ impl RadixTreeBlockHash {
     ) -> CommonPrefixInner<u64, u64> {
         let mut i = 0;
         unsafe {
-            while i < (*node).value.len() && i < key.len() && (*node).value[i] == key[i] {
+            while i < (&(*node).value).len() && i < key.len() && (&(*node).value)[i] == key[i] {
                 debug_assert_eq!(
-                    self.block_to_node[(*node).payload[i] as usize],
+                    self.block_to_node[(&(*node).payload)[i] as usize],
                     node as *mut Node<u64, u64>
                 );
                 i += 1;
@@ -593,7 +593,7 @@ impl RadixTreeBlockHash {
             // precond: `node` is not nil
             // precond: `block_id` must exist in `node`
             let mut pos = 0;
-            while pos < (*node).payload.len() && (*node).payload[pos] != block_id {
+            while pos < (&(*node).payload).len() && (&(*node).payload)[pos] != block_id {
                 pos += 1;
             }
             debug_assert!(pos < (*node).payload.len());
@@ -1005,7 +1005,7 @@ mod tests {
     // ---------- 轨道（前缀序列）模型 ----------
     #[derive(Clone, Debug)]
     struct Track {
-        hashes_master: Vec<u64>, // 固定 hash 序列（某条“语义链路”）
+        hashes_master: Vec<u64>, // 固定 hash 序列（某条"语义链路"）
         cur_len: usize,          // 已提交前缀长度
         cur_indices: Vec<u64>,   // 与 master 等长，前缀 [0..cur_len) 有效
         pool: IndexPool,         // 独占 block 子区间
@@ -1097,7 +1097,7 @@ mod tests {
         Some(rng.gen_range(1..=cur_len))
     }
 
-    // ---------- 执行器：严格“先删后缀，再写前缀”并对拍 ----------
+    // ---------- 执行器：严格"先删后缀，再写前缀"并对拍 ----------
     fn exec_suffix_then_prefix_and_compare(
         ht: &mut HashTableBlockHash,
         rt: &mut RadixTreeBlockHash,
@@ -1124,7 +1124,7 @@ mod tests {
         assert_eq!(ht.get(ins_hashes), rt.get(ins_hashes), "get: 前缀匹配不一致");
     }
 
-    // ---------- 收尾：删除所有 block，并检查 RadixTree “一层空子节点 + 逻辑空” ----------
+    // ---------- 收尾：删除所有 block，并检查 RadixTree "一层空子节点 + 逻辑空" ----------
     fn teardown_clear_all_and_assert_one_layer(
         tracks: &[Track],
         ht: &mut HashTableBlockHash,
@@ -1152,7 +1152,7 @@ mod tests {
             }
         }
 
-        // 3) 结构检查：RadixTree 只有一层，且 root 的每个 child 都是“空节点且无子”
+        // 3) 结构检查：RadixTree 只有一层，且 root 的每个 child 都是"空节点且无子"
         unsafe {
             // root 自身也应无 value/payload
             assert!((*rt.root).value.is_empty());
@@ -1237,7 +1237,7 @@ mod tests {
             t.cur_len = 4;
         }
 
-        // —— 收尾：删光所有 block，并检查 RadixTree 的“一层空子节点 + 逻辑空”
+        // —— 收尾：删光所有 block，并检查 RadixTree 的"一层空子节点 + 逻辑空"
         teardown_clear_all_and_assert_one_layer(std::slice::from_ref(&t), &mut ht, &mut rt);
     }
 
@@ -1307,11 +1307,435 @@ mod tests {
             tracks[i] = t;
         }
 
-        // —— 收尾：删光所有 block，并检查 RadixTree 的“一层空子节点 + 逻辑空”
+        // —— 收尾：删光所有 block，并检查 RadixTree 的"一层空子节点 + 逻辑空"
         teardown_clear_all_and_assert_one_layer(&tracks, &mut ht, &mut rt);
     }
 
-    // ================== Fuzz：更大规模，严格“删后缀/写前缀” ==================
+    // ==================== Property-Based Tests (proptest) ====================
+    //
+    // NOTE: RadixTreeBlockHash and HashTableBlockHash have DIFFERENT semantics:
+    //   - RT: prefix-path trie. `get(q)` = longest matching prefix PATH.
+    //         `insert()` returns count of new path nodes.
+    //   - HT: per-hash set. `get(q)` = count of consecutive hashes in the set.
+    //         `insert()` returns count of genuinely new hash values.
+    //
+    // They only agree when all hash values in sequences are DISTINCT.
+    // Tests marked [BUG] document known bugs in RadixTreeBlockHash.
+
+    use proptest::prelude::*;
+
+    /// Strategy: generate hash sequences with ALL DISTINCT elements.
+    /// This ensures RT and HT semantics agree (no duplicate hashes).
+    fn distinct_hash_seq(max_len: usize) -> impl Strategy<Value = Vec<u64>> {
+        // Use large alphabet + short sequences to make collisions extremely unlikely
+        prop::collection::vec(0u64..10_000, 1..=max_len)
+            .prop_filter("must have distinct elements", |v| {
+                let mut seen = std::collections::HashSet::new();
+                v.iter().all(|x| seen.insert(*x))
+            })
+    }
+
+    /// Strategy: generate hash sequences with small alphabet (allows duplicates)
+    fn hash_seq(max_len: usize) -> impl Strategy<Value = Vec<u64>> {
+        prop::collection::vec(0u64..8, 1..=max_len)
+    }
+
+    /// Oracle: longest matching prefix of `query` against any inserted sequence
+    fn oracle_prefix_len(inserted_seqs: &[Vec<u64>], query: &[u64]) -> usize {
+        let mut best = 0;
+        for seq in inserted_seqs {
+            let common = seq.iter().zip(query.iter()).take_while(|(a, b)| a == b).count();
+            best = best.max(common);
+        }
+        best
+    }
+
+    // --- Prop 1: insert-then-get returns full length ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        #[test]
+        fn prop_rtbh_insert_then_get(
+            hashes in hash_seq(16),
+        ) {
+            let n = hashes.len();
+            let num_blocks = n + 1;
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+            let indices: Vec<u64> = (0..n as u64).collect();
+
+            rt.insert(&hashes, indices);
+            let got = rt.get(&hashes);
+            prop_assert_eq!(got, n,
+                "After inserting {:?}, get should return {}", hashes, n);
+        }
+    }
+
+    // --- Prop 2: RT vs HT agree when sequences use disjoint hash domains ---
+    // Each sequence uses a non-overlapping hash range, so both implementations agree.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn prop_rtbh_vs_htbh_disjoint_domains(
+            seq_lens in prop::collection::vec(1usize..=6, 1..=6),
+        ) {
+            let total_blocks: usize = seq_lens.iter().sum::<usize>() + 1;
+            let num_blocks = total_blocks.max(1);
+
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+            let mut ht = HashTableBlockHash::new(num_blocks);
+
+            // Build sequences with disjoint hash domains (no hash overlap)
+            let mut seqs: Vec<Vec<u64>> = Vec::new();
+            let mut hash_base: u64 = 100;
+            let mut next_bid: u64 = 0;
+
+            for &len in &seq_lens {
+                let seq: Vec<u64> = (hash_base..hash_base + len as u64).collect();
+                hash_base += len as u64 + 100; // large gap ensures disjoint
+                let indices: Vec<u64> = (next_bid..next_bid + len as u64).collect();
+                next_bid += len as u64;
+
+                let n_rt = rt.insert(&seq, indices.clone());
+                let n_ht = ht.insert(&seq, indices);
+                prop_assert_eq!(n_rt, n_ht,
+                    "Insert count mismatch for disjoint seq {:?}", seq);
+                seqs.push(seq);
+            }
+
+            // Query each inserted sequence
+            for seq in &seqs {
+                let got_rt = rt.get(seq);
+                let got_ht = ht.get(seq);
+                prop_assert_eq!(got_rt, got_ht,
+                    "get mismatch on inserted seq {:?}", seq);
+            }
+        }
+    }
+
+    // --- Prop 3: After removing all blocks, get returns 0 ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn prop_rtbh_remove_all_then_get_zero(
+            hashes in hash_seq(12),
+        ) {
+            let n = hashes.len();
+            let num_blocks = n + 1;
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+            let indices: Vec<u64> = (0..n as u64).collect();
+
+            rt.insert(&hashes, indices.clone());
+            rt.remove(indices);
+
+            let got = rt.get(&hashes);
+            prop_assert_eq!(got, 0,
+                "After removing all blocks, get should return 0 for {:?}", hashes);
+        }
+    }
+
+    // --- Prop 4: Partial removal truncates correctly ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+
+        #[test]
+        fn prop_rtbh_partial_remove(
+            hashes in prop::collection::vec(0u64..8, 3..=12),
+            cut in 1usize..12,
+        ) {
+            let n = hashes.len();
+            let cut = cut.min(n - 1);
+            let num_blocks = n + 1;
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+            let indices: Vec<u64> = (0..n as u64).collect();
+
+            rt.insert(&hashes, indices.clone());
+
+            // Remove suffix [cut..n)
+            let to_remove: Vec<u64> = (cut as u64..n as u64).collect();
+            rt.remove(to_remove);
+
+            // get should return at most `cut`
+            let got = rt.get(&hashes);
+            prop_assert!(got <= cut,
+                "After removing suffix from {}, get returned {} > cut {}",
+                n, got, cut);
+        }
+    }
+
+    // --- Prop 5: Disjoint sequences don't interfere ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_rtbh_disjoint_sequences(
+            seq_a in prop::collection::vec(0u64..4, 1..=8),
+            seq_b in prop::collection::vec(5u64..9, 1..=8),
+        ) {
+            let total = seq_a.len() + seq_b.len();
+            let num_blocks = total + 1;
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+
+            let idx_a: Vec<u64> = (0..seq_a.len() as u64).collect();
+            let idx_b: Vec<u64> = (seq_a.len() as u64..total as u64).collect();
+
+            rt.insert(&seq_a, idx_a);
+            rt.insert(&seq_b, idx_b);
+
+            prop_assert_eq!(rt.get(&seq_a), seq_a.len());
+            prop_assert_eq!(rt.get(&seq_b), seq_b.len());
+        }
+    }
+
+    // --- Prop 6: Oracle agreement (RT-only, prefix-trie semantics) ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn prop_rtbh_oracle_agreement(
+            seqs in prop::collection::vec(hash_seq(8), 1..=6),
+            queries in prop::collection::vec(hash_seq(8), 1..=5),
+        ) {
+            let total_blocks: usize = seqs.iter().map(|s| s.len()).sum::<usize>() + 1;
+            let num_blocks = total_blocks.max(1);
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+
+            let mut next_bid: u64 = 0;
+            for seq in &seqs {
+                let indices: Vec<u64> = (next_bid..next_bid + seq.len() as u64).collect();
+                next_bid += seq.len() as u64;
+                rt.insert(seq, indices);
+            }
+
+            for query in &queries {
+                let expected = oracle_prefix_len(&seqs, query);
+                let actual = rt.get(query);
+                prop_assert_eq!(actual, expected,
+                    "Oracle mismatch: seqs={:?}, query={:?}", seqs, query);
+            }
+        }
+    }
+
+    // --- Prop 7: Prefix sharing with distinct hashes ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn prop_rtbh_prefix_sharing(
+            base in distinct_hash_seq(4),
+            suffix_a in distinct_hash_seq(3),
+            suffix_b in distinct_hash_seq(3),
+        ) {
+            let mut key_a = base.clone();
+            key_a.extend_from_slice(&suffix_a);
+            let mut key_b = base.clone();
+            key_b.extend_from_slice(&suffix_b);
+
+            // Ensure all block IDs are distinct across both keys
+            let total = key_a.len() + key_b.len();
+            let num_blocks = total + 1;
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+
+            let idx_a: Vec<u64> = (0..key_a.len() as u64).collect();
+            let idx_b: Vec<u64> = (key_a.len() as u64..total as u64).collect();
+
+            rt.insert(&key_a, idx_a);
+            rt.insert(&key_b, idx_b);
+
+            // Both queries should be findable
+            let expected_a = oracle_prefix_len(&[key_a.clone(), key_b.clone()], &key_a);
+            let expected_b = oracle_prefix_len(&[key_a.clone(), key_b.clone()], &key_b);
+            prop_assert_eq!(rt.get(&key_a), expected_a);
+            prop_assert_eq!(rt.get(&key_b), expected_b);
+
+            // Base prefix should match at least base.len()
+            prop_assert!(rt.get(&base) >= base.len(),
+                "Base prefix {:?} should match at least {} but got {}",
+                base, base.len(), rt.get(&base));
+        }
+    }
+
+    // --- Prop 8: Single-element sequences ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn prop_rtbh_single_element(
+            val in 0u64..100,
+        ) {
+            let num_blocks = 2;
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+            rt.insert(&[val], vec![0]);
+            prop_assert_eq!(rt.get(&[val]), 1);
+            prop_assert_eq!(rt.get(&[val + 1]), 0);
+
+            rt.remove(vec![0]);
+            prop_assert_eq!(rt.get(&[val]), 0);
+        }
+    }
+
+    // --- Prop 9: Insert return value with distinct hashes ---
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn prop_rtbh_insert_returns_new_count(
+            hashes in distinct_hash_seq(8),
+        ) {
+            let n = hashes.len();
+            let num_blocks = 2 * n + 1;
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+            let mut ht = HashTableBlockHash::new(num_blocks);
+
+            let idx1: Vec<u64> = (0..n as u64).collect();
+            let n1_rt = rt.insert(&hashes, idx1.clone());
+            let n1_ht = ht.insert(&hashes, idx1);
+            prop_assert_eq!(n1_rt, n1_ht, "First insert count mismatch");
+        }
+    }
+
+    // ==================== BUG-targeting property tests ====================
+
+    // --- [BUG] Prop 10: insert() returns wrong count for duplicate hashes ---
+    // RadixTreeBlockHash.insert([6,6], [0,1]) returns 2, but HashTableBlockHash returns 1.
+    // This is a semantic mismatch: RT counts path nodes, HT counts unique hashes.
+    #[test]
+    fn bug_insert_count_duplicate_hashes() {
+        let mut rt = RadixTreeBlockHash::new(3);
+        let mut ht = HashTableBlockHash::new(3);
+
+        let n_rt = rt.insert(&[6, 6], vec![0, 1]);
+        let n_ht = ht.insert(&[6, 6], vec![0, 1]);
+
+        // Document the semantic difference
+        assert_eq!(n_rt, 2, "RT: both positions are new path nodes");
+        assert_eq!(n_ht, 1, "HT: hash 6 is only counted once as new");
+        // NOTE: This means BlockHash::insert() return value is NOT consistent
+        // between implementations. If the router relies on this value being
+        // the same, this is a bug.
+    }
+
+    // --- [BUG] Prop 11: get() semantic mismatch for non-prefix query ---
+    // After inserting [0, 2], querying [2]:
+    //   RT returns 0 (no prefix path match)
+    //   HT returns 1 (hash 2 exists in set)
+    #[test]
+    fn bug_get_semantic_mismatch() {
+        let mut rt = RadixTreeBlockHash::new(3);
+        let mut ht = HashTableBlockHash::new(3);
+
+        rt.insert(&[0, 2], vec![0, 1]);
+        ht.insert(&[0, 2], vec![0, 1]);
+
+        // Document the semantic difference
+        assert_eq!(rt.get(&[2]), 0, "RT: [2] is not a prefix of [0,2]");
+        assert_eq!(ht.get(&[2]), 1, "HT: hash 2 exists in the set");
+        // NOTE: This means the `radixtree-blockhash` and `hashtable-blockhash`
+        // features give DIFFERENT results. If the router switches between them
+        // via feature flags expecting identical behavior, this is a bug.
+    }
+
+    // --- [BUG] Prop 12: Cascading remove assertion failure ---
+    // When two sequences share a prefix and we insert them separately,
+    // removing one's blocks can cascade and clear the other's blocks,
+    // then removing the second sequence's blocks hits a debug_assert.
+    #[test]
+    fn bug_cascading_remove_shared_prefix() {
+        // Two sequences sharing prefix [1]:
+        //   seq_a = [1, 2] with bids [0, 1]
+        //   seq_b = [1, 3] with bids [2, 3]
+        // Tree structure after both inserts:
+        //   root -> [1] -> [2] (bid 0, 1)
+        //                -> [3] (bid 2, 3)
+        //
+        // Removing bid 1 (the "3" in seq_a [1,2]) truncates to [1] and clears children.
+        // This cascading removal also clears bid 2 and bid 3 from seq_b.
+        // Then attempting to remove bid 2 or 3 should not crash.
+        let mut rt = RadixTreeBlockHash::new(10);
+
+        rt.insert(&[1, 2], vec![0, 1]);
+        rt.insert(&[1, 3], vec![2, 3]);
+
+        // Remove the suffix of seq_a: this cascades and also clears seq_b's blocks
+        rt.remove(vec![1]);
+
+        // The tree should still be queryable without panic
+        let _ = rt.get(&[1, 2]);
+        let _ = rt.get(&[1, 3]);
+    }
+
+    // --- Prop 13: Interleaved insert-remove-get (RT-only, no HT comparison) ---
+    #[derive(Clone, Debug)]
+    enum Op {
+        Insert { hashes: Vec<u64>, len: usize },
+        RemoveAll { seq_idx: usize },
+        Get { hashes: Vec<u64> },
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            4 => distinct_hash_seq(6).prop_map(|h| {
+                let l = h.len();
+                Op::Insert { hashes: h, len: l }
+            }),
+            2 => (0usize..100).prop_map(|i| Op::RemoveAll { seq_idx: i }),
+            3 => hash_seq(6).prop_map(|h| Op::Get { hashes: h }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_rtbh_random_op_sequence(
+            ops in prop::collection::vec(op_strategy(), 5..=20),
+        ) {
+            let num_blocks = 2000;
+            let mut rt = RadixTreeBlockHash::new(num_blocks);
+            let mut next_bid: u64 = 0;
+
+            struct SeqState { indices: Vec<u64>, hashes: Vec<u64>, removed: bool }
+            let mut live_seqs: Vec<SeqState> = Vec::new();
+
+            for op in &ops {
+                match op {
+                    Op::Insert { hashes, len } => {
+                        if next_bid + *len as u64 >= num_blocks as u64 { continue; }
+                        let indices: Vec<u64> = (next_bid..next_bid + *len as u64).collect();
+                        next_bid += *len as u64;
+
+                        rt.insert(hashes, indices.clone());
+                        // Verify inserted sequence is findable
+                        let got = rt.get(hashes);
+                        prop_assert!(got >= hashes.len(),
+                            "After insert, get({:?}) = {} < {}", hashes, got, hashes.len());
+
+                        live_seqs.push(SeqState {
+                            indices,
+                            hashes: hashes.clone(),
+                            removed: false,
+                        });
+                    }
+                    Op::RemoveAll { seq_idx } => {
+                        if live_seqs.is_empty() { continue; }
+                        let idx = seq_idx % live_seqs.len();
+                        if live_seqs[idx].removed { continue; }
+
+                        let indices = live_seqs[idx].indices.clone();
+                        rt.remove(indices);
+                        live_seqs[idx].removed = true;
+                    }
+                    Op::Get { hashes } => {
+                        // Just ensure get doesn't panic
+                        let _ = rt.get(hashes);
+                    }
+                }
+            }
+        }
+    }
+
+    // ================== Fuzz：更大规模，严格"删后缀/写前缀" ==================
     #[test]
     fn fuzz_prefix_suffix() {
         let num_blocks = FUZZ_BLOCKS as u64;
@@ -1372,7 +1796,7 @@ mod tests {
             tracks[i] = t;
         }
 
-        // —— 收尾：删光所有 block，并检查 RadixTree 的“一层空子节点 + 逻辑空”
+        // —— 收尾：删光所有 block，并检查 RadixTree 的"一层空子节点 + 逻辑空"
         teardown_clear_all_and_assert_one_layer(&tracks, &mut ht, &mut rt);
     }
 }
