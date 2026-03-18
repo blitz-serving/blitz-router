@@ -4,9 +4,6 @@
 // This file is a **modified** version of
 // text-generation-inference/src/token_stream.rs
 // © 2022-present Hugging Face Inc. – Apache-2.0.
-//
-// Modifications by Blitz-serving:
-//   - Passed more args for disaggregation controller in blitzscale
 use std::fs::File;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -21,14 +18,11 @@ use opentelemetry::sdk::trace::Sampler;
 use opentelemetry::sdk::Resource;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
-use router_v2::error::ClientError;
-use router_v2::{
-    parse_deployment, server, ControllerArgs, Deployment, HubModelInfo, Model,
-    TokenizerRender, MAX_BLOCKS_PER_REPLICA,
-};
+use router::error::ClientError;
+use router::{server, HubModelInfo, TokenizerRender};
 #[cfg(feature = "vllm-backend")]
-use router_v2::VllmClient;
-use router_v2::engine_client::EngineClient;
+use router::VllmClient;
+use router::engine_client::EngineClient;
 use thiserror::Error;
 #[allow(unused_imports)]
 use tokenizers::{FromPretrainedParameters, Tokenizer};
@@ -54,14 +48,10 @@ struct Args {
     max_input_length: usize,
     #[clap(default_value = "2048", long, env)]
     max_total_tokens: usize,
-    #[clap(default_value = "1.2", long, env)]
-    waiting_served_ratio: f32,
     #[clap(default_value = "4096", long, env)]
     max_batch_prefill_tokens: u32,
     #[clap(long, env)]
     max_batch_total_tokens: Option<u32>,
-    #[clap(default_value = "20", long, env)]
-    max_waiting_tokens: usize,
     #[clap(default_value = "0.0.0.0", long, env)]
     hostname: String,
     #[clap(default_value = "3000", long, short, env)]
@@ -92,68 +82,9 @@ struct Args {
     log_path: Option<String>,
     #[clap(long, env)]
     statistic_path: Option<String>,
-    #[clap(default_value = "disaggregation", long, value_parser = parse_deployment)]
-    deployment: Deployment,
-    #[clap(required = true, long)]
-    deployment_config_path: String,
-
-    #[clap(long, default_value_t = 13000)]
-    tokens_prefilled_per_sec: u32,
-    #[clap(long, default_value_t = 20000)]
-    tokens_transferred_per_sec: u32,
-    #[clap(long, default_value_t = 8000)]
-    max_blocks_per_replica: u32,
-
-    #[clap(long, default_value_t = 8)]
-    max_prefill_num: u32,
-    #[clap(long, default_value_t = 8)]
-    max_decode_num: u32,
-
-    #[clap(long, default_value_t = 1)]
-    min_prefill_num: u32,
-    #[clap(long, default_value_t = 1)]
-    min_decode_num: u32,
-
-    #[clap(long, default_value_t = 0.15)]
-    prefill_lower_bound: f32,
-    #[clap(long, default_value_t = 0.4)]
-    prefill_upper_bound: f32,
-    #[clap(long, default_value_t = 0.45)]
-    decode_lower_bound: f32,
-    #[clap(long, default_value_t = 0.8)]
-    decode_upper_bound: f32,
-
-    #[clap(long, default_value_t = 0.0)]
-    migration_lower_bound: f32,
-    #[clap(long, default_value_t = 2.0)]
-    migration_upper_bound: f32,
-
-    #[clap(long, default_value_t = 1500)]
-    scale_down_threshold_millis: u64,
-
-    #[clap(long, default_value_t = 32)]
-    num_hidden_layers: u32,
 
     #[clap(long, required = true)]
     model_name: String,
-
-    #[clap(long, required = true)]
-    model_path: String,
-
-    #[clap(long, required = true)]
-    parameter_size: f32,
-
-    #[clap(long, default_value_t = 32)]
-    num_gpus_per_node: usize,
-
-    #[clap(long, default_value_t = 0)]
-    mock_load_millis: u64,
-
-    #[clap(long, default_value_t = 0)]
-    mock_transfer_millis: u64,
-
-    #[clap(long, default_value_t = 1)]
-    tensor_parallel_size: usize,
 
     #[clap(long, default_value_t = 16)]
     kvcache_block_size: usize,
@@ -170,10 +101,8 @@ fn main() -> Result<(), RouterError> {
         max_top_n_tokens,
         max_input_length,
         max_total_tokens,
-        waiting_served_ratio,
         max_batch_prefill_tokens,
         max_batch_total_tokens,
-        max_waiting_tokens,
         kvcache_block_size,
         hostname,
         port,
@@ -190,35 +119,7 @@ fn main() -> Result<(), RouterError> {
         ngrok_edge,
         log_path,
         statistic_path,
-        deployment,
-        deployment_config_path,
-
-        tokens_prefilled_per_sec,
-        tokens_transferred_per_sec,
-
-        max_blocks_per_replica,
-        prefill_lower_bound,
-        prefill_upper_bound,
-        decode_lower_bound,
-        decode_upper_bound,
-        scale_down_threshold_millis,
-
-        max_prefill_num,
-        max_decode_num,
-        min_prefill_num,
-        min_decode_num,
-        migration_lower_bound,
-        migration_upper_bound,
-
-        num_hidden_layers,
-        num_gpus_per_node,
-        mock_load_millis,
-        mock_transfer_millis,
-        tensor_parallel_size,
-
         model_name,
-        model_path,
-        parameter_size,
     } = args;
 
     // Validate args
@@ -247,8 +148,6 @@ fn main() -> Result<(), RouterError> {
     }
 
     // CORS allowed origins
-    // map to go inside the option and then map to parse from String to HeaderValue
-    // Finally, convert to AllowOrigin
     let cors_allow_origin: Option<AllowOrigin> = cors_allow_origin.map(|cors_allow_origin| {
         AllowOrigin::list(
             cors_allow_origin.iter().map(|origin| origin.parse::<HeaderValue>().unwrap()),
@@ -259,25 +158,19 @@ fn main() -> Result<(), RouterError> {
     let authorization_token = std::env::var("HUGGING_FACE_HUB_TOKEN").ok();
 
     // Tokenizer instance
-    // This will only be used to validate payloads
     let local_path = Path::new(&tokenizer_name);
     let local_model = local_path.exists() && local_path.is_dir();
     let tokenizer = if use_tokenizer {
         if local_model {
-            // Load local tokenizer
             Some(TokenizerRender::new(local_path))
         } else {
             unreachable!("Unexisted path {} to tokenizer!", tokenizer_name);
             #[allow(unreachable_code)]
             {
-                // Download and instantiate tokenizer
-                // We need to download it outside of the Tokio runtime
                 let _params = FromPretrainedParameters {
                     revision: revision.clone().unwrap_or("main".to_string()),
                     ..Default::default()
                 };
-                // XXX: unallowed to download tokenzier
-                // Tokenizer::from_pretrained(tokenizer_name.clone(), Some(params)).ok()
                 None
             }
         }
@@ -286,8 +179,6 @@ fn main() -> Result<(), RouterError> {
     };
 
     let server_future = async {
-        // Move _guard inside an async block to enable OTLP
-        // TODO@Healthcliff-Ding, #24 this may cause tracing guard abort earlier 
         let _guard = init_logging(otlp_endpoint, json_output, log_path);
 
         if tokenizer.is_none() {
@@ -325,21 +216,9 @@ fn main() -> Result<(), RouterError> {
         let mut buf = String::new();
         File::open(client_config).unwrap().read_to_string(&mut buf).unwrap();
 
-        #[cfg(feature = "blitzllm-backend")]
-        let stubs = join_all(
-            serde_json::from_str::<Vec<String>>(buf.as_str())
-                .unwrap()
-                .into_iter()
-                .map(|uri| Stub::connect(uri)),
-        )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<Stub>, ClientError>>()
-        .map_err(|e| RouterError::Connection(e))?;
-
         #[cfg(feature = "vllm-backend")]
         let engine_clients: Vec<Box<dyn EngineClient>> = {
-            use router_v2::engine_client::VllmEngineClient;
+            use router::engine_client::VllmEngineClient;
             serde_json::from_str::<Vec<String>>(buf.as_str())
                 .unwrap()
                 .into_iter()
@@ -351,15 +230,11 @@ fn main() -> Result<(), RouterError> {
         };
 
         // ZMQ backend: create engine clients from IPC/TCP socket addresses.
-        // The deployment config is expected to contain an array of
-        // [input_addr, output_addr] pairs as JSON strings.
         #[cfg(feature = "zmq-backend")]
         let engine_clients: Vec<Box<dyn EngineClient>> = {
-            use router_v2::engine_client::ZmqEngineClientAdapter;
-            use router_v2::zmq_engine::ZmqEngineClient;
+            use router::engine_client::ZmqEngineClientAdapter;
+            use router::zmq_engine::ZmqEngineClient;
 
-            // Parse socket address pairs from the config buffer.
-            // Expected format: [["ipc:///tmp/vllm-engine-8000-input", "ipc:///tmp/vllm-engine-8000-output"], ...]
             let addr_pairs: Vec<(String, String)> =
                 serde_json::from_str::<Vec<Vec<String>>>(buf.as_str())
                     .expect("ZMQ backend expects JSON array of [input_addr, output_addr] pairs")
@@ -373,7 +248,6 @@ fn main() -> Result<(), RouterError> {
             let mut clients = Vec::with_capacity(addr_pairs.len());
             for (input_addr, output_addr) in addr_pairs {
                 let mut zmq_client = ZmqEngineClient::new();
-                // Block on connect since we're in async context
                 zmq_client
                     .connect(&input_addr, &output_addr)
                     .await
@@ -392,75 +266,6 @@ fn main() -> Result<(), RouterError> {
         tracing::warn!("The shard info is not set properly by the st-server");
         let shard_info = Default::default();
 
-        let disaggregation_controller_args = ControllerArgs {
-            tokens_prefilled_per_sec,
-            tokens_transferred_per_sec,
-
-            max_blocks_per_replica,
-            prefill_lower_bound,
-            prefill_upper_bound,
-            decode_lower_bound,
-            decode_upper_bound,
-            scale_down_threshold_millis,
-
-            max_prefill_num,
-            max_decode_num,
-            min_prefill_num,
-            min_decode_num,
-            migration_lower_bound,
-            migration_upper_bound,
-
-            num_hidden_layers,
-            num_gpus_per_node,
-            mock_transfer_millis,
-            mock_load_millis,
-            tensor_parallel_size,
-        };
-
-        assert!(
-            *MAX_BLOCKS_PER_REPLICA.get_or_init(|| max_blocks_per_replica)
-                == max_blocks_per_replica
-        );
-
-        #[cfg(feature = "blitzllm-backend")]
-        let mut temp_vec = Vec::with_capacity(stubs.len());
-        #[cfg(feature = "vllm-backend")]
-        let mut temp_vec = Vec::with_capacity(engine_clients.len());
-        let _map_fn = |index: usize, t: Option<u32>| {
-            let max_supported_batch_total_tokens = match t {
-                // Older models do not support automatic max-batch-total-tokens
-                None => {
-                    let max_batch_total_tokens = max_batch_total_tokens.unwrap_or(
-                        16000.max((max_total_tokens as u32).max(max_batch_prefill_tokens)),
-                    );
-                    tracing::warn!("Model does not support automatic max batch total tokens");
-                    max_batch_total_tokens
-                }
-                // Flash attention models return their max supported total tokens
-                Some(max_supported_batch_total_tokens) => {
-                    // Warn if user added his own max-batch-total-tokens as we will ignore it
-                    if max_batch_total_tokens.is_some() {
-                        tracing::warn!(
-                            "`--max-batch-total-tokens` is deprecated for Flash \
-                        Attention models."
-                        );
-                        tracing::warn!(
-                            "Inferred max batch total tokens: {max_supported_batch_total_tokens}"
-                        );
-                    }
-                    if max_total_tokens as u32 > max_supported_batch_total_tokens {
-                        let err_msg = format!("`max_total_tokens` must be <= `max_batch_total_tokens`. Given: {max_total_tokens} and {max_supported_batch_total_tokens}");
-                        return Err(RouterError::ArgumentValidation(err_msg));
-                    }
-                    max_supported_batch_total_tokens
-                }
-            };
-            tracing::info!("Setting max batch total tokens to {max_supported_batch_total_tokens}");
-            tracing::info!("Connected {}", index);
-            temp_vec.push(max_supported_batch_total_tokens);
-            Ok(())
-        };
-
         let addr = match hostname.parse() {
             Ok(ip) => SocketAddr::new(ip, port),
             Err(_) => {
@@ -469,9 +274,7 @@ fn main() -> Result<(), RouterError> {
             }
         };
 
-        // let max_supported_batch_total_tokens = temp_vec.into_iter().min().unwrap();
         let max_supported_batch_total_tokens = 16000;
-        let model = Model { model_name, model_path, parameter_size };
 
         // Run server
         server::run(
@@ -484,15 +287,10 @@ fn main() -> Result<(), RouterError> {
             max_top_n_tokens,
             max_input_length,
             max_total_tokens,
-            waiting_served_ratio,
             max_batch_prefill_tokens,
             max_supported_batch_total_tokens,
-            max_waiting_tokens,
-            #[cfg(feature = "colocation")]
             engine_clients,
-            deployment,
             kvcache_block_size,
-            deployment_config_path,
             tokenizer,
             validation_workers,
             addr,
@@ -500,9 +298,6 @@ fn main() -> Result<(), RouterError> {
             ngrok,
             ngrok_authtoken,
             ngrok_edge,
-            model,
-            false,
-            disaggregation_controller_args,
             statistic_path,
         )
         .await?;

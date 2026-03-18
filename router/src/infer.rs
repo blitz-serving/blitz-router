@@ -4,96 +4,37 @@
 // This file is a **modified** version of
 // text-generation-inference/src/token_stream.rs
 // © 2022-present Hugging Face Inc. – Apache-2.0.
-//
-// Modifications by Blitz-serving:
-//   - Modify the schedule logic to disaggregation controller
-//   - Add the implementation of manually scale
 #![allow(unused)]
 
 use crate::error::ClientError;
 use crate::engine_client::EngineClient;
 use crate::kvcache::{BlockHash, BlockHashState, PrefixBlockHash};
 use crate::queue::{QueuePro, TaskAssigner};
-use crate::replica::config::DisaggregationConfig;
 use crate::statistic::{statistic, increase_prefill_tokens};
 use crate::validation::{Validation, ValidationError};
 use crate::{
-    start_disaggregation_event_loop, start_vllm_colocation_event_loop,
-    ColocationController, ControllerArgs, DisaggregationController, Entry, LMetric, Model, Queue,
-    ScheduleContext, Stub, Token, KV_BLOCK_SIZE,
+    start_vllm_colocation_event_loop,
+    ColocationController, Entry, LMetric,
+    ScheduleContext, Token,
 };
 
 use crate::{GenerateRequest, PrefillToken};
 
 use std::sync::{atomic::AtomicBool, Arc};
-use std::thread::sleep;
 use std::time::Duration;
 
-use futures::executor::block_on;
 use futures::future::try_join_all;
 use nohash_hasher::IntMap;
 use pb::generate::v2::*;
-use serde::Deserialize;
 use thiserror::Error;
-use tokio::spawn;
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::{mpsc, Mutex, Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
-use tokio::task::{block_in_place, spawn_blocking};
+use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio::time::Instant;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 use tracing::{info_span, instrument, Span};
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-pub enum ColacationClusterState {
-    /// All active instances have full model and are running normally.
-    Normal { num_active_instances: usize },
-
-    /// The cluster is scaling. Transfer model paramenters from old instance to new instance.
-    Scaling { new_instance_index: usize, old_instance_index: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Deployment {
-    #[cfg(feature = "disaggregation")]
-    Disaggregation,
-    #[cfg(feature = "colocation")]
-    Colocation,
-}
-
-pub fn parse_deployment(s: &str) -> Result<Deployment, String> {
-    match s.to_lowercase().as_str() {
-        #[cfg(feature = "disaggregation")]
-        "disaggregation" => Ok(Deployment::Disaggregation),
-        #[cfg(feature = "colocation")]
-        "colocation" => Ok(Deployment::Colocation),
-        _ => Err(format!("Invalid deployment: {}", s)),
-    }
-}
-
 /// Inference struct
-#[cfg(feature = "blitzllm-backend")]
-#[derive(Clone)]
-pub struct Infer {
-    /// Validation
-    validation: Validation,
-    /// Request queue
-    queue: Queue,
-
-    /// Inference limit
-    limit_concurrent_requests: Arc<Semaphore>,
-
-    manually_scale: bool,
-
-    deployment: Deployment,
-
-    /// Only used in PD-Disaggregation
-    disaggregation_controller: Option<Arc<DisaggregationController>>,
-
-    stubs: Vec<Stub>,
-}
-
-#[cfg(feature = "vllm-backend")]
 #[derive(Clone)]
 pub struct Infer {
     /// KVCache block size
@@ -106,61 +47,11 @@ pub struct Infer {
     /// Inference limit
     limit_concurrent_requests: Arc<Semaphore>,
 
-    deployment: Deployment,
-
-    /// Only used in PD-Disaggregation
+    /// Colocation controller
     colocation_controller: Option<Arc<ColocationController>>,
 }
 
 impl Infer {
-    #[cfg(feature = "disaggregation")]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn create_disaggregation(
-        stubs: Vec<Stub>,
-        config: DisaggregationConfig,
-        validation: Validation,
-        waiting_served_ratio: f32,
-        max_batch_prefill_tokens: u32,
-        max_batch_total_tokens: u32,
-        max_waiting_tokens: usize,
-        max_concurrent_requests: usize,
-        requires_padding: bool,
-        window_size: Option<u32>,
-        speculate: u32,
-        generation_health: Arc<AtomicBool>,
-        model: Model,
-        manually_scale: bool,
-        disaggregation_controller_args: ControllerArgs,
-    ) -> Self {
-        // Infer shared state
-        let queue = Queue::new(requires_padding, KV_BLOCK_SIZE, window_size, speculate);
-
-        let controller = start_disaggregation_event_loop(
-            queue.clone(),
-            stubs.clone(),
-            config,
-            waiting_served_ratio,
-            max_batch_prefill_tokens,
-            max_batch_total_tokens,
-            max_waiting_tokens,
-            model,
-            disaggregation_controller_args,
-        );
-
-        // Inference limit with a semaphore
-        let semaphore = Arc::new(Semaphore::new(max_concurrent_requests));
-
-        Self {
-            validation,
-            queue,
-            limit_concurrent_requests: semaphore,
-            manually_scale,
-            deployment: Deployment::Disaggregation,
-            disaggregation_controller: Some(controller),
-            stubs,
-        }
-    }
-
     pub(crate) fn create_vllm_colocation(
         all_engine_clients: Vec<Box<dyn EngineClient>>,
         block_size: usize,
@@ -197,88 +88,8 @@ impl Infer {
             block_size,
             queue,
             limit_concurrent_requests: semaphore,
-            deployment: Deployment::Colocation,
             colocation_controller: Some(controller),
         }
-    }
-
-    #[instrument(skip_all)]
-    #[cfg(feature = "manually_scale")]
-    pub(crate) async fn manually_trigger_scale_up(
-        &self,
-        old_stub_indices: Vec<usize>,
-        new_stub_indices: Vec<usize>,
-        scale_to: String,
-    ) -> Result<(), String> {
-        // metrics::blitz
-        // if !self.manually_scale {
-        //     Err("manually_scale is disabled".to_string())
-        // } else {
-        match self.deployment {
-            Deployment::Disaggregation => {
-                self.disaggregation_controller
-                    .as_ref()
-                    .unwrap()
-                    .trigger_scale_up(old_stub_indices, new_stub_indices, scale_to)
-                    .await
-            }
-        };
-        Ok(())
-        // }
-    }
-
-    #[cfg(feature = "manually_scale")]
-    #[instrument(skip_all)]
-    pub(crate) async fn manually_trigger_scale_down(
-        &self,
-        stub_indices: Vec<usize>,
-    ) -> Result<(), String> {
-        // metrics::blitz
-        // if !self.manually_scale {
-        //     Err("manually_scale is disabled".to_string())
-        // } else {
-        match self.deployment {
-            #[cfg(feature = "disaggregation")]
-            Deployment::Disaggregation => {
-                self.disaggregation_controller
-                    .as_ref()
-                    .unwrap()
-                    .trigger_scale_down(stub_indices)
-                    .await
-            }
-            Deployment::Colocation => {
-                todo!();
-            }
-        };
-        Ok(())
-        // }
-    }
-
-    #[cfg(feature = "manually_scale")]
-    #[instrument(skip_all)]
-    pub(crate) async fn manually_trigger_mutate_to_decode(
-        &self,
-        stub_indices: Vec<usize>,
-    ) -> Result<(), String> {
-        // metrics::blitz
-        // if !self.manually_scale {
-        //     Err("manually_scale is disabled".to_string())
-        // } else {
-        match self.deployment {
-            #[cfg(feature = "disaggregation")]
-            Deployment::Disaggregation => {
-                self.disaggregation_controller
-                    .as_ref()
-                    .unwrap()
-                    .trigger_mutate_to_decode(stub_indices)
-                    .await
-            }
-            Deployment::Colocation => {
-                todo!();
-            }
-        };
-        Ok(())
-        // }
     }
 
     /// Add a new request to the queue and return a stream of InferStreamResponse
@@ -364,15 +175,6 @@ impl Infer {
             match response? {
                 // Add prefill tokens
                 InferStreamResponse::Prefill(_) => {
-                    // Create Token objects
-                    // We do that here instead of in the Python code as Rust for loops are faster
-                    // result_prefill = tokens
-                    //     .ids
-                    //     .into_iter()
-                    //     .zip(tokens.logprobs.into_iter())
-                    //     .zip(tokens.texts.into_iter())
-                    //     .map(|((id, logprob), text)| PrefillToken { id, text, logprob })
-                    //     .collect();
                     first_token_time.get_or_insert(s.elapsed());
                     interval = tokio::time::Instant::now();
                 }
@@ -397,10 +199,10 @@ impl Infer {
                     result_start = Some(start);
                     result_queued = Some(queued);
                     result_max_time_between_tokens = Some(max_time_between_tokens);
-                    // Removes a dummy startup duration. 
+                    // Removes a dummy startup duration.
                     //
                     // I guess the origin TGI designs a debug backdoor to visualize prefilled logits
-                    // similar to the training process in `enum::Prefill`. However, we pack `enum::Prefill` 
+                    // similar to the training process in `enum::Prefill`. However, we pack `enum::Prefill`
                     // and `enum::Intermediate` together.
                     time_between_tokens.remove(0);
                     output_length = result_tokens.len();
@@ -435,7 +237,7 @@ impl Infer {
                     .cloned()
                     .unwrap_or(Duration::from_micros(0));
                 result_max_time_between_tokens = Some(time_between_tokens.last().cloned().unwrap());
-                
+
                 let len = time_between_tokens.len();
                 avg_time_between_tokens = time_between_tokens.iter().sum::<Duration>() / len as u32;
                 p90_time_between_tokens = time_between_tokens[(len as f32 * 0.9) as usize];
@@ -443,7 +245,6 @@ impl Infer {
                 p99_time_between_tokens = time_between_tokens[(len as f32 * 0.99) as usize];
             }
 
-            // tracing::info!("first_decode_token_time: {:?}, max_time_between_tokens_except_first: {:?}, max_time_between_tokens: {:?}", first_decode_token_time, max_time_between_tokens_except_first, result_max_time_between_tokens);
             Ok(InferResponse {
                 request_id,
                 prefill: result_prefill,
@@ -529,8 +330,6 @@ pub(crate) fn filter_send_generations(
             entry.max_time_between_tokens = std::cmp::max(entry.max_time_between_tokens, elapsed);
         }
 
-        // Create and enter a span to link this function back to the entry
-        // let _span = info_span!(parent: entry.temp_span.as_ref().expect("batch_span is None. This is a bug."), "send_generation", generation = ?generation).entered();
         // Send generation responses back to the infer task
         // If the receive an error from the Flume channel, it means that the client dropped the
         // request and we need to stop generating hence why we unwrap_or(true)
@@ -598,7 +397,6 @@ pub(crate) fn send_responses(
         tokens_.ids.into_iter().zip(tokens_.texts.into_iter()).enumerate().peekable();
     while let Some((i, (id, text))) = iterator.next() {
         let token = Token { id, text, logprob: 0.0, special: false };
-        // let top_tokens = vec![];
         let top_tokens = if let Some(top_tokens_) = generation.top_tokens.get(i) {
             top_tokens_
                 .ids

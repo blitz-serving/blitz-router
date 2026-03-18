@@ -4,9 +4,6 @@
 // This file is a **modified** version of
 // text-generation-inference/src/token_stream.rs
 // © 2022-present Hugging Face Inc. – Apache-2.0.
-//
-// Modifications by Blitz-serving:
-//   - Add Manually scale interface
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
@@ -15,12 +12,11 @@ use std::sync::Arc;
 use crate::health::Health;
 use crate::infer::{InferError, InferResponse, InferStreamResponse};
 use crate::validation::ValidationError;
-#[cfg(feature = "vllm-backend")]
 use crate::engine_client::EngineClient;
 use crate::{
-    BestOfSequence, CompatGenerateRequest, ControllerArgs, Deployment, Details, ErrorResponse,
+    BestOfSequence, CompatGenerateRequest, Details, ErrorResponse,
     FinishReason, GenerateParameters, GenerateRequest, GenerateResponse, HubModelInfo, Infer, Info,
-    Model, PrefillToken, StreamDetails, StreamResponse, Token, TokenizerRender, Validation,
+    PrefillToken, StreamDetails, StreamResponse, Token, TokenizerRender, Validation,
 };
 
 use axum::extract::Extension;
@@ -139,18 +135,6 @@ example = json ! ({"error": "Input validation error"})),
 example = json ! ({"error": "Incomplete generation"})),
 )
 )]
-// #[instrument(
-// skip_all,
-// fields(
-// parameters = ? req.parameters,
-// total_time,
-// validation_time,
-// queue_time,
-// inference_time,
-// time_per_token,
-// seed,
-// )
-// )]
 #[instrument(skip_all)]
 async fn generate(
     infer: Extension<Infer>,
@@ -182,7 +166,6 @@ async fn generate(
     let request_id = response.request_id;
     let first_token_time = response.first_token_time;
     let max_time_between_tokens = response.max_time_between_tokens;
-    // let max_time_between_tokens_except_first = response.max_time_between_tokens_except_first;
     let avg_time_between_tokens = response.avg_time_between_tokens;
     let p90_time_between_tokens = response.p90_time_between_tokens;
     let p95_time_between_tokens = response.p95_time_between_tokens;
@@ -267,14 +250,6 @@ async fn generate(
         "x-max-time-between-tokens",
         max_time_between_tokens.as_millis().to_string().parse().unwrap(),
     );
-    // headers.insert(
-    //     "x-max-time-between-tokens-except-first",
-    //     max_time_between_tokens_except_first
-    //         .as_millis()
-    //         .to_string()
-    //         .parse()
-    //         .unwrap(),
-    // );
     headers.insert(
         "x-avg-time-between-tokens",
         avg_time_between_tokens.as_millis().to_string().parse().unwrap(),
@@ -319,84 +294,6 @@ async fn generate(
     Ok((headers, Json(response)))
 }
 
-#[instrument(skip_all)]
-#[cfg(feature = "manually_scale")]
-async fn modify_cluster_state_manually(
-    infer: Extension<Infer>,
-    Json(req): Json<ModifyClusterStateRequest>,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    tracing::info!("ModifyClusterStateRequest: {:?}", req);
-    match req {
-        ModifyClusterStateRequest::TriggerPrefillUp { old_stub_indices, new_stub_indices } => {
-            match infer
-                .manually_trigger_scale_up(
-                    old_stub_indices,
-                    new_stub_indices,
-                    "Prefill".to_string(),
-                )
-                .await
-            {
-                Ok(_) => Ok(()),
-                Err(error) => Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse { error, error_type: StatusCode::BAD_REQUEST.to_string() }),
-                )),
-            }
-        }
-        ModifyClusterStateRequest::TriggerDecodeUp { old_stub_indices, new_stub_indices } => {
-            match infer
-                .manually_trigger_scale_up(old_stub_indices, new_stub_indices, "Decode".to_string())
-                .await
-            {
-                Ok(_) => Ok(()),
-                Err(error) => Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse { error, error_type: StatusCode::BAD_REQUEST.to_string() }),
-                )),
-            }
-        }
-        ModifyClusterStateRequest::TriggerScaleDown { stub_indices } => {
-            match infer.manually_trigger_scale_down(stub_indices).await {
-                Ok(_) => Ok(()),
-                Err(error) => Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse { error, error_type: StatusCode::BAD_REQUEST.to_string() }),
-                )),
-            }
-        }
-        ModifyClusterStateRequest::TriggerMutation { stub_indices } => {
-            match infer.manually_trigger_mutate_to_decode(stub_indices).await {
-                Ok(_) => Ok(()),
-                Err(error) => Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse { error, error_type: StatusCode::BAD_REQUEST.to_string() }),
-                )),
-            }
-        }
-        ModifyClusterStateRequest::TriggerNoramalDown { stub_indices } => {
-            match infer.manually_trigger_scale_down(stub_indices).await {
-                Ok(_) => Ok(()),
-                Err(error) => Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse { error, error_type: StatusCode::BAD_REQUEST.to_string() }),
-                )),
-            }
-        }
-        ModifyClusterStateRequest::TriggerNormalUp { old_stub_indices, new_stub_indices } => {
-            match infer
-                .manually_trigger_scale_up(old_stub_indices, new_stub_indices, "Normal".to_string())
-                .await
-            {
-                Ok(_) => Ok(()),
-                Err(error) => Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse { error, error_type: StatusCode::BAD_REQUEST.to_string() }),
-                )),
-            }
-        }
-    }
-}
-
 /// Generate a stream of token using Server-Sent Events
 #[utoipa::path(
 post,
@@ -421,18 +318,6 @@ content_type = "text/event-stream"),
 )
 )]
 #[instrument(skip_all)]
-// #[instrument(
-// skip_all,
-// fields(
-// parameters = ? req.parameters,
-// total_time,
-// validation_time,
-// queue_time,
-// inference_time,
-// time_per_token,
-// seed,
-// )
-// )]
 async fn generate_stream(
     Extension(infer): Extension<Infer>,
     Json(req): Json<GenerateRequest>,
@@ -621,15 +506,10 @@ pub async fn run(
     max_top_n_tokens: u32,
     max_input_length: usize,
     max_total_tokens: usize,
-    waiting_served_ratio: f32,
     max_batch_prefill_tokens: u32,
     max_batch_total_tokens: u32,
-    max_waiting_tokens: usize,
-    #[cfg(feature = "blitzllm-backend")] stubs: Vec<Stub>,
-    #[cfg(feature = "colocation")] engine_clients: Vec<Box<dyn EngineClient>>,
-    deployment: Deployment,
+    engine_clients: Vec<Box<dyn EngineClient>>,
     kvcache_block_size: usize,
-    config_path: String,
     tokenizer: Option<TokenizerRender>,
     validation_workers: usize,
     addr: SocketAddr,
@@ -637,9 +517,6 @@ pub async fn run(
     ngrok: bool,
     ngrok_authtoken: Option<String>,
     ngrok_edge: Option<String>,
-    model: Model,
-    manually_modify_state_enabled: bool,
-    controller_args: ControllerArgs,
     statistic_path: Option<String>,
 ) -> Result<(), axum::BoxError> {
     // OpenAPI documentation
@@ -693,43 +570,16 @@ pub async fn run(
         max_input_length,
         max_total_tokens,
     );
-    let generation_health = Arc::new(AtomicBool::new(false));
     let health_ext = Health::new();
 
-    let config_str = std::fs::read_to_string(config_path).expect("Failed to read config file");
-
-    let infer = match deployment {
-        #[cfg(feature = "disaggregation")]
-        Deployment::Disaggregation => {
-            let config = serde_json::from_str(&config_str).expect("Failed to parse config file");
-            Infer::create_disaggregation(
-                stubs,
-                config,
-                validation,
-                waiting_served_ratio,
-                max_batch_prefill_tokens,
-                max_batch_total_tokens,
-                max_waiting_tokens,
-                max_concurrent_requests,
-                shard_info.requires_padding,
-                shard_info.window_size,
-                shard_info.speculate,
-                generation_health,
-                model,
-                manually_modify_state_enabled,
-                controller_args,
-            )
-        }
-        #[cfg(feature = "colocation")]
-        Deployment::Colocation => Infer::create_vllm_colocation(
-            engine_clients,
-            kvcache_block_size,
-            validation,
-            max_batch_prefill_tokens,
-            max_concurrent_requests,
-            statistic_path,
-        ),
-    };
+    let infer = Infer::create_vllm_colocation(
+        engine_clients,
+        kvcache_block_size,
+        validation,
+        max_batch_prefill_tokens,
+        max_concurrent_requests,
+        statistic_path,
+    );
 
     println!("Blitz router is ready");
 
@@ -799,9 +649,9 @@ pub async fn run(
         max_stop_sequences,
         max_input_length,
         max_total_tokens,
-        waiting_served_ratio,
+        waiting_served_ratio: 0.0,
         max_batch_total_tokens,
-        max_waiting_tokens,
+        max_waiting_tokens: 0,
         validation_workers,
         version: env!("CARGO_PKG_VERSION"),
         sha: option_env!("VERGEN_GIT_SHA"),
@@ -809,63 +659,30 @@ pub async fn run(
     };
 
     // Create router
-    let mut app_box: Box<Router> = Box::<Router>::default();
-    #[cfg(not(feature = "manually_scale"))]
-    {
-        *app_box = Router::new()
-            .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
-            // Base routes
-            .route("/", post(compat_generate))
-            .route("/info", get(get_model_info))
-            .route("/generate", post(generate))
-            .route("/generate_stream", post(generate_stream))
-            // AWS Sagemaker route
-            .route("/invocations", post(compat_generate))
-            // Base Health route
-            .route("/health", get(health))
-            // Inference API health route
-            .route("/", get(health))
-            // AWS Sagemaker health route
-            .route("/ping", get(health))
-            // Prometheus metrics route
-            .route("/metrics", get(metrics))
-            .layer(Extension(info))
-            .layer(Extension(health_ext.clone()))
-            .layer(Extension(compat_return_full_text))
-            .layer(Extension(infer))
-            .layer(Extension(prom_handle.clone()))
-            .layer(OtelAxumLayer::default())
-            .layer(cors_layer);
-    };
-    #[cfg(feature = "manually_scale")]
-    {
-        *app_box = Router::new()
-            .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
-            // Base routes
-            .route("/", post(compat_generate))
-            .route("/info", get(get_model_info))
-            .route("/generate", post(generate))
-            .route("/generate_stream", post(generate_stream))
-            .route("/modify_cluster_state", post(modify_cluster_state_manually))
-            // AWS Sagemaker route
-            .route("/invocations", post(compat_generate))
-            // Base Health route
-            .route("/health", get(health))
-            // Inference API health route
-            .route("/", get(health))
-            // AWS Sagemaker health route
-            .route("/ping", get(health))
-            // Prometheus metrics route
-            .route("/metrics", get(metrics))
-            .layer(Extension(info))
-            .layer(Extension(health_ext.clone()))
-            .layer(Extension(compat_return_full_text))
-            .layer(Extension(infer))
-            .layer(Extension(prom_handle.clone()))
-            .layer(OtelAxumLayer::default())
-            .layer(cors_layer);
-    };
-    let app = *app_box;
+    let app = Router::new()
+        .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
+        // Base routes
+        .route("/", post(compat_generate))
+        .route("/info", get(get_model_info))
+        .route("/generate", post(generate))
+        .route("/generate_stream", post(generate_stream))
+        // AWS Sagemaker route
+        .route("/invocations", post(compat_generate))
+        // Base Health route
+        .route("/health", get(health))
+        // Inference API health route
+        .route("/", get(health))
+        // AWS Sagemaker health route
+        .route("/ping", get(health))
+        // Prometheus metrics route
+        .route("/metrics", get(metrics))
+        .layer(Extension(info))
+        .layer(Extension(health_ext.clone()))
+        .layer(Extension(compat_return_full_text))
+        .layer(Extension(infer))
+        .layer(Extension(prom_handle.clone()))
+        .layer(OtelAxumLayer::default())
+        .layer(cors_layer);
 
     if ngrok {
         #[cfg(feature = "ngrok")]
@@ -914,10 +731,7 @@ pub async fn run(
         #[cfg(not(feature = "ngrok"))]
         {
             let _ngrok_authtoken = ngrok_authtoken;
-            let _ngrok_domain = ngrok_domain;
-            let _ngrok_username = ngrok_username;
-            let _ngrok_password = ngrok_password;
-
+            let _ngrok_edge = ngrok_edge;
             panic!("`blitz-router` was compiled without the `ngrok` feature");
         }
     } else {
@@ -999,61 +813,6 @@ impl From<InferError> for Event {
     }
 }
 
-fn describe_blitz_metric() {
-    metrics::describe_gauge!("blitz_relay_queue_size", "Current size of the relay queue");
-    metrics::describe_gauge!("blitz_migration_queue_size", "Current size of the migration queue");
-
-    metrics::describe_gauge!("blitz_used_blocks", "Total blocks used");
-
-    metrics::describe_counter!("blitz_scale_up_times", "Times trigger scale up(manual & auto)");
-
-    metrics::describe_counter!("blitz_nvbroadcast_times", "Times when scale using nvbroadcast");
-    metrics::describe_counter!("blitz_NVLink_p2p_times", "Times when scale using NVLink p2p");
-    metrics::describe_counter!("blitz_RDMA_p2p_times", "Times when scale using RDMA p2p");
-
-    metrics::describe_gauge!(
-        "blitz_waiting_full_batches",
-        "Num of batches in MigrationQueue.waiting_full_batches"
-    );
-    metrics::describe_gauge!(
-        "blitz_waiting_partial_batches",
-        "Num of batches in MigrationQueue.waiting_partial_batches"
-    );
-
-    // done
-    metrics::describe_counter!("trans_kv_cache_times", "Times trans full kvcache from src to dst");
-    metrics::describe_counter!(
-        "trans_partial_kv_cache_times",
-        "Times trans partial kvcache from src to dst"
-    );
-    metrics::describe_gauge!(
-        "blitz_decode_replica",
-        "Current Num of Decode instance(Including all kinds of decode, except shutting decode)"
-    );
-    metrics::describe_gauge!(
-        "blitz_prefill_replica",
-        "Current Num of Prefill instance(Including all kinds of prefill, except shutting prefill)"
-    );
-    metrics::describe_gauge!("blitz_shutting_replica", "Current Num of Shutting instance");
-    // pub(crate) prefill_tokens: AtomicUsize,
-    // pub(crate) decode_tokens: AtomicUsize,
-    // pub(crate) loop_counts: Vec<AtomicUsize>,
-    // pub(crate) token_in_queue: AtomicUsize,
-
-    // pub(crate) block_size: u32,
-    // used_blocks: AtomicU32,
-    // model_loaded: AtomicBool,
-
-    // #[allow(unused)]
-    // replica_index: usize,
-    // /// lock() <-> act as decode
-    // pub(crate) dst_mutex: Arc<Mutex<()>>,
-    // /// replica state for event loop
-    // pub(crate) state: RwLock<ReplicaState>,
-    // /// ongoing Zigzag partial layer migration tasks.
-    // pub(crate) flying_partial_migration_batches: Arc<AtomicI64>,
-}
-
 fn describe_metric() {
     metrics::describe_counter!("blitz_request_count", "Total number of requests received");
     metrics::describe_counter!("blitz_request_success", "Total number of successful requests");
@@ -1070,8 +829,6 @@ fn describe_metric() {
         "blitz_request_validation_duration",
         "Time spent on request validation (seconds)"
     );
-
-    // previous done
     metrics::describe_histogram!(
         "blitz_request_queue_duration",
         "Time spent in the request queue (seconds)"
@@ -1084,8 +841,6 @@ fn describe_metric() {
         "blitz_request_mean_time_per_token_duration",
         "Mean time per generated token (seconds)"
     );
-
-    // after done
     metrics::describe_histogram!(
         "blitz_request_generated_tokens",
         "Number of tokens generated per request"
@@ -1103,5 +858,4 @@ fn describe_metric() {
         "blitz_request_skipped_tokens",
         "Number of speculated/skipped tokens per request"
     );
-    describe_blitz_metric();
 }

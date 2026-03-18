@@ -1,91 +1,26 @@
 // Copyright 2025 Blitz-serving
 // SPDX-License-Identifier: Apache-2.0
 //
-// This file is a **modified** version of
-// text-generation-inference/src/token_stream.rs
-// © 2022-present Hugging Face Inc. – Apache-2.0.
-//
-// Modifications by Blitz-serving:
-//   - Add more structure for blitzscale
-#[cfg(not(any(
-    feature = "impl_blitz",
-    feature = "impl_sllm",
-    feature = "manually_scale",
-    feature = "vllm-backend",
-    feature = "zmq-backend",
-)))]
-compile_error!("You must define how this system is running!");
+// Derived from text-generation-inference by Hugging Face Inc. (Apache-2.0).
 
-#[cfg(all(feature = "colocation", feature = "disaggregation"))]
-compile_error!("You must specify either colocation or disaggregation!");
-
-#[cfg(all(feature = "impl_blitz", feature = "mock_transfer"))]
-compile_error!("Feature mock_transfer is not supported with impl_blitz.");
-
-#[cfg(all(feature = "impl_blitz", feature = "impl_sllm"))]
-compile_error!("Feature impl_sllm is not supported with impl_blitz.");
-
-#[cfg(all(feature = "cache_all_miss", feature = "cache_replace"))]
-compile_error!("Feature mock_load is not supported with enable_cache.");
-
-#[cfg(all(feature = "mock_transfer", feature = "cache_replace"))]
-compile_error!("Feature mock_transfer is not supported with enable_cache.");
-
-#[cfg(all(feature = "cache_all_miss", feature = "mock_transfer"))]
-compile_error!("Features 'mock_load' and 'mock_transfer' cannot be enabled at the same time.");
-
-#[cfg(all(feature = "mock_transfer", feature = "cache_all_hit"))]
-compile_error!("Features 'mock_transfer' and 'mock_cache_hit' cannot be enabled at the same time.");
-
-#[cfg(all(feature = "mock_transfer", feature = "cache_replace"))]
-compile_error!("Features 'mock_transfer' and 'enable_cache' cannot be enabled at the same time.");
-
-/// Compilation time features satisfiability checker
-///
-/// TODO: add detailed rules!
-#[allow(dead_code)]
-const fn feat_sat_checker() {
-    let serverless_llm = cfg!(feature = "impl_sllm");
-    let blitz_scale = cfg!(feature = "impl_blitz");
-    if cfg!(feature = "vllm-backend") || cfg!(feature = "zmq-backend") {
-        assert!(!serverless_llm && !blitz_scale);
-        return;
-    }
-    assert!(serverless_llm != blitz_scale);
-    let rdma = cfg!(feature = "impl_rdma");
-    let nvlink = cfg!(feature = "impl_nvl");
-    assert!((rdma || nvlink) ^ serverless_llm);
-    // one of
-    if serverless_llm {
-        let (a, b, c) = (
-            cfg!(feature = "cache_all_miss"),
-            cfg!(feature = "cache_all_hit"),
-            cfg!(feature = "cache_replace"),
-        );
-        assert!(a && !b && !c || !a && b && !c || !a && !b && c);
-    }
-}
-
-#[allow(dead_code)]
-const VALID_FEATURE: () = feat_sat_checker();
+#[cfg(not(any(feature = "vllm-backend", feature = "zmq-backend")))]
+compile_error!("You must enable either `vllm-backend` or `zmq-backend`!");
 
 mod kvcache;
 #[cfg(any(test, kani))]
 mod radixtrie;
 mod policies;
-mod replica;
+mod colocation;
+mod metrics;
 mod statistic;
-mod stub;
 mod vllmlet;
 #[cfg(feature = "zmq-backend")]
 pub mod zmq_engine;
 pub mod engine_client;
 
-pub use replica::*;
-pub use stub::*;
+pub use colocation::*;
+pub use metrics::*;
 pub use vllmlet::*;
-
-pub use infer::{parse_deployment, Deployment};
 
 pub mod error;
 mod health;
@@ -96,7 +31,6 @@ mod validation;
 
 use infer::Infer;
 use policies::Entry;
-use queue::Queue;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validation::{Validation, ValidationError};
@@ -253,48 +187,6 @@ pub(crate) struct GenerateRequest {
     pub parameters: GenerateParameters,
 }
 
-#[allow(unused)]
-#[derive(Clone, Debug, Deserialize, ToSchema)]
-#[serde(tag = "type", content = "data")]
-pub(crate) enum ModifyClusterStateRequest {
-    /// The model_ready of new instance will be set to true automatically when the instance is ready.
-    TriggerMutation {
-        stub_indices: Vec<usize>,
-    },
-
-    TriggerPrefillUp {
-        old_stub_indices: Vec<usize>,
-        new_stub_indices: Vec<usize>,
-    },
-
-    TriggerScaleDown {
-        stub_indices: Vec<usize>,
-    },
-
-    TriggerDecodeUp {
-        old_stub_indices: Vec<usize>,
-        new_stub_indices: Vec<usize>,
-    },
-
-    TriggerNormalUp {
-        old_stub_indices: Vec<usize>,
-        new_stub_indices: Vec<usize>,
-    },
-
-    TriggerNoramalDown {
-        stub_indices: Vec<usize>,
-    },
-}
-
-#[test]
-pub fn test_print_modifyclusterstaterequest() {
-    let req = ModifyClusterStateRequest::TriggerPrefillUp {
-        old_stub_indices: vec![1, 2],
-        new_stub_indices: vec![3, 4],
-    };
-    println!("{:?}", req);
-}
-
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub(crate) struct CompatGenerateRequest {
     #[schema(example = "My name is Olivier and I")]
@@ -413,71 +305,6 @@ pub(crate) struct ErrorResponse {
     pub error_type: String,
 }
 
-use core::hint::spin_loop;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::yield_now;
-
-pub struct SpinLock {
-    flag: AtomicBool, // false: unlocked, true: locked
-}
-
-unsafe impl Send for SpinLock {}
-unsafe impl Sync for SpinLock {}
-
-#[allow(unused)]
-impl SpinLock {
-    pub const fn new() -> Self {
-        Self { flag: AtomicBool::new(false) }
-    }
-
-    /// Blocking spinlock
-    pub fn lock(&self) {
-        // test-and-set + backoff
-        let mut spins = 0u32;
-        loop {
-            while self.flag.load(Ordering::Relaxed) {
-                spins = backoff(spins);
-            }
-
-            match self.flag.compare_exchange(
-                false,
-                true,
-                Ordering::Acquire, // 成功获取，建立 Acquire 栅栏
-                Ordering::Relaxed, // 失败分支可用 Relaxed
-            ) {
-                Ok(_) => break,
-                Err(_) => {
-                    spins = backoff(spins);
-                }
-            }
-        }
-    }
-
-    #[inline]
-    fn unlock(&self) {
-        self.flag.store(false, Ordering::Release);
-    }
-}
-
-/// Exponential backoff: busy-spin at beginning, then yield time slice
-#[inline]
-fn backoff(spins: u32) -> u32 {
-    // 前 64 次：CPU hint
-    if spins < 64 {
-        spin_loop();
-        spins + 1
-    } else {
-        // 偶尔让出 CPU，避免长期霸占
-        if spins & 0xF == 0 {
-            // 每 16 次让出一次
-            yield_now();
-        } else {
-            spin_loop();
-        }
-        spins.saturating_add(1)
-    }
-}
-
 /// OpenAI's format
 #[derive(Serialize, Clone, Debug)]
 pub struct ChatMessage {
@@ -500,8 +327,6 @@ impl TokenizerRender {
             .expect("Invalid tokenizer_config.json file path!");
         let tkn_config_json: serde_json::Value = serde_json::from_str(&tkn_config_text)
             .expect("Invalid tokenzier_config.json file content!");
-        // NOTE: ChatGPT says, `serde::Value::to_string` will serialize again, and produce Json string,
-        //       however, a Json string contains unwelcome escape characters
         let chat_tmpl: String = tkn_config_json["chat_template"]
             .as_str()
             .expect("tokenzier_config.json file does not contain `chat_template`!")
@@ -515,8 +340,6 @@ impl TokenizerRender {
         &self,
         messages: &Vec<ChatMessage>,
     ) -> Result<String, ValidationError> {
-        // NOTE: ChatGPT says jinja2 is readily compitable with serde,
-        //       and thus serialization is useless
         let chat_tmpl = self
             .tmpl_env
             .get_template("ChatML")
@@ -547,7 +370,6 @@ mod tests {
             let tmp_filename = "tokenizer.json.temp";
             let mut file = std::fs::File::create(tmp_filename).unwrap();
             file.write_all(&content).unwrap();
-            // Re-check if another process has written this file maybe.
             if !filename.exists() {
                 std::fs::rename(tmp_filename, filename).unwrap()
             }

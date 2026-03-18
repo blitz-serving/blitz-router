@@ -1,5 +1,5 @@
 [package]
-name = "router_v2"
+name = "router"
 version.workspace = true
 edition.workspace = true
 
@@ -8,7 +8,7 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "router_v2"
+name = "router"
 path = "src/main.rs"
 
 [dependencies]
@@ -83,21 +83,16 @@ vergen = { version = "8.2.5", features = ["build", "git", "gitcl"] }
 default = [
     "ngrok",
     "vllm-backend",
-    "hashtable-blockhash",
+    "radixtree-blockhash",
     "default-hash-algo",
     "determinent-schedule",
 ]
 ngrok = ["dep:ngrok"]
 statistic = []
-manually_scale = []
-impl_blitz = ["impl_rdma", "mutate"]
-impl_sllm = []
 
 # ------ Deployment ------ #
 colocation = []
-disaggregation = []
 vllm-backend = ["colocation"]
-blitzllm-backend = ["disaggregation"]
 zmq-backend = ["dep:zeromq", "dep:rmp-serde", "colocation"]
 # ----------------------- #
 
@@ -108,21 +103,7 @@ hashtable-blockhash = []
 radixtree-blockhash = []
 # ----------------------- #
 
-# - BlitzScale Eval Cfg - #
-eval_sllm = ["cache_replace"]
-eval_sllm_pro = ["cache_all_hit", "mutate"]
-eval_net = ["impl_blitz", "unidirect", "impl_nvl"]
-eval_fast = ["impl_blitz", "impl_fast_pro"]
-eval_all = ["impl_blitz", "impl_fast_pro", "impl_live_pro"]
-eval_fast_wo_nvl = ["impl_blitz", "impl_fast"]
-eval_fast_live_wo_nvl = ["impl_blitz", "impl_fast", "impl_live"]
-test_live = ["live"]
-test_nvl = ["impl_nvl"]
-test_tanz = ["impl_blitz", "impl_tanz"]
-# ----------------------- #
-
-# --- xMetric Policy ---- #
-mutate = ["disaggregation"]
+# --- Scheduling Policy -- #
 random-q = []
 round-robin-q = []
 join-shortest-q = []
@@ -135,42 +116,3 @@ join-shortest-q-weight = []
 stochastic-schedule = []
 determinent-schedule = []
 # ----------------------- #
-
-# ------ Mechanisms ------ #
-# live := Zigzag scaling
-live = ["impl_blitz"]
-impl_live = ["live"]
-impl_live_pro = ["live", "impl_tanz"]
-# fast := Multicasting
-fast = []
-# unidirect := link unidirect for congestion
-unidirect = ["impl_rdma"]
-impl_nvl = []
-impl_rdma = []
-impl_fast = ["fast", "impl_rdma"]
-impl_tanz = ["fast", "impl_rdma", "impl_nvl"]
-impl_fast_pro = ["fast", "impl_tanz"]
-
-# ---- Serverless-LLM ---- #
-cache_all_miss = ["impl_sllm"]
-cache_all_hit = ["impl_sllm"]
-cache_replace = ["impl_sllm"]
-
-#------- Motivation ------ #
-motiv = ["impl_sllm", "mock_transfer"]
-
-# Sleep for a while to simulate params transfering in sched_naive
-mock_transfer = []
-
-# For serverless llm to scale from prefill ndoe
-optimize_network_interference = []
-# For serverless llm to simulate operator loading. It takes 100 ms
-optimize_op_loading = []
-
-decode_load_balance = []
-
-#------ alert metrics ------#
-prefill_tokens_alert = []
-request_in_queue_alert = []
-batch_size_alert = []
-request_num_alert = []

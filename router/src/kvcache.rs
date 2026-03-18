@@ -7,7 +7,64 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
-use crate::SpinLock;
+use core::hint::spin_loop;
+use std::sync::atomic::AtomicBool;
+use std::thread::yield_now;
+
+pub(crate) struct SpinLock {
+    flag: AtomicBool, // false: unlocked, true: locked
+}
+
+unsafe impl Send for SpinLock {}
+unsafe impl Sync for SpinLock {}
+
+#[allow(unused)]
+impl SpinLock {
+    pub const fn new() -> Self {
+        Self { flag: AtomicBool::new(false) }
+    }
+
+    /// Blocking spinlock
+    pub fn lock(&self) {
+        let mut spins = 0u32;
+        loop {
+            while self.flag.load(Ordering::Relaxed) {
+                spins = spinlock_backoff(spins);
+            }
+            match self.flag.compare_exchange(
+                false,
+                true,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(_) => {
+                    spins = spinlock_backoff(spins);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn unlock(&self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+#[inline]
+fn spinlock_backoff(spins: u32) -> u32 {
+    if spins < 64 {
+        spin_loop();
+        spins + 1
+    } else {
+        if spins & 0xF == 0 {
+            yield_now();
+        } else {
+            spin_loop();
+        }
+        spins.saturating_add(1)
+    }
+}
 
 pub(crate) static DEFAULT_BLOCK_HASH: u64 = 42;
 #[cfg(feature = "default-hash-algo")]
