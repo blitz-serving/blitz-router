@@ -75,7 +75,7 @@ mod task_assignment {
     use super::except_management::{ExtContext, ExtState};
     use super::ScheduleContext;
     use crate::{
-        engine_client::{EngineClient, RequestStepOutput},
+        engine_client::{EngineClient, EngineStepReceiver, RequestStepOutput},
         infer::{InferError, InferStreamResponse},
         kvcache::BlockHash,
         queue::{Entry, QueuePro},
@@ -172,9 +172,11 @@ mod task_assignment {
 
     /// Control the workload level of delegated instance.
     ///
-    /// Accepts a `Box<dyn EngineClient>` that is split: the error receiver
-    /// goes to the completion event loop, and the client itself is shared
-    /// via an `Arc<Mutex<..>>` between work and completion loops.
+    /// The `EngineClient` is split: `take_step_receiver()` yields a receiver
+    /// for the completion loop, while this function keeps the client for
+    /// sending requests. No shared mutex needed — eliminates the deadlock
+    /// where `completion_event_loop` held the client lock in `recv_step()`
+    /// while `work_event_loop` waited to acquire it for `add_request()`.
     pub async fn work_event_loop<Q: QueuePro>(
         replica_index: usize,
         mut engine_client: Box<dyn EngineClient>,
@@ -185,45 +187,39 @@ mod task_assignment {
         let (wq_tx, cq_wqe_rx) = channel::<Entry>(64);
         let wqe_mtx = Arc::new(Mutex::new(()));
 
-        // Extract error receiver before wrapping in Arc<Mutex>
+        // Extract error receiver before splitting
         let cq_error_rx = engine_client.get_error_rx();
 
-        // Wrap client in Arc<Mutex> so both loops can use it
-        let engine_client = Arc::new(Mutex::new(engine_client));
+        // Split: step receiver goes to completion loop, client stays here
+        let step_receiver = engine_client.take_step_receiver();
 
-        // Init completion queue poller
+        // Init completion queue poller — owns the step receiver exclusively
         tokio::spawn(completion_event_loop(
             replica_index,
-            engine_client.clone(),
+            step_receiver,
             wqe_mtx.clone(),
             cq_wqe_rx,
             cq_error_rx,
             schedule_context,
         ));
 
-        // flag for logging
+        // Work loop: owns engine_client exclusively, no lock needed
         loop {
             match wq_tx.reserve().await {
                 Ok(permit) => {
                     if let Some((id, entry)) = queue.next_request(replica_index).await {
-                        // NOTE: before-or-after atomicity to avoid RAW-like problem when using channel,
-                        //       i.e., request is dispatched, but WQE has not been put into channel
                         let _g = wqe_mtx.lock().await;
-                        let mut client = engine_client.lock().await;
-                        if let Err(e) = client.add_request(id, &entry.request).await {
+                        if let Err(e) = engine_client.add_request(id, &entry.request).await {
                             tracing::error!(
                                 "Request_{id} failed to add to engine#{replica_index}: {e}"
                             );
-                            // Let the error propagate through the error channel
                         }
-                        drop(client);
                         tracing::info!(
                             "Request_{id} queued {}us, with input length {} output length {}, added to engine#{replica_index}",
                             entry.batch_time.unwrap().duration_since(entry.queue_time).as_micros(),
                             entry.request.input_length,
                             entry.request.stopping_parameters.max_new_tokens,
                         );
-                        // The receiver won't actively drop channel
                         let _ = permit.send(entry);
                     } else {
                         yield_now().await;
@@ -380,7 +376,7 @@ mod task_assignment {
     /// any backend (HTTP+SSE or ZMQ) via the `EngineClient` trait.
     async fn completion_event_loop(
         replica_index: usize,
-        engine_client: Arc<Mutex<Box<dyn EngineClient>>>,
+        mut step_receiver: Box<dyn EngineStepReceiver>,
         wqe_mtx: Arc<Mutex<()>>,
         mut cq_wqe_rx: Receiver<Entry>,
         mut cq_error_rx: mpsc::UnboundedReceiver<u64>,
@@ -398,12 +394,9 @@ mod task_assignment {
         let mut temp_leaving_entries = (Vec::with_capacity(8), Vec::with_capacity(8));
         let mut skipped_fault_entries = (Vec::with_capacity(8), Vec::with_capacity(8));
 
-        // Main event loop: receive step outputs from the engine client
+        // Main event loop: receive step outputs — no shared lock, owns receiver exclusively
         loop {
-            let step_result = {
-                let mut client = engine_client.lock().await;
-                client.recv_step().await
-            };
+            let step_result = step_receiver.recv_step().await;
 
             let m = match step_result {
                 Ok(step) => step,

@@ -309,6 +309,12 @@ impl ZmqEngineClient {
         self.input_socket.is_some() && self.output_socket.is_some()
     }
 
+    /// Take ownership of the output (PULL) socket for use by a step receiver.
+    /// After calling this, `recv_outputs` will return `NotConnected`.
+    pub fn take_output_socket(&mut self) -> Option<PullSocket> {
+        self.output_socket.take()
+    }
+
     /// Send an ADD_REQUEST message to the engine.
     ///
     /// The wire format is a two-frame ZMQ message:

@@ -99,10 +99,24 @@ pub struct EngineStepOutput {
 }
 
 // ---------------------------------------------------------------------------
-// EngineClient trait
+// EngineClient trait (split into sender + step receiver)
 // ---------------------------------------------------------------------------
 
-/// Unified trait for communicating with an LLM inference engine.
+/// Receives per-step outputs from the engine (SSE stream, ZMQ PULL, etc.).
+///
+/// Separated from `EngineClient` so that the completion event loop can own
+/// the receiver exclusively while the work event loop sends requests through
+/// the `EngineClient` — avoiding a shared lock that would deadlock when
+/// `recv_step` blocks waiting for engine output.
+#[async_trait::async_trait]
+pub trait EngineStepReceiver: Send {
+    /// Receive the next engine step output (metrics + per-request status).
+    ///
+    /// Blocks asynchronously until the engine produces a step output.
+    async fn recv_step(&mut self) -> Result<EngineStepOutput, EngineClientError>;
+}
+
+/// Unified trait for sending requests to an LLM inference engine.
 ///
 /// Implementations exist for:
 /// - `VllmClient` (HTTP+SSE, feature `vllm-backend`): sends requests via HTTP
@@ -112,35 +126,24 @@ pub struct EngineStepOutput {
 #[async_trait::async_trait]
 pub trait EngineClient: Send {
     /// Send an inference request to the engine.
-    ///
-    /// The implementation is responsible for translating the
-    /// `ValidGenerateRequest` into the engine's wire format (HTTP JSON body,
-    /// ZMQ msgpack, etc.) and dispatching it.
-    ///
-    /// Takes `&mut self` because some backends (ZMQ) require mutable access
-    /// to their sockets. The event loop owns a single client instance per
-    /// replica, so exclusive access is guaranteed.
     async fn add_request(
         &mut self,
         id: u64,
         request: &ValidGenerateRequest,
     ) -> Result<(), EngineClientError>;
 
-    /// Receive the next engine step output (metrics + per-request status).
-    ///
-    /// This replaces SSE stream polling (HTTP) and `recv_outputs` (ZMQ).
-    /// Blocks asynchronously until the engine produces a step output.
-    async fn recv_step(&mut self) -> Result<EngineStepOutput, EngineClientError>;
-
     /// Abort a running request on the engine.
     async fn abort_request(&mut self, id: u64) -> Result<(), EngineClientError>;
 
     /// Take the error notification receiver.
-    ///
-    /// Returns an unbounded receiver that yields request IDs for which the
-    /// backend reported an error (e.g., HTTP POST failure). Can only be
-    /// called once per client instance.
     fn get_error_rx(&mut self) -> mpsc::UnboundedReceiver<u64>;
+
+    /// Take the step receiver, splitting it from this client.
+    ///
+    /// After calling this, `recv_step` is no longer available on this client
+    /// (it has been moved to the returned receiver). This enables the work
+    /// loop and completion loop to operate concurrently without sharing a lock.
+    fn take_step_receiver(&mut self) -> Box<dyn EngineStepReceiver>;
 }
 
 // ===========================================================================
@@ -158,28 +161,17 @@ mod vllm_impl {
     /// call to `recv_step`.
     struct SseState {
         stream: Box<dyn futures::Stream<Item = Result<es::SSE, es::Error>> + Unpin + Send>,
-        connected: bool,
     }
 
-    /// Wrapper around `VllmClient` that implements `EngineClient`.
+    /// SSE-based step receiver, split from `VllmEngineClient`.
     ///
-    /// The SSE connection is established lazily on the first `recv_step` call,
-    /// so construction is cheap and non-blocking.
-    pub struct VllmEngineClient {
+    /// Owns the SSE stream exclusively — no shared lock needed.
+    pub struct VllmStepReceiver {
         inner: VllmClient,
         sse_state: Option<SseState>,
     }
 
-    impl VllmEngineClient {
-        /// Create a new `VllmEngineClient` wrapping an existing `VllmClient`.
-        pub fn new(client: VllmClient) -> Self {
-            Self {
-                inner: client,
-                sse_state: None,
-            }
-        }
-
-        /// Ensure the SSE stream is initialized and connected.
+    impl VllmStepReceiver {
         async fn ensure_sse_connected(&mut self) -> Result<(), EngineClientError> {
             if self.sse_state.is_some() {
                 return Ok(());
@@ -204,9 +196,7 @@ mod vllm_impl {
                         )));
                     }
                 }
-                Some(Ok(_)) => {
-                    // Unexpected first event, but tolerate it
-                }
+                Some(Ok(_)) => {}
                 Some(Err(e)) => {
                     return Err(EngineClientError::Sse(format!(
                         "SSE connection error: {}",
@@ -220,10 +210,58 @@ mod vllm_impl {
 
             self.sse_state = Some(SseState {
                 stream: Box::new(stream),
-                connected: true,
             });
 
             Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EngineStepReceiver for VllmStepReceiver {
+        async fn recv_step(&mut self) -> Result<EngineStepOutput, EngineClientError> {
+            self.ensure_sse_connected().await?;
+
+            let sse_state = self.sse_state.as_mut().unwrap();
+
+            loop {
+                match sse_state.stream.next().await {
+                    Some(Ok(es::SSE::Event(e))) => {
+                        let m: VllmMetric = serde_json::from_str(&e.data).map_err(|err| {
+                            EngineClientError::Json(format!(
+                                "Failed to parse SSE event data: {} (raw: {:?})",
+                                err, e.data
+                            ))
+                        })?;
+                        return Ok(vllm_metric_to_step_output(m));
+                    }
+                    Some(Ok(es::SSE::Comment(_))) => continue,
+                    Some(Ok(es::SSE::Connected(_))) => {
+                        tracing::debug!("SSE reconnected");
+                        continue;
+                    }
+                    Some(Err(e)) => {
+                        return Err(EngineClientError::Sse(format!("SSE stream error: {}", e)));
+                    }
+                    None => {
+                        return Err(EngineClientError::StreamEnded);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Wrapper around `VllmClient` that implements `EngineClient`.
+    ///
+    /// The SSE receiver is created via `take_step_receiver()` and handed
+    /// to the completion event loop, while this struct retains the HTTP
+    /// client for sending requests.
+    pub struct VllmEngineClient {
+        inner: VllmClient,
+    }
+
+    impl VllmEngineClient {
+        pub fn new(client: VllmClient) -> Self {
+            Self { inner: client }
         }
     }
 
@@ -264,58 +302,24 @@ mod vllm_impl {
             id: u64,
             request: &ValidGenerateRequest,
         ) -> Result<(), EngineClientError> {
-            // The existing VllmClient::add_request spawns a tokio task and
-            // returns a JoinHandle. We fire-and-forget here since the event
-            // loop tracks completion via SSE, not via the HTTP response.
             let _handle = self.inner.add_request(id, request).await;
             Ok(())
         }
 
-        async fn recv_step(&mut self) -> Result<EngineStepOutput, EngineClientError> {
-            self.ensure_sse_connected().await?;
-
-            let sse_state = self.sse_state.as_mut().unwrap();
-
-            loop {
-                match sse_state.stream.next().await {
-                    Some(Ok(es::SSE::Event(e))) => {
-                        let m: VllmMetric = serde_json::from_str(&e.data).map_err(|err| {
-                            EngineClientError::Json(format!(
-                                "Failed to parse SSE event data: {} (raw: {:?})",
-                                err, e.data
-                            ))
-                        })?;
-                        return Ok(vllm_metric_to_step_output(m));
-                    }
-                    Some(Ok(es::SSE::Comment(_))) => {
-                        // SSE comment/keepalive, skip
-                        continue;
-                    }
-                    Some(Ok(es::SSE::Connected(_))) => {
-                        // Reconnection event, skip
-                        tracing::debug!("SSE reconnected");
-                        continue;
-                    }
-                    Some(Err(e)) => {
-                        return Err(EngineClientError::Sse(format!("SSE stream error: {}", e)));
-                    }
-                    None => {
-                        return Err(EngineClientError::StreamEnded);
-                    }
-                }
-            }
-        }
-
         async fn abort_request(&mut self, _id: u64) -> Result<(), EngineClientError> {
-            // HTTP+SSE backend does not support explicit abort via a separate
-            // endpoint. The engine handles cleanup when the HTTP connection is
-            // dropped. This is a no-op.
             tracing::debug!("abort_request is a no-op for VllmClient (HTTP+SSE backend)");
             Ok(())
         }
 
         fn get_error_rx(&mut self) -> mpsc::UnboundedReceiver<u64> {
             self.inner.get_error_rx()
+        }
+
+        fn take_step_receiver(&mut self) -> Box<dyn EngineStepReceiver> {
+            Box::new(VllmStepReceiver {
+                inner: self.inner.clone(),
+                sse_state: None,
+            })
         }
     }
 }
@@ -395,27 +399,28 @@ mod zmq_impl {
         }
     }
 
+    /// ZMQ-based step receiver, split from `ZmqEngineClientAdapter`.
+    /// Owns the PULL socket exclusively.
+    pub struct ZmqStepReceiver {
+        output_socket: zeromq::PullSocket,
+    }
+
     #[async_trait::async_trait]
-    impl EngineClient for ZmqEngineClientAdapter {
-        async fn add_request(
-            &mut self,
-            id: u64,
-            request: &ValidGenerateRequest,
-        ) -> Result<(), EngineClientError> {
-            let core_request = valid_request_to_engine_core(id, request);
-            self.inner.add_request(core_request).await?;
-            Ok(())
-        }
-
+    impl EngineStepReceiver for ZmqStepReceiver {
         async fn recv_step(&mut self) -> Result<EngineStepOutput, EngineClientError> {
-            let outputs = self.inner.recv_outputs().await?;
+            use zeromq::SocketRecv;
+            let msg = self.output_socket.recv().await
+                .map_err(|e| EngineClientError::Zmq(e.to_string()))?;
+            let data = msg.into_vec().into_iter().next().ok_or_else(|| {
+                EngineClientError::Zmq("Empty ZMQ message received".to_string())
+            })?;
+            let outputs: crate::zmq_engine::EngineCoreOutputs =
+                rmp_serde::from_slice(&data).map_err(|e| EngineClientError::Msgpack(e.to_string()))?;
 
-            // Convert EngineCoreOutputs to EngineStepOutput
             let step_outputs: Vec<RequestStepOutput> = outputs
                 .outputs
                 .into_iter()
                 .map(|o| {
-                    // Parse request_id from string back to u64
                     let request_id = o.request_id.parse::<u64>().unwrap_or_else(|_| {
                         tracing::warn!(
                             "Failed to parse request_id '{}' as u64, using 0",
@@ -427,13 +432,7 @@ mod zmq_impl {
                     let is_finished = o.finish_reason.is_some();
                     let state = match &o.state {
                         Some(s) => s.clone(),
-                        None => {
-                            if is_finished {
-                                "DECODE".to_string()
-                            } else {
-                                "DECODE".to_string()
-                            }
-                        }
+                        None => "DECODE".to_string(),
                     };
 
                     RequestStepOutput {
@@ -446,7 +445,6 @@ mod zmq_impl {
                 })
                 .collect();
 
-            // Convert latency from seconds (f64) to milliseconds (u64)
             let latency_ms = outputs
                 .latency
                 .map(|l| (l * 1000.0) as u64)
@@ -457,9 +455,6 @@ mod zmq_impl {
                 prefill_token_budget: outputs.prefill_token_budget.unwrap_or(0) as usize,
                 latency: latency_ms,
                 outputs: step_outputs,
-                // ZMQ protocol does not currently carry block hash / eviction
-                // info. These fields are left empty; cache-aware routing is
-                // handled differently in ZMQ mode.
                 new_block_hashes: Vec::new(),
                 evicted_block_hashes: Vec::new(),
                 evicted_block_ids: Vec::new(),
@@ -469,6 +464,19 @@ mod zmq_impl {
                 preempted_ids: Vec::new(),
                 aborted_requests: Vec::new(),
             })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EngineClient for ZmqEngineClientAdapter {
+        async fn add_request(
+            &mut self,
+            id: u64,
+            request: &ValidGenerateRequest,
+        ) -> Result<(), EngineClientError> {
+            let core_request = valid_request_to_engine_core(id, request);
+            self.inner.add_request(core_request).await?;
+            Ok(())
         }
 
         async fn abort_request(&mut self, id: u64) -> Result<(), EngineClientError> {
@@ -481,6 +489,14 @@ mod zmq_impl {
             self.error_rx
                 .take()
                 .expect("get_error_rx called more than once on ZmqEngineClientAdapter")
+        }
+
+        fn take_step_receiver(&mut self) -> Box<dyn EngineStepReceiver> {
+            let socket = self.inner.take_output_socket()
+                .expect("take_step_receiver called but ZMQ output socket not available");
+            Box::new(ZmqStepReceiver {
+                output_socket: socket,
+            })
         }
     }
 }
