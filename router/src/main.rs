@@ -441,8 +441,9 @@ fn init_logging(
     }
 
     // Filter events with LOG_LEVEL
+    // Default: cache_tracking is off to avoid noise; enable with LOG_LEVEL="info,cache_tracking=info"
     let env_filter =
-        EnvFilter::try_from_env("LOG_LEVEL").unwrap_or_else(|_| EnvFilter::new("info"));
+        EnvFilter::try_from_env("LOG_LEVEL").unwrap_or_else(|_| EnvFilter::new("info,cache_tracking=off"));
 
     tracing_subscriber::registry().with(env_filter).with(layers).init();
     return guard;

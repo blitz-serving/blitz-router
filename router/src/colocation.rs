@@ -51,11 +51,12 @@ fn throttle_for_decoding(idx: usize, lmetric: &LMetric, throttled: &mut bool) {
         if !*throttled {
             *throttled = true;
             tracing::warn!(
-                "Vllm#{} throttled! [#req={}, tps={}, tpot={}ms]",
-                idx,
-                nreq,
-                tps,
-                tpot_mili
+                target: "metrics",
+                engine = idx,
+                num_requests = nreq,
+                tps = tps,
+                tpot_ms = tpot_mili,
+                "THROTTLE_ON"
             );
         }
     } else {
@@ -215,14 +216,20 @@ mod task_assignment {
                         let _g = wqe_mtx.lock().await;
                         if let Err(e) = engine_client.add_request(id, &entry.request).await {
                             tracing::error!(
-                                "Request_{id} failed to add to engine#{replica_index}: {e}"
+                                request_id = id,
+                                engine = replica_index,
+                                error = %e,
+                                "ADD_REQUEST_FAILED"
                             );
                         }
                         tracing::info!(
-                            "Request_{id} queued {}us, with input length {} output length {}, added to engine#{replica_index}",
-                            entry.batch_time.unwrap().duration_since(entry.queue_time).as_micros(),
-                            entry.request.input_length,
-                            entry.request.stopping_parameters.max_new_tokens,
+                            target: "lifecycle",
+                            request_id = id,
+                            queue_time_us = entry.batch_time.unwrap().duration_since(entry.queue_time).as_micros() as u64,
+                            input_length = entry.request.input_length,
+                            max_new_tokens = entry.request.stopping_parameters.max_new_tokens,
+                            engine = replica_index,
+                            "REQUEST_ADMIT"
                         );
                         let _ = permit.send(entry);
                     } else {
@@ -247,7 +254,7 @@ mod task_assignment {
         request_phases: &mut IntMap<u64, RequestPhase>,
     ) {
         while let Some(id) = cancel_req_ids.pop() {
-            tracing::warn!("Request_{id} is cancelling...");
+            tracing::warn!(target: "lifecycle", request_id = id, "REQUEST_CANCELLING");
             skip_entries.0.push(id);
             let entry = entries
                 .remove(&id)
@@ -276,7 +283,9 @@ mod task_assignment {
                 continue;
             }
             tracing::info!(
-                "Request_{id} has error at backend, notifying frontend..."
+                target: "lifecycle",
+                request_id = id,
+                "BACKEND_FAULT"
             );
             // NOTE: tolerant the error request occurs in the same step output, but no more
             let entry = entries
@@ -305,8 +314,11 @@ mod task_assignment {
         shared_tokenizer: &Option<Arc<tokenizers::Tokenizer>>,
     ) -> Result<(), ExtExcept> {
         tracing::info!(
-            "Vllm#{replica_index}::Request_{request_id} prefill done with {} actual hit tokens!",
-            hit_token_cnt
+            target: "lifecycle",
+            engine = replica_index,
+            request_id = request_id,
+            hit_token_cnt = hit_token_cnt,
+            "PREFILL_DONE"
         );
         entry
             .response_tx
@@ -341,7 +353,7 @@ mod task_assignment {
         new_token_ids: &Vec<u32>,
         shared_tokenizer: &Option<Arc<tokenizers::Tokenizer>>,
     ) -> Result<(), ExtExcept> {
-        tracing::trace!("Vllm#{replica_index}::Request_{request_id} decoding!");
+        tracing::trace!(engine = replica_index, request_id = request_id, "DECODE_STEP");
 
         for &t in new_token_ids {
             entry
@@ -376,8 +388,11 @@ mod task_assignment {
     ) {
         let id = request_id;
         tracing::info!(
-            "engine#{replica_index}::Request_{id} is finished generating {} tokens",
-            entry.generated_token_cnt
+            target: "lifecycle",
+            engine = replica_index,
+            request_id = id,
+            generated_tokens = entry.generated_token_cnt,
+            "REQUEST_FINISH"
         );
         let _skip = entry.response_tx.send(Ok(InferStreamResponse::End {
             token: Token::default(),
@@ -422,7 +437,7 @@ mod task_assignment {
             let m = match step_result {
                 Ok(step) => step,
                 Err(e) => {
-                    tracing::error!("engine#{} recv_step error: {}", replica_index, e);
+                    tracing::error!(engine = replica_index, error = %e, "RECV_STEP_ERROR");
                     // For stream-ended errors, break out of the loop
                     if matches!(e, crate::engine_client::EngineClientError::StreamEnded) {
                         break;
@@ -450,13 +465,13 @@ mod task_assignment {
             }
             // postcond: all requests in step output are visible to CQ
 
-            tracing::trace!("engine#{}::step received {:?}", replica_index, m);
+            tracing::trace!(engine = replica_index, step = ?m, "STEP_RECEIVED");
 
             let current_epoch = schedule_context.lock().await.block_hash.epoch();
 
             if !m.preempted_ids.is_empty() {
                 m.preempted_ids.iter().for_each(|&id| {
-                    tracing::warn!("Request_{id} is preempted at backend!");
+                    tracing::warn!(target: "lifecycle", request_id = id, "REQUEST_PREEMPTED");
                 });
             }
 
@@ -499,9 +514,9 @@ mod task_assignment {
                                 temp_leaving_entries.1.push(entry);
                             } else if !is_known {
                                 tracing::warn!(
-                                    "Ignoring finished PREFILL for unknown request_id={}: \
-                                     likely stale SSE event from previous session",
-                                    request_id
+                                    target: "lifecycle",
+                                    request_id = request_id,
+                                    "STALE_PREFILL_FINISHED"
                                 );
                             }
                         } else {
@@ -514,23 +529,24 @@ mod task_assignment {
                                 .set_real_token_hits_get_diff(hit_token_cnt);
                             let bs = entry.block_hash_state.get_block_size();
                             tracing::info!(
-                                "CORRECTION Request_{} @ engine#{}: predicted={} actual={} diff={} decision_epoch={} current_epoch={}",
-                                request_id,
-                                replica_index,
-                                entry.block_hash_state.pred_hit_tokens(),
-                                hit_token_cnt,
-                                inc_hit_nblks * bs as isize,
-                                entry.block_hash_state.decision_epoch(),
-                                current_epoch
+                                target: "correction",
+                                request_id = request_id,
+                                engine = replica_index,
+                                predicted = entry.block_hash_state.pred_hit_tokens(),
+                                actual = hit_token_cnt,
+                                diff = inc_hit_nblks * bs as isize,
+                                decision_epoch = entry.block_hash_state.decision_epoch(),
+                                current_epoch = current_epoch,
+                                "CORRECTION"
                             );
                             metric_delta.prefill_tokens_dec += inc_hit_nblks
                                 * entry.block_hash_state.get_block_size() as isize;
                             entry.append_state(new_tokens, &tbt);
                             } else {
                                 tracing::warn!(
-                                    "Ignoring PREFILL update for unknown request_id={}: \
-                                     likely stale SSE event from previous session",
-                                    request_id
+                                    target: "lifecycle",
+                                    request_id = request_id,
+                                    "STALE_PREFILL_UPDATE"
                                 );
                                 // Undo the metric delta we already applied above
                                 metric_delta.all_tokens_inc -= new_tokens.len() as isize;
@@ -562,9 +578,9 @@ mod task_assignment {
                                 temp_leaving_entries.1.push(entry);
                             } else {
                                 tracing::warn!(
-                                    "Ignoring finished DECODE for unknown request_id={}: \
-                                     likely stale SSE event from previous session",
-                                    request_id
+                                    target: "lifecycle",
+                                    request_id = request_id,
+                                    "STALE_DECODE_FINISHED"
                                 );
                             }
                         } else {
@@ -583,9 +599,9 @@ mod task_assignment {
                                 // Stale SSE event for unknown request (e.g., from a
                                 // previous router session). Skip gracefully.
                                 tracing::warn!(
-                                    "Ignoring DECODE update for unknown request_id={}: \
-                                     likely stale SSE event from previous session",
-                                    request_id
+                                    target: "lifecycle",
+                                    request_id = request_id,
+                                    "STALE_DECODE_UPDATE"
                                 );
                             }
                         }
@@ -601,7 +617,12 @@ mod task_assignment {
             // Update PrefixBlockHash
             let epoch_before = sctx.block_hash.epoch();
             if !m.evicted_block_ids.is_empty() {
-                tracing::info!("EVICTION engine#{}: {} block_ids removed", replica_index, m.evicted_block_ids.len());
+                tracing::info!(
+                    target: "cache_tracking",
+                    engine = replica_index,
+                    evicted_blocks = m.evicted_block_ids.len(),
+                    "EVICTION"
+                );
             }
             sctx.block_hash.remove(m.evicted_block_ids.clone());
             for (rid, block_indices) in &m.cur_used_block_ids {
@@ -619,7 +640,12 @@ mod task_assignment {
                         temp_leaving_entries.1.get_mut(i).unwrap()
                     })
                 });
-                tracing::debug!("Entry_{rid} update backend bids {:?}", block_indices);
+                tracing::debug!(
+                    target: "cache_tracking",
+                    request_id = *rid,
+                    block_indices = ?block_indices,
+                    "BACKEND_BIDS_UPDATE"
+                );
                 entry.block_hash_state.set_bids(block_indices.clone());
             }
             let mut total_inserted: usize = 0;
@@ -640,9 +666,11 @@ mod task_assignment {
                 match entry.block_hash_state.get_onto_hashes(block_indices) {
                     Ok(onto_hashes) => {
                         tracing::debug!(
-                            "Entry_{rid} insert ({:?}) |-> [{:?}]",
-                            onto_hashes,
-                            block_indices
+                            target: "cache_tracking",
+                            request_id = *rid,
+                            onto_hashes = ?onto_hashes,
+                            block_indices = ?block_indices,
+                            "BLOCK_INSERT"
                         );
                         let n = sctx.block_hash.insert(onto_hashes, block_indices.clone());
                         total_inserted += n;
@@ -656,10 +684,14 @@ mod task_assignment {
             }
             let epoch_after = sctx.block_hash.epoch();
             tracing::info!(
-                "SSE_EVENT engine#{}: step_id={} evicted={} inserted={} epoch_before={} epoch_after={}",
-                replica_index, m.step_id,
-                m.evicted_block_ids.len(), total_inserted,
-                epoch_before, epoch_after
+                target: "cache_tracking",
+                engine = replica_index,
+                step_id = m.step_id,
+                evicted = m.evicted_block_ids.len(),
+                inserted = total_inserted,
+                epoch_before = epoch_before,
+                epoch_after = epoch_after,
+                "SSE_EVENT"
             );
             // Publishes updated instance-level metric state
             sctx.lmetric -= metric_delta;
@@ -1035,10 +1067,10 @@ mod except_management {
                     );
                     let (_, st) = self.states.get_mut(i).unwrap();
                     if st.on_exit() {
-                        tracing::info!("Request_{id} exits exception context.");
+                        tracing::info!(target: "lifecycle", request_id = id, "EXCEPTION_EXIT");
                         self.entries.remove(&id)
                     } else {
-                        tracing::error!("Request_{id} double finish!");
+                        tracing::error!(request_id = id, "DOUBLE_FINISH");
                         None
                     }
                 }
@@ -1049,9 +1081,9 @@ mod except_management {
                     let (_, st) = self.states.get(i).unwrap();
                     let has_entry = st.on_term();
                     if has_entry {
-                        tracing::info!("Request_{id} terminates in exception context.");
+                        tracing::info!(target: "lifecycle", request_id = id, "EXCEPTION_TERM");
                     } else {
-                        tracing::debug!("Request_{id} terminates after exited.");
+                        tracing::debug!(target: "lifecycle", request_id = id, "EXCEPTION_TERM_AFTER_EXIT");
                     }
                     self.states.remove(i);
                     if has_entry { self.entries.remove(&id) } else { None }
@@ -1067,7 +1099,7 @@ mod except_management {
 
             for &(id, st) in self.states.iter() {
                 if st.is_drop_ready() {
-                    tracing::info!("Request_{id} is dropped from exception context.");
+                    tracing::info!(target: "lifecycle", request_id = id, "EXCEPTION_DROP");
                     dropped.push((
                         id,
                         self.entries.remove(&id).expect(

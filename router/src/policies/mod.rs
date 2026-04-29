@@ -398,7 +398,7 @@ where
         weigh_replica::<P>(entry, qctx, all_sctx).await;
 
     if all_scores.is_empty() {
-        tracing::info!("Cluster overloaded!");
+        tracing::info!(target: "scheduling", "CLUSTER_OVERLOADED");
         None
     } else {
         let sampler = P::sampler();
@@ -430,8 +430,13 @@ async fn apply_schedule_decision<P: QueuePlusPlus>(
         - /*inconsistent=*/ hit_nblks * entry.block_hash_state.get_block_size();
 
     tracing::info!(
-        "DECISION Request_{} → engine#{}: predicted_hits={} radix_epoch={} new_tokens={}",
-        request.request_id, replica_idx, hit_nblks, block_hash.epoch(), new_ntkns
+        target: "scheduling",
+        request_id = request.request_id,
+        engine = replica_idx,
+        predicted_hits = hit_nblks,
+        radix_epoch = block_hash.epoch(),
+        new_tokens = new_ntkns,
+        "DECISION"
     );
 
     let metric_inc = LMetricInc {
