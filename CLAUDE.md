@@ -180,3 +180,7 @@ envs = { CUDA_VISIBLE_DEVICES = "0" }
 
 ## License
 Apache-2.0. Code derived from Hugging Face Text Generation Inference (TGI).
+
+## Memory Policy
+
+Project-level memory (operational lessons, deployment pitfalls, design decisions) MUST be stored in `.claude/memory/` within this repo, NOT in user-level `~/.claude/projects/` directories. This ensures all agents and sessions working on this project share the same knowledge.

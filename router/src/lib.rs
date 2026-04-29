@@ -17,10 +17,13 @@ mod vllmlet;
 #[cfg(feature = "zmq-backend")]
 pub mod zmq_engine;
 pub mod engine_client;
+pub mod chat_template;
+pub mod model_config;
 
 pub use colocation::*;
 pub use metrics::*;
 pub use vllmlet::*;
+pub use chat_template::{ChatRenderer, load_chat_template};
 
 pub mod error;
 mod health;
@@ -36,8 +39,7 @@ use utoipa::ToSchema;
 use validation::{Validation, ValidationError};
 
 // `TokenizerRender`
-use minijinja::{context, Environment};
-use std::{fs, path::Path};
+use std::path::Path;
 use tokenizers::Tokenizer;
 
 /// Hub type
@@ -158,7 +160,7 @@ fn default_max_new_tokens() -> Option<u32> {
     Some(100)
 }
 
-fn default_parameters() -> GenerateParameters {
+pub(crate) fn default_parameters() -> GenerateParameters {
     GenerateParameters {
         best_of: None,
         temperature: None,
@@ -185,6 +187,11 @@ pub(crate) struct GenerateRequest {
     pub inputs: String,
     #[serde(default = "default_parameters")]
     pub parameters: GenerateParameters,
+    /// Pre-provided chat messages (set by /v1/chat/completions handler).
+    /// When set, the tokenizer worker uses these for chat template rendering
+    /// instead of wrapping `inputs` as a single user message.
+    #[serde(skip)]
+    pub(crate) chat_messages: Option<Vec<ChatMessage>>,
 }
 
 #[derive(Clone, Debug, Deserialize, ToSchema)]
@@ -200,7 +207,7 @@ pub(crate) struct CompatGenerateRequest {
 
 impl From<CompatGenerateRequest> for GenerateRequest {
     fn from(req: CompatGenerateRequest) -> Self {
-        Self { inputs: req.inputs, parameters: req.parameters }
+        Self { inputs: req.inputs, parameters: req.parameters, chat_messages: None }
     }
 }
 
@@ -217,13 +224,13 @@ pub struct PrefillToken {
 #[derive(Debug, Serialize, ToSchema, Default)]
 pub struct Token {
     #[schema(example = 0)]
-    id: u32,
+    pub(crate) id: u32,
     #[schema(example = "test")]
-    text: String,
+    pub(crate) text: String,
     #[schema(nullable = true, example = "-0.34")]
-    logprob: f32,
+    pub(crate) logprob: f32,
     #[schema(example = "false")]
-    special: bool,
+    pub(crate) special: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -305,17 +312,113 @@ pub(crate) struct ErrorResponse {
     pub error_type: String,
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI Chat Completions API types
+// ---------------------------------------------------------------------------
+
+/// OpenAI-compatible chat completion request.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct ChatCompletionRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(default)]
+    pub stop: Option<ChatCompletionStop>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+}
+
+/// The `stop` field in OpenAI API can be a string or array of strings.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ChatCompletionStop {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl ChatCompletionStop {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            ChatCompletionStop::Single(s) => vec![s],
+            ChatCompletionStop::Multiple(v) => v,
+        }
+    }
+}
+
+/// OpenAI-compatible chat completion response (non-streaming).
+#[derive(Serialize)]
+pub(crate) struct ChatCompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatCompletionChoice>,
+    pub usage: ChatCompletionUsage,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ChatCompletionChoice {
+    pub index: u32,
+    pub message: ChatMessage,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ChatCompletionUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
+/// OpenAI-compatible chat completion chunk (streaming).
+#[derive(Serialize)]
+pub(crate) struct ChatCompletionChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatCompletionChunkChoice>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ChatCompletionChunkChoice {
+    pub index: u32,
+    pub delta: ChatCompletionDelta,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ChatCompletionDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
 /// OpenAI's format
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatMessage {
     pub role: String, // "system", "user", "assistant"
     pub content: String,
 }
 
+/// Wrapper around HuggingFace `tokenizers::Tokenizer` for encoding/decoding.
+///
+/// Chat template rendering is NOT done here — see [`ChatRenderer`] instead.
+/// This struct only handles text ↔ token ID conversion.
 #[derive(Debug, Clone)]
 pub struct TokenizerRender {
-    tokenizer: Tokenizer,
-    tmpl_env: minijinja::Environment<'static>,
+    pub tokenizer: Tokenizer,
 }
 
 impl TokenizerRender {
@@ -323,31 +426,7 @@ impl TokenizerRender {
         let tokenizer = Tokenizer::from_file(local_path.join("tokenizer.json"))
             .ok()
             .expect("Invalid tokenizer.json file path!");
-        let tkn_config_text = fs::read_to_string(local_path.join("tokenizer_config.json"))
-            .expect("Invalid tokenizer_config.json file path!");
-        let tkn_config_json: serde_json::Value = serde_json::from_str(&tkn_config_text)
-            .expect("Invalid tokenzier_config.json file content!");
-        let chat_tmpl: String = tkn_config_json["chat_template"]
-            .as_str()
-            .expect("tokenzier_config.json file does not contain `chat_template`!")
-            .to_string();
-        let mut env = Environment::new();
-        env.add_template_owned("ChatML", chat_tmpl).unwrap();
-        Self { tokenizer, tmpl_env: env }
-    }
-
-    pub fn apply_chat_template(
-        &self,
-        messages: &Vec<ChatMessage>,
-    ) -> Result<String, ValidationError> {
-        let chat_tmpl = self
-            .tmpl_env
-            .get_template("ChatML")
-            .map_err(|e| ValidationError::Tokenizer(e.to_string()))?;
-        let rendered_msg = chat_tmpl
-            .render(context! { messages => messages, add_generation_prompt => true, })
-            .map_err(|e| ValidationError::Tokenizer(e.to_string()))?;
-        Ok(rendered_msg)
+        Self { tokenizer }
     }
 }
 
@@ -375,63 +454,5 @@ mod tests {
             }
         }
         Tokenizer::from_file("tokenizer.json").unwrap()
-    }
-
-    fn check_rendered_chat_message(model_name: &str, message: &str, content: &str) {
-        match model_name {
-            "Qwen2-7B-Instruct" => {
-                assert!(message.contains("<|im_start|>system"));
-                assert!(message.contains("You are a helpful assistant."));
-                assert!(message.contains("<|im_start|>user"));
-                assert!(message.contains(content));
-                assert!(message.contains("<|im_start|>assistant"));
-            }
-            "Qwen2.5-7B-Instruct" => {
-                assert!(message.contains("<|im_start|>system"));
-                assert!(message.contains("You are Qwen, created by Alibaba Cloud."));
-                assert!(message.contains("You are a helpful assistant."));
-                assert!(message.contains("<|im_start|>user"));
-                assert!(message.contains(content));
-                assert!(message.contains("<|im_start|>assistant"));
-            }
-            "Meta-Llama-3-8B-Instruct" => {
-                assert!(message.contains("<|im_start|>system"));
-                assert!(message.contains("<|im_start|>user"));
-                assert!(message.contains(content));
-                assert!(message.contains("<|im_start|>assistant"));
-            }
-            "Qwen3-8B" => {
-                assert!(message.contains("<|im_start|>user"));
-                assert!(message.contains(content));
-                assert!(message.contains("<|im_start|>assistant"));
-            }
-            &_ => unreachable!("Invalid model name!"),
-        }
-    }
-
-    #[test]
-    fn test_tokenizer_render_apply_chat_template() {
-        let test_cases = [
-            "Qwen2-7B-Instruct",
-            "Qwen2.5-7B-Instruct",
-            /*unsupported*/ "Meta-Llama-3-8B-Instruct",
-            /*unsupported*/ "Qwen3-8B",
-        ];
-        let model_cache = Path::new("/nvme/models");
-        let messages =
-            vec![ChatMessage { role: "user".into(), content: "What is deep learning?".into() }];
-
-        for model_name in test_cases {
-            let local_path = model_cache.join(model_name);
-            assert!(local_path.exists() && local_path.is_dir());
-            let tokenizer_render = TokenizerRender::new(&local_path);
-
-            let result = tokenizer_render.apply_chat_template(&messages);
-            assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-            let rendered = result.unwrap();
-            println!("Rendered:\n++++++++{}--------", rendered);
-
-            check_rendered_chat_message(model_name, &rendered, &messages[0].content);
-        }
     }
 }

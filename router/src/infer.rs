@@ -59,6 +59,7 @@ impl Infer {
         max_batch_prefill_tokens: u32,
         max_concurrent_requests: usize,
         statistic_path: Option<String>,
+        shared_tokenizer: Option<Arc<tokenizers::Tokenizer>>,
     ) -> Self {
         let num_replicas = all_engine_clients.len();
         let all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>> = (0..num_replicas)
@@ -77,6 +78,7 @@ impl Infer {
             queue.clone(),
             all_engine_clients,
             all_schedule_contexts.clone(),
+            shared_tokenizer,
         );
 
         let semaphore = Arc::new(Semaphore::new(max_concurrent_requests));

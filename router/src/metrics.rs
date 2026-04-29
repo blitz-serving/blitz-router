@@ -22,9 +22,9 @@ static TBT_EMA_GAMMA: f32 = 0.5;
 /// Prefill token bound, used in JBSQ(1), set to 2⨉ CP size
 pub(crate) static WAITINGT_PREFILL_TOKEN_BOUND: usize = 2048;
 /// Parameters for Bailian
-pub(crate) static BAILIAN_ALPHA: f32 = 0.33; // prefix cache hit block
-pub(crate) static BAILIAN_BETA: f32 = 0.33; // num requests on instance
-pub(crate) static BAILIAN_GAMMA: f32 = 0.33; // num tokens on instance
+pub(crate) static BAILIAN_ALPHA: f32 = 0.7; // prefix cache hit block (paper-tuned for ChatBot)
+pub(crate) static BAILIAN_BETA: f32 = 0.15; // num requests on instance
+pub(crate) static BAILIAN_GAMMA: f32 = 0.15; // num tokens on instance
 
 fn serialize_f32_3<S>(x: &f32, s: S) -> Result<S::Ok, S::Error>
 where
@@ -152,9 +152,9 @@ impl SubAssign<LMetricDec> for LMetric {
                 self.prefill_tokens
             );
         } else {
-            self.bs -= rhs.bs_dec;
-            self.waiting_reqs -= rhs.waiting_reqs_dec;
-            self.prefill_tokens -= rhs.prefill_tokens_dec;
+            self.bs = self.bs.saturating_sub(rhs.bs_dec);
+            self.waiting_reqs = self.waiting_reqs.saturating_sub(rhs.waiting_reqs_dec);
+            self.prefill_tokens = self.prefill_tokens.saturating_sub(rhs.prefill_tokens_dec);
         }
         self.all_tokens = (self.all_tokens as isize + rhs.all_tokens_inc) as usize;
         // first-order estimation

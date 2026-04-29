@@ -8,15 +8,19 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::health::Health;
 use crate::infer::{InferError, InferResponse, InferStreamResponse};
 use crate::validation::ValidationError;
 use crate::engine_client::EngineClient;
 use crate::{
-    BestOfSequence, CompatGenerateRequest, Details, ErrorResponse,
+    BestOfSequence, ChatRenderer, ChatMessage, ChatCompletionRequest, ChatCompletionResponse,
+    ChatCompletionChoice, ChatCompletionUsage, ChatCompletionChunk, ChatCompletionChunkChoice,
+    ChatCompletionDelta, CompatGenerateRequest, Details, ErrorResponse,
     FinishReason, GenerateParameters, GenerateRequest, GenerateResponse, HubModelInfo, Infer, Info,
     PrefillToken, StreamDetails, StreamResponse, Token, TokenizerRender, Validation,
+    default_parameters,
 };
 
 use axum::extract::Extension;
@@ -220,7 +224,11 @@ async fn generate(
     let validation_time = response.queued - start_time;
     let queue_time = response.start - response.queued;
     let inference_time = Instant::now() - response.start;
-    let time_per_token = inference_time / (output_length as u32);
+    let time_per_token = if output_length > 0 {
+        inference_time / (output_length as u32)
+    } else {
+        inference_time
+    };
     // Tracing metadata
     span.record("total_time", format!("{total_time:?}"));
     span.record("validation_time", format!("{validation_time:?}"));
@@ -412,7 +420,11 @@ async fn generate_stream(
                                         let validation_time = queued - start_time;
                                         let queue_time = start - queued;
                                         let inference_time = Instant::now() - start;
-                                        let time_per_token = inference_time / generated_text.generated_tokens;
+                                        let time_per_token = if generated_text.generated_tokens > 0 {
+                                            inference_time / generated_text.generated_tokens
+                                        } else {
+                                            inference_time
+                                        };
 
                                         // Tracing metadata
                                         span.record("total_time", format!("{total_time:?}"));
@@ -494,6 +506,271 @@ async fn metrics(prom_handle: Extension<PrometheusHandle>) -> String {
     prom_handle.render()
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI-compatible /v1/chat/completions endpoint
+// ---------------------------------------------------------------------------
+
+/// Convert a protobuf FinishReason (i32) to OpenAI-compatible string.
+fn finish_reason_to_openai(reason: i32) -> String {
+    match pb::generate::v2::FinishReason::try_from(reason) {
+        Ok(pb::generate::v2::FinishReason::Length) => "length".to_string(),
+        _ => "stop".to_string(),
+    }
+}
+
+/// OpenAI-compatible /v1/chat/completions endpoint.
+///
+/// Accepts `{"messages": [...], "max_tokens": N, "stream": bool}` and
+/// dispatches through the same inference pipeline as `/generate`.
+/// Chat template rendering is handled by the tokenizer workers using
+/// the messages array directly, ensuring correct multi-turn prompt formatting.
+#[instrument(skip_all)]
+async fn chat_completions(
+    infer: Extension<Infer>,
+    info: Extension<Info>,
+    Json(req): Json<ChatCompletionRequest>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let stream = req.stream.unwrap_or(false);
+    let model_id = req.model.clone().unwrap_or_else(|| info.model_id.clone());
+
+    // Build a GenerateRequest with the messages passed through to the tokenizer worker.
+    // The `inputs` field is a placeholder (last message content) for logging/validation;
+    // the actual prompt is rendered from `chat_messages` by the tokenizer worker's chat
+    // template renderer.
+    let inputs_placeholder = req
+        .messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
+    let gen_req = GenerateRequest {
+        inputs: inputs_placeholder,
+        parameters: GenerateParameters {
+            temperature: req.temperature,
+            repetition_penalty: req.repetition_penalty,
+            top_p: req.top_p,
+            max_new_tokens: req.max_tokens,
+            stop: req.stop.map(|s| s.into_vec()).unwrap_or_default(),
+            seed: req.seed,
+            ..default_parameters()
+        },
+        chat_messages: Some(req.messages),
+    };
+
+    if stream {
+        Ok(chat_completions_stream(infer, model_id, gen_req).await.into_response())
+    } else {
+        chat_completions_non_stream(infer, model_id, gen_req).await
+    }
+}
+
+/// Non-streaming chat completions: run inference and return a single JSON response.
+#[instrument(skip_all)]
+async fn chat_completions_non_stream(
+    Extension(infer): Extension<Infer>,
+    model_id: String,
+    req: GenerateRequest,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let start_time = Instant::now();
+    metrics::increment_counter!("blitz_request_count");
+
+    let response = infer.generate(req).await?;
+
+    let total_time = start_time.elapsed();
+    metrics::increment_counter!("blitz_request_success");
+    metrics::histogram!("blitz_request_duration", total_time.as_secs_f64());
+    metrics::histogram!(
+        "blitz_request_generated_tokens",
+        response.generated_text.generated_tokens as f64
+    );
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let finish_reason = finish_reason_to_openai(response.generated_text.finish_reason);
+    let completion_tokens = response.generated_text.generated_tokens;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-request-id", response.request_id.to_string().parse().unwrap());
+
+    let chat_response = ChatCompletionResponse {
+        id: format!("chatcmpl-{}", response.request_id),
+        object: "chat.completion".to_string(),
+        created,
+        model: model_id,
+        choices: vec![ChatCompletionChoice {
+            index: 0,
+            message: ChatMessage {
+                role: "assistant".to_string(),
+                content: response.generated_text.text,
+            },
+            finish_reason: Some(finish_reason),
+        }],
+        usage: ChatCompletionUsage {
+            prompt_tokens: response.input_length as u32,
+            completion_tokens,
+            total_tokens: response.input_length as u32 + completion_tokens,
+        },
+    };
+
+    Ok((headers, Json(chat_response)).into_response())
+}
+
+/// Streaming chat completions: return SSE events in OpenAI chunk format.
+#[instrument(skip_all)]
+async fn chat_completions_stream(
+    Extension(infer): Extension<Infer>,
+    model_id: String,
+    req: GenerateRequest,
+) -> (HeaderMap, Sse<impl Stream<Item = Result<Event, Infallible>>>) {
+    let start_time = Instant::now();
+    metrics::increment_counter!("blitz_request_count");
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+    headers.insert("content-type", "text/event-stream".parse().unwrap());
+
+    let stream = async_stream::stream! {
+        let mut end_reached = false;
+        let mut error = false;
+
+        match infer.generate_stream(req).await {
+            Ok((request_id, _permit, mut response_stream)) => {
+                let chat_id = format!("chatcmpl-{}", request_id);
+
+                // First chunk: role announcement
+                let first_chunk = ChatCompletionChunk {
+                    id: chat_id.clone(),
+                    object: "chat.completion.chunk".to_string(),
+                    created,
+                    model: model_id.clone(),
+                    choices: vec![ChatCompletionChunkChoice {
+                        index: 0,
+                        delta: ChatCompletionDelta {
+                            role: Some("assistant".to_string()),
+                            content: Some(String::new()),
+                        },
+                        finish_reason: None,
+                    }],
+                };
+                yield Ok(Event::default().json_data(first_chunk).unwrap());
+
+                while let Some(response) = response_stream.next().await {
+                    match response {
+                        Ok(response) => {
+                            match response {
+                                InferStreamResponse::PrefillDone => {}
+                                InferStreamResponse::Prefill(_) => {}
+                                InferStreamResponse::Intermediate { token, .. } => {
+                                    let chunk = ChatCompletionChunk {
+                                        id: chat_id.clone(),
+                                        object: "chat.completion.chunk".to_string(),
+                                        created,
+                                        model: model_id.clone(),
+                                        choices: vec![ChatCompletionChunkChoice {
+                                            index: 0,
+                                            delta: ChatCompletionDelta {
+                                                role: None,
+                                                content: Some(token.text),
+                                            },
+                                            finish_reason: None,
+                                        }],
+                                    };
+                                    yield Ok(Event::default().json_data(chunk).unwrap());
+                                }
+                                InferStreamResponse::End {
+                                    token,
+                                    generated_text,
+                                    ..
+                                } => {
+                                    end_reached = true;
+
+                                    // Timings / metrics
+                                    let total_time = start_time.elapsed();
+                                    metrics::increment_counter!("blitz_request_success");
+                                    metrics::histogram!("blitz_request_duration", total_time.as_secs_f64());
+                                    metrics::histogram!(
+                                        "blitz_request_generated_tokens",
+                                        generated_text.generated_tokens as f64
+                                    );
+
+                                    // Emit last token content (if non-empty)
+                                    if !token.text.is_empty() {
+                                        let chunk = ChatCompletionChunk {
+                                            id: chat_id.clone(),
+                                            object: "chat.completion.chunk".to_string(),
+                                            created,
+                                            model: model_id.clone(),
+                                            choices: vec![ChatCompletionChunkChoice {
+                                                index: 0,
+                                                delta: ChatCompletionDelta {
+                                                    role: None,
+                                                    content: Some(token.text),
+                                                },
+                                                finish_reason: None,
+                                            }],
+                                        };
+                                        yield Ok(Event::default().json_data(chunk).unwrap());
+                                    }
+
+                                    // Emit finish chunk
+                                    let finish_reason = finish_reason_to_openai(
+                                        generated_text.finish_reason,
+                                    );
+                                    let finish_chunk = ChatCompletionChunk {
+                                        id: chat_id.clone(),
+                                        object: "chat.completion.chunk".to_string(),
+                                        created,
+                                        model: model_id.clone(),
+                                        choices: vec![ChatCompletionChunkChoice {
+                                            index: 0,
+                                            delta: ChatCompletionDelta {
+                                                role: None,
+                                                content: None,
+                                            },
+                                            finish_reason: Some(finish_reason),
+                                        }],
+                                    };
+                                    yield Ok(Event::default().json_data(finish_chunk).unwrap());
+
+                                    // Emit [DONE] sentinel
+                                    yield Ok(Event::default().data("[DONE]"));
+                                    break;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            error = true;
+                            yield Ok(Event::from(err));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                error = true;
+                yield Ok(Event::from(err));
+            }
+        }
+
+        if !end_reached && !error {
+            let err = InferError::IncompleteGeneration;
+            metrics::increment_counter!("blitz_request_failure", "err" => "incomplete");
+            tracing::error!("{err}");
+            yield Ok(Event::from(err));
+        }
+    };
+
+    (headers, Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 /// Serving method
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -511,6 +788,8 @@ pub async fn run(
     engine_clients: Vec<Box<dyn EngineClient>>,
     kvcache_block_size: usize,
     tokenizer: Option<TokenizerRender>,
+    chat_renderer: ChatRenderer,
+    shared_tokenizer: Option<Arc<tokenizers::Tokenizer>>,
     validation_workers: usize,
     addr: SocketAddr,
     allow_origin: Option<AllowOrigin>,
@@ -564,6 +843,7 @@ pub async fn run(
     let validation = Validation::new(
         validation_workers,
         tokenizer,
+        chat_renderer,
         max_best_of,
         max_stop_sequences,
         max_top_n_tokens,
@@ -579,6 +859,7 @@ pub async fn run(
         max_batch_prefill_tokens,
         max_concurrent_requests,
         statistic_path,
+        shared_tokenizer,
     );
 
     println!("Blitz router is ready");
@@ -666,6 +947,8 @@ pub async fn run(
         .route("/info", get(get_model_info))
         .route("/generate", post(generate))
         .route("/generate_stream", post(generate_stream))
+        // OpenAI-compatible chat completions
+        .route("/v1/chat/completions", post(chat_completions))
         // AWS Sagemaker route
         .route("/invocations", post(compat_generate))
         // Base Health route

@@ -1,7 +1,8 @@
-// Shortest-queue-weight scheduling policy.
+// vLLM (4+1) scheduling policy.
 //
 // Uses a weighted linear combination of waiting and running request
-// counts as the comparison metric.
+// counts as the comparison metric: waiting_requests * 4 + running_requests.
+// This replicates the default vLLM router's load-balance-only design.
 
 use super::{
     AssignScore, DeterministicPolicy, EmptyContext, Entry, NumHitKvBlock, QueuePlusPlus,

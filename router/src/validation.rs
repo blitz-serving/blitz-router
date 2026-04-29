@@ -1,4 +1,5 @@
 /// Payload validation logic
+use crate::chat_template::ChatRenderer;
 use crate::validation::ValidationError::{BestOfSampling, BestOfSeed, EmptyInput};
 use crate::{ChatMessage, GenerateParameters, GenerateRequest, TokenizerRender};
 
@@ -29,6 +30,7 @@ impl Validation {
     pub(crate) fn new(
         workers: usize,
         tokenizer: Option<TokenizerRender>,
+        chat_renderer: ChatRenderer,
         max_best_of: usize,
         max_stop_sequences: usize,
         max_top_n_tokens: u32,
@@ -44,12 +46,13 @@ impl Validation {
             // Create workers
             for _ in 0..workers {
                 let tokenizer_clone = tokenizer.clone();
+                let chat_renderer_clone = chat_renderer.clone();
                 let (tokenizer_sender, tokenizer_receiver) = mpsc::unbounded_channel();
                 senders.push(tokenizer_sender);
 
                 // Spawn worker
                 tokio::task::spawn_blocking(move || {
-                    tokenizer_worker(tokenizer_clone, tokenizer_receiver)
+                    tokenizer_worker(tokenizer_clone, chat_renderer_clone, tokenizer_receiver)
                 });
             }
 
@@ -77,6 +80,7 @@ impl Validation {
         inputs: String,
         truncate: Option<usize>,
         max_new_tokens: Option<u32>,
+        chat_messages: Option<Vec<ChatMessage>>,
     ) -> Result<(Vec<ChatMessage>, String, usize, u32, Vec<u32>), ValidationError> {
         // If we have a fast tokenizer
         if let Some(sender) = &self.sender {
@@ -84,7 +88,7 @@ impl Validation {
             let (response_sender, response_receiver) = oneshot::channel();
             // Send request to the background validation task
             // Unwrap is safe here
-            sender.send(((inputs, truncate), response_sender, Span::current())).unwrap();
+            sender.send(((inputs, truncate, chat_messages), response_sender, Span::current())).unwrap();
 
             // Await on response channel
             // Unwrap is safe here
@@ -138,8 +142,10 @@ impl Validation {
                 ));
             }
 
-            // No tokenizer: wrap raw inputs as a chat message for the backend
-            let messages = vec![ChatMessage { role: "user".to_string(), content: inputs.clone() }];
+            // No tokenizer: use provided chat messages or wrap raw inputs
+            let messages = chat_messages.unwrap_or_else(|| {
+                vec![ChatMessage { role: "user".to_string(), content: inputs.clone() }]
+            });
             Ok((messages, inputs, input_length, max_new_tokens, vec![]))
         }
     }
@@ -251,8 +257,8 @@ impl Validation {
             })
             .unwrap_or(Ok(0))?;
 
-        // Check if inputs is empty
-        if request.inputs.is_empty() {
+        // Check if inputs is empty (skip when chat messages are provided directly)
+        if request.inputs.is_empty() && request.chat_messages.is_none() {
             return Err(EmptyInput);
         }
 
@@ -270,7 +276,7 @@ impl Validation {
         // NOTE: received `inputs` should be rendered according to chat template
         //       in file `tokenizer_config.json`
         let (messages, inputs, input_length, max_new_tokens, input_tokens) =
-            self.validate_input(request.inputs, truncate, max_new_tokens).await?;
+            self.validate_input(request.inputs, truncate, max_new_tokens, request.chat_messages).await?;
 
         let parameters = NextTokenChooserParameters {
             temperature,
@@ -334,28 +340,36 @@ async fn round_robin_task(
 /// Start tokenization workers
 fn tokenizer_worker(
     tokenizer: TokenizerRender,
+    mut chat_renderer: ChatRenderer,
     mut receiver: mpsc::UnboundedReceiver<TokenizerRequest>,
 ) {
     // Loop over requests
-    while let Some(((inputs, truncate), response_tx, parent_span)) = receiver.blocking_recv() {
+    while let Some(((inputs, truncate, chat_messages), response_tx, parent_span)) = receiver.blocking_recv() {
         parent_span.in_scope(|| {
-            response_tx.send(prepare_input(inputs, truncate, &tokenizer)).unwrap_or(())
+            response_tx
+                .send(prepare_input(inputs, truncate, chat_messages, &tokenizer, &mut chat_renderer))
+                .unwrap_or(())
         })
     }
 }
 
-/// Render input according to ChatML,
-/// get input length and optionally truncate it
+/// Optionally render input via chat template, tokenize, and truncate.
 fn prepare_input(
     inputs: String,
     truncate: Option<usize>,
+    chat_messages: Option<Vec<ChatMessage>>,
     tokenizer: &TokenizerRender,
+    chat_renderer: &mut ChatRenderer,
 ) -> Result<(Vec<ChatMessage>, String, usize, Vec<u32>), ValidationError> {
-    // Render the input prompt first
-    let messages = vec![ChatMessage { role: "user".to_string(), content: inputs }];
-    let inputs = tokenizer.apply_chat_template(&messages)?;
+    // Use provided chat messages (from /v1/chat/completions) or wrap raw input
+    let messages = chat_messages.unwrap_or_else(|| {
+        vec![ChatMessage { role: "user".to_string(), content: inputs }]
+    });
 
-    // Get the number of tokens in the input
+    // Step 1: Render chat template (or pass through if ChatRenderer::None)
+    let inputs = chat_renderer.render(&messages)?;
+
+    // Step 2: Encode to token IDs (always Rust tokenizers crate)
     let mut encoding = tokenizer
         .tokenizer
         .encode(inputs.clone(), false)
@@ -381,7 +395,7 @@ fn prepare_input(
 }
 
 type TokenizerRequest = (
-    (String, Option<usize>),
+    (String, Option<usize>, Option<Vec<ChatMessage>>),
     oneshot::Sender<Result<(Vec<ChatMessage>, String, usize, Vec<u32>), ValidationError>>,
     Span,
 );

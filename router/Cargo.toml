@@ -62,15 +62,15 @@ toml = "0.8.12"
 tracing-appender = "0.2.3"
 async-channel = "2.3.1"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-minijinja = { version = "2.10.2", features = ["loader"] }
-minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 smallvec = { version = "1.15.1" }
 zeromq = { version = "0.4", optional = true }
 rmp-serde = { version = "1.3", optional = true }
+pyo3 = { version = "0.23", features = ["auto-initialize", "py-clone"], optional = true }
 
 [dev-dependencies]
 proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
 
 [[bench]]
 name = "radix_bench"
@@ -94,6 +94,7 @@ statistic = []
 colocation = []
 vllm-backend = ["colocation"]
 zmq-backend = ["dep:zeromq", "dep:rmp-serde", "colocation"]
+python-chat-template = ["dep:pyo3"]
 # ----------------------- #
 
 # ---- Prefix Cache ----- #
@@ -110,6 +111,12 @@ join-shortest-q = []
 bounded-most-hit-q = []
 least-wait-token-q = []
 bailian-impl-q = []
+aibrix-q = []
+dynamo-q = []
+dynamo-decoupled-q = []
+lmetric-q = []
+preble-q = []
+# Legacy aliases (prefer system-specific names above)
 join-shortest-q-tuple = []
 join-shortest-q-weight = []
 

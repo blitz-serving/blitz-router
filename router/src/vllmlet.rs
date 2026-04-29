@@ -176,6 +176,8 @@ pub(crate) struct VllmMetric {
     pub preempted_ids: Vec<u64>,
     #[serde(default)]
     pub aborted_requests: Vec<u64>,
+    #[serde(default)]
+    pub step_id: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

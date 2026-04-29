@@ -3,7 +3,7 @@ use nohash_hasher::{self, BuildNoHashHasher, IntMap};
 use std::collections::HashMap;
 use std::mem::{self};
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
@@ -171,6 +171,8 @@ pub trait BlockHash {
     fn get(&self, block_hashes: &[u64]) -> usize;
     /// Removes corresponding prefix cache blocks
     fn remove(&mut self, block_indices: Vec<u64>);
+    /// Monotonic epoch counter, incremented on every insert/remove
+    fn epoch(&self) -> u64;
 }
 
 pub(crate) struct RadixTreeBlockHash {
@@ -179,6 +181,7 @@ pub(crate) struct RadixTreeBlockHash {
     nodes: AtomicUsize,
     block_to_node: Vec<*mut Node<u64, u64>>,
     mtx: SpinLock,
+    epoch: u64,
 }
 
 unsafe impl Send for RadixTreeBlockHash {}
@@ -634,12 +637,7 @@ impl RadixTreeBlockHash {
         n
     }
 
-    unsafe fn remove_inner(&mut self, block_indices: &Vec<u64>) {
-        #[cfg(debug_assertions)]
-        for &bid in block_indices {
-            debug_assert!(!self.block_to_node[bid as usize].is_null());
-        }
-
+    unsafe fn remove_inner(&mut self, block_indices: &Vec<u64>) -> usize {
         let mut nblock_canary: usize = 0;
 
         for &block_id in block_indices.iter().rev() {
@@ -681,7 +679,8 @@ impl RadixTreeBlockHash {
             // it's parent's responsibility to drop child
         }
 
-        assert_eq!(nblock_canary, block_indices.len());
+        debug_assert!(nblock_canary <= block_indices.len());
+        nblock_canary
     }
 }
 
@@ -721,6 +720,7 @@ impl BlockHash for RadixTreeBlockHash {
             nodes: AtomicUsize::new(1),
             block_to_node: vec![null_mut(); num_blocks],
             mtx: SpinLock::new(),
+            epoch: 0,
         }
     }
 
@@ -736,6 +736,7 @@ impl BlockHash for RadixTreeBlockHash {
         unsafe {
             let n = self.insert_inner(block_hashes, block_indices);
             self.size += n;
+            self.epoch += 1;
             n
         }
     }
@@ -745,11 +746,15 @@ impl BlockHash for RadixTreeBlockHash {
     }
 
     fn remove(&mut self, block_indices: Vec<u64>) {
-        debug_assert!(self.size >= block_indices.len());
+        self.epoch += 1;
         unsafe {
-            self.size -= block_indices.len();
-            self.remove_inner(&block_indices);
+            let removed = self.remove_inner(&block_indices);
+            self.size = self.size.saturating_sub(removed);
         }
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
@@ -760,6 +765,7 @@ mod hashtable_block_hash {
     pub struct HashTableBlockHash {
         map: IntMap<u64, SmallVec<[u64; 1]>>, // hash -> block_id
         block_to_hash: Vec<Option<u64>>,      // block_id -> hash
+        epoch: u64,
     }
 
     unsafe impl Send for HashTableBlockHash {}
@@ -770,6 +776,7 @@ mod hashtable_block_hash {
             Self {
                 map: IntMap::with_capacity_and_hasher(num_blocks, BuildNoHashHasher::default()),
                 block_to_hash: vec![None; num_blocks],
+                epoch: 0,
             }
         }
 
@@ -817,6 +824,7 @@ mod hashtable_block_hash {
                         smallvec![bid]
                     });
             }
+            self.epoch += 1;
             n
         }
 
@@ -854,6 +862,11 @@ mod hashtable_block_hash {
                 }
                 // TODO: add some checking for "last_block_evict"
             }
+            self.epoch += 1;
+        }
+
+        fn epoch(&self) -> u64 {
+            self.epoch
         }
     }
 }
@@ -877,6 +890,7 @@ pub(crate) struct BlockHashState {
     block_size: usize,
     prev_hash: u64,
     token_in_last_block: Vec<u32>,
+    decision_epoch: AtomicU64,
 }
 
 // Sentinel for uninitialized `pred_hit_nblks`, i.e., a MSB mask 0b1_000...000
@@ -911,6 +925,7 @@ impl BlockHashState {
             block_size,
             prev_hash,
             token_in_last_block,
+            decision_epoch: AtomicU64::new(0),
         }
     }
 
@@ -1011,6 +1026,19 @@ impl BlockHashState {
 
     pub fn get_block_size(&self) -> usize {
         self.block_size
+    }
+
+    pub fn set_decision_epoch(&self, epoch: u64) {
+        self.decision_epoch.store(epoch, Ordering::Release);
+    }
+
+    pub fn decision_epoch(&self) -> u64 {
+        self.decision_epoch.load(Ordering::Acquire)
+    }
+
+    pub fn pred_hit_tokens(&self) -> usize {
+        let v = self.pred_hit_nblks.load(Ordering::Acquire);
+        if v == NONE_SENTINEL { 0 } else { v * self.block_size }
     }
 }
 

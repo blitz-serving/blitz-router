@@ -6,24 +6,30 @@
 // supplies the background task, `QueuePro` implementation, and constructor
 // for free -- no macros required.
 
+pub(crate) mod aibrix;
 pub(crate) mod bailian;
 pub(crate) mod bounded_most_hit;
 pub(crate) mod dbg_round_robin;
+pub(crate) mod dynamo;
 pub(crate) mod least_wait_token;
+pub(crate) mod lmetric;
+pub(crate) mod preble;
 pub(crate) mod random;
 pub(crate) mod round_robin;
-pub(crate) mod shortest_q_tuple;
 pub(crate) mod shortest_q_weight;
 
 // Re-export the concrete types so the rest of the crate can refer to them by
 // their original short names.
+pub(crate) use aibrix::AibrixQ;
 pub(crate) use bailian::BailianImplQ;
 pub(crate) use bounded_most_hit::JBoundMostHitQ2;
 pub(crate) use dbg_round_robin::DbgRRQueue;
+pub(crate) use dynamo::{DynamoQ, DynamoDecodeQ};
 pub(crate) use least_wait_token::JLeastWaitTokenQ;
+pub(crate) use lmetric::LmetricQ;
+pub(crate) use preble::PrebleQ;
 pub(crate) use random::RandomQ;
 pub(crate) use round_robin::RRQueue;
-pub(crate) use shortest_q_tuple::JShortestQTuple;
 pub(crate) use shortest_q_weight::JShortestQWeight;
 
 use crate::infer::{InferError, InferStreamResponse};
@@ -419,12 +425,13 @@ async fn apply_schedule_decision<P: QueuePlusPlus>(
         hit_nblks.unwrap()
     };
     entry.block_hash_state.set_pred_block_hits(hit_nblks);
+    entry.block_hash_state.set_decision_epoch(block_hash.epoch());
     let new_ntkns = request.input_tokens.len()
         - /*inconsistent=*/ hit_nblks * entry.block_hash_state.get_block_size();
 
-    tracing::debug!(
-        "vLLM#{replica_idx}::Request_{} with {hit_nblks} presumed hit blocks, adding {new_ntkns} new tokens.",
-        request.request_id
+    tracing::info!(
+        "DECISION Request_{} → engine#{}: predicted_hits={} radix_epoch={} new_tokens={}",
+        request.request_id, replica_idx, hit_nblks, block_hash.epoch(), new_ntkns
     );
 
     let metric_inc = LMetricInc {
@@ -777,22 +784,34 @@ pub(crate) type TaskAssigner = QueueRunner<BailianImplQ>;
 pub(crate) type TaskAssigner = QueueRunner<JBoundMostHitQ2>;
 #[cfg(feature = "least-wait-token-q")]
 pub(crate) type TaskAssigner = QueueRunner<JLeastWaitTokenQ>;
-#[cfg(feature = "join-shortest-q-tuple")]
-pub(crate) type TaskAssigner = QueueRunner<JShortestQTuple>;
+#[cfg(feature = "aibrix-q")]
+pub(crate) type TaskAssigner = QueueRunner<AibrixQ>;
+#[cfg(feature = "dynamo-q")]
+pub(crate) type TaskAssigner = QueueRunner<DynamoQ>;
+#[cfg(feature = "dynamo-decoupled-q")]
+pub(crate) type TaskAssigner = QueueRunner<DynamoDecodeQ>;
+#[cfg(feature = "lmetric-q")]
+pub(crate) type TaskAssigner = QueueRunner<LmetricQ>;
+#[cfg(feature = "preble-q")]
+pub(crate) type TaskAssigner = QueueRunner<PrebleQ>;
 #[cfg(feature = "join-shortest-q-weight")]
 pub(crate) type TaskAssigner = QueueRunner<JShortestQWeight>;
 #[cfg(feature = "round-robin-q")]
 pub(crate) type TaskAssigner = QueueRunner<RRQueue>;
 #[cfg(feature = "random-q")]
 pub(crate) type TaskAssigner = QueueRunner<RandomQ>;
-// `join-shortest-q` is an alias for `join-shortest-q-tuple`
+// Legacy aliases
+#[cfg(all(feature = "join-shortest-q-tuple", not(feature = "aibrix-q")))]
+pub(crate) type TaskAssigner = QueueRunner<AibrixQ>;
 #[cfg(all(feature = "join-shortest-q", not(any(
     feature = "bailian-impl-q",
     feature = "bounded-most-hit-q",
     feature = "least-wait-token-q",
+    feature = "aibrix-q",
+    feature = "dynamo-q",
     feature = "join-shortest-q-tuple",
     feature = "join-shortest-q-weight",
     feature = "round-robin-q",
     feature = "random-q",
 ))))]
-pub(crate) type TaskAssigner = QueueRunner<JShortestQTuple>;
+pub(crate) type TaskAssigner = QueueRunner<AibrixQ>;

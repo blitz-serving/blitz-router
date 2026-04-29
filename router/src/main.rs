@@ -19,13 +19,15 @@ use opentelemetry::sdk::Resource;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use router::error::ClientError;
-use router::{server, HubModelInfo, TokenizerRender};
+use router::{server, ChatRenderer, HubModelInfo, TokenizerRender};
+use std::sync::Arc;
+use router::model_config::load_model_config;
 #[cfg(feature = "vllm-backend")]
 use router::VllmClient;
 use router::engine_client::EngineClient;
 use thiserror::Error;
 #[allow(unused_imports)]
-use tokenizers::{FromPretrainedParameters, Tokenizer};
+use tokenizers::Tokenizer;
 use tower_http::cors::AllowOrigin;
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::layer::SubscriberExt;
@@ -88,6 +90,11 @@ struct Args {
 
     #[clap(long, default_value_t = 16)]
     kvcache_block_size: usize,
+
+    /// Chat template rendering mode: "none" (inner cluster, pre-rendered prompts)
+    /// or "python" (embed Python jinja2 via PyO3, requires feature python-chat-template).
+    #[clap(long, env, default_value = "none")]
+    chat_template_mode: String,
 }
 
 fn main() -> Result<(), RouterError> {
@@ -95,12 +102,12 @@ fn main() -> Result<(), RouterError> {
     let args = Args::parse();
     // Pattern match configuration
     let Args {
-        max_concurrent_requests,
+        mut max_concurrent_requests,
         max_best_of,
         max_stop_sequences,
         max_top_n_tokens,
-        max_input_length,
-        max_total_tokens,
+        mut max_input_length,
+        mut max_total_tokens,
         max_batch_prefill_tokens,
         max_batch_total_tokens,
         kvcache_block_size,
@@ -120,6 +127,7 @@ fn main() -> Result<(), RouterError> {
         log_path,
         statistic_path,
         model_name,
+        chat_template_mode,
     } = args;
 
     // Validate args
@@ -157,32 +165,60 @@ fn main() -> Result<(), RouterError> {
     // Parse Huggingface hub token
     let authorization_token = std::env::var("HUGGING_FACE_HUB_TOKEN").ok();
 
-    // Tokenizer instance
+    // Tokenizer instance (encoding only — no chat template)
     let local_path = Path::new(&tokenizer_name);
     let local_model = local_path.exists() && local_path.is_dir();
     let tokenizer = if use_tokenizer {
         if local_model {
             Some(TokenizerRender::new(local_path))
         } else {
-            unreachable!("Unexisted path {} to tokenizer!", tokenizer_name);
-            #[allow(unreachable_code)]
-            {
-                let _params = FromPretrainedParameters {
-                    revision: revision.clone().unwrap_or("main".to_string()),
-                    ..Default::default()
-                };
-                None
-            }
+            return Err(RouterError::ArgumentValidation(format!(
+                "Tokenizer path does not exist: {tokenizer_name}"
+            )));
         }
     } else {
         None
+    };
+
+    let shared_tokenizer: Option<Arc<tokenizers::Tokenizer>> = tokenizer
+        .as_ref()
+        .map(|tr| Arc::new(tr.tokenizer.clone()));
+
+    // Chat template renderer (decoupled from tokenizer)
+    let chat_renderer = match chat_template_mode.as_str() {
+        "none" => ChatRenderer::None,
+        #[cfg(feature = "python-chat-template")]
+        "python" => {
+            if !local_model {
+                return Err(RouterError::ArgumentValidation(
+                    "chat_template_mode=python requires a valid --tokenizer-name path".to_string(),
+                ));
+            }
+            ChatRenderer::python(local_path).map_err(|e| {
+                RouterError::ArgumentValidation(format!(
+                    "Failed to initialize Python chat template renderer: {e}"
+                ))
+            })?
+        }
+        #[cfg(not(feature = "python-chat-template"))]
+        "python" => {
+            return Err(RouterError::ArgumentValidation(
+                "chat_template_mode=python requires building with --features python-chat-template"
+                    .to_string(),
+            ));
+        }
+        other => {
+            return Err(RouterError::ArgumentValidation(format!(
+                "Invalid chat_template_mode: '{other}'. Must be 'none' or 'python'"
+            )));
+        }
     };
 
     let server_future = async {
         let _guard = init_logging(otlp_endpoint, json_output, log_path);
 
         if tokenizer.is_none() {
-            tracing::warn!("Could not find a fast tokenizer implementation for {tokenizer_name}");
+            tracing::warn!("Tokenizer not loaded for {tokenizer_name}");
             tracing::warn!("Rust input length validation and truncation is disabled");
         }
 
@@ -276,6 +312,41 @@ fn main() -> Result<(), RouterError> {
 
         let max_supported_batch_total_tokens = 16000;
 
+        // --- Auto-discovery from model config.json ---
+        // blitz-router is an inner cluster router (not a full inference system).
+        // Model-dependent parameters should be auto-discovered, not manually specified.
+        let num_engines = engine_clients.len();
+
+        if let Some(model_config) = load_model_config(local_path) {
+            tracing::info!(
+                "Loaded model config: type={}, max_position_embeddings={}",
+                model_config.model_type,
+                model_config.max_position_embeddings
+            );
+
+            // Auto-discover max_total_tokens if user didn't override (default is 2048)
+            if max_total_tokens == 2048 {
+                max_total_tokens = model_config.max_position_embeddings;
+                tracing::info!("Auto-set max_total_tokens={} from config.json", max_total_tokens);
+            }
+
+            // Auto-discover max_input_length if user didn't override (default is 1024)
+            if max_input_length == 1024 {
+                max_input_length = max_total_tokens - 1;
+                tracing::info!("Auto-set max_input_length={}", max_input_length);
+            }
+        }
+
+        // Scale max_concurrent_requests with engine count if user didn't override (default is 128)
+        if max_concurrent_requests == 128 {
+            max_concurrent_requests = num_engines * 64;
+            tracing::info!(
+                "Auto-scaled max_concurrent_requests={} ({} engines x 64)",
+                max_concurrent_requests,
+                num_engines
+            );
+        }
+
         // Run server
         server::run(
             model_info,
@@ -292,6 +363,8 @@ fn main() -> Result<(), RouterError> {
             engine_clients,
             kvcache_block_size,
             tokenizer,
+            chat_renderer,
+            shared_tokenizer,
             validation_workers,
             addr,
             cors_allow_origin,

@@ -26,6 +26,7 @@ pub(crate) fn start_vllm_colocation_event_loop(
     queue: TaskAssigner,
     all_engine_clients: Vec<Box<dyn EngineClient>>,
     all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>>,
+    shared_tokenizer: Option<Arc<tokenizers::Tokenizer>>,
 ) -> Arc<ColocationController> {
     for (replica_index, engine_client) in all_engine_clients.into_iter().enumerate() {
         tokio::spawn(task_assignment::work_event_loop(
@@ -33,6 +34,7 @@ pub(crate) fn start_vllm_colocation_event_loop(
             engine_client,
             queue.clone(),
             all_schedule_contexts[replica_index].clone(),
+            shared_tokenizer.clone(),
         ));
     }
 
@@ -182,6 +184,7 @@ mod task_assignment {
         mut engine_client: Box<dyn EngineClient>,
         queue: Q,
         schedule_context: Arc<Mutex<ScheduleContext>>,
+        shared_tokenizer: Option<Arc<tokenizers::Tokenizer>>,
     ) {
         // Channel: work queue -> completion queue (only carries Entry now)
         let (wq_tx, cq_wqe_rx) = channel::<Entry>(64);
@@ -201,6 +204,7 @@ mod task_assignment {
             cq_wqe_rx,
             cq_error_rx,
             schedule_context,
+            shared_tokenizer,
         ));
 
         // Work loop: owns engine_client exclusively, no lock needed
@@ -298,6 +302,7 @@ mod task_assignment {
         request_id: u64,
         hit_token_cnt: u64,
         new_token_ids: &Vec<u32>,
+        shared_tokenizer: &Option<Arc<tokenizers::Tokenizer>>,
     ) -> Result<(), ExtExcept> {
         tracing::info!(
             "Vllm#{replica_index}::Request_{request_id} prefill done with {} actual hit tokens!",
@@ -311,7 +316,14 @@ mod task_assignment {
             entry
                 .response_tx
                 .send(Ok(InferStreamResponse::Intermediate {
-                    token: Token { id: t, text: String::default(), logprob: 0.0, special: false },
+                    token: Token {
+                        id: t,
+                        text: shared_tokenizer.as_ref()
+                            .and_then(|tok| tok.decode(&[t], false).ok())
+                            .unwrap_or_default(),
+                        logprob: 0.0,
+                        special: false,
+                    },
                     top_tokens: Vec::default(),
                 }))
                 .map_err(|_| ExtExcept::FrontendAbort)?
@@ -327,6 +339,7 @@ mod task_assignment {
         entry: &mut Entry,
         request_id: u64,
         new_token_ids: &Vec<u32>,
+        shared_tokenizer: &Option<Arc<tokenizers::Tokenizer>>,
     ) -> Result<(), ExtExcept> {
         tracing::trace!("Vllm#{replica_index}::Request_{request_id} decoding!");
 
@@ -334,7 +347,14 @@ mod task_assignment {
             entry
                 .response_tx
                 .send(Ok(InferStreamResponse::Intermediate {
-                    token: Token { id: t, text: String::default(), logprob: 0.0, special: false },
+                    token: Token {
+                        id: t,
+                        text: shared_tokenizer.as_ref()
+                            .and_then(|tok| tok.decode(&[t], false).ok())
+                            .unwrap_or_default(),
+                        logprob: 0.0,
+                        special: false,
+                    },
                     top_tokens: Vec::default(),
                 }))
                 .map_err(|_| ExtExcept::FrontendAbort)?;
@@ -381,6 +401,7 @@ mod task_assignment {
         mut cq_wqe_rx: Receiver<Entry>,
         mut cq_error_rx: mpsc::UnboundedReceiver<u64>,
         schedule_context: Arc<Mutex<ScheduleContext>>,
+        shared_tokenizer: Option<Arc<tokenizers::Tokenizer>>,
     ) {
         let mut entries =
             IntMap::with_capacity_and_hasher(256, BuildNoHashHasher::<u64>::default());
@@ -431,6 +452,8 @@ mod task_assignment {
 
             tracing::trace!("engine#{}::step received {:?}", replica_index, m);
 
+            let current_epoch = schedule_context.lock().await.block_hash.epoch();
+
             if !m.preempted_ids.is_empty() {
                 m.preempted_ids.iter().for_each(|&id| {
                     tracing::warn!("Request_{id} is preempted at backend!");
@@ -453,14 +476,18 @@ mod task_assignment {
                 } = *request_status;
                 match state.as_str() {
                     "PREFILL" => {
-                        metric_delta.waiting_reqs_dec += 1;
+                        // Only count waiting_reqs_dec if we actually know this request
+                        let is_known = entries.contains_key(&request_id)
+                            || except_context.entries.contains_key(&request_id);
+                        if is_known {
+                            metric_delta.waiting_reqs_dec += 1;
+                        }
                         if is_finished {
                             if let Some(entry) = entries.get_mut(&request_id) {
                                 let input_length = entry.request.input_length as isize;
                                 metric_delta.bs_dec += 1;
                                 metric_delta.all_tokens_inc -= input_length as isize;
                             } else if let Some(entry) =
-                                // `unwrap` inside, `entry` must be either in `entries` or `except_context`
                                 except_context
                                     .put(ExtState::Exit(request_id))
                             {
@@ -470,25 +497,44 @@ mod task_assignment {
                                 // NOTE:
                                 temp_leaving_entries.0.push(request_id);
                                 temp_leaving_entries.1.push(entry);
+                            } else if !is_known {
+                                tracing::warn!(
+                                    "Ignoring finished PREFILL for unknown request_id={}: \
+                                     likely stale SSE event from previous session",
+                                    request_id
+                                );
                             }
                         } else {
                             metric_delta.all_tokens_inc += new_tokens.len() as isize;
-                            let entry = entries.get_mut(&request_id).unwrap_or_else(|| {
-                                except_context.put(ExtState::Live(request_id));
-                                except_context.entries.get_mut(&request_id).unwrap()
-                            });
-                            let inc_hit_nblks = entry
+                            let entry_opt = entries.get_mut(&request_id)
+                                .or_else(|| except_context.entries.get_mut(&request_id));
+                            if let Some(entry) = entry_opt {
+                                let inc_hit_nblks = entry
                                 .block_hash_state
                                 .set_real_token_hits_get_diff(hit_token_cnt);
+                            let bs = entry.block_hash_state.get_block_size();
                             tracing::info!(
-                                "engine#{replica_index}::Request_{} correct {} hit tokens",
+                                "CORRECTION Request_{} @ engine#{}: predicted={} actual={} diff={} decision_epoch={} current_epoch={}",
                                 request_id,
-                                inc_hit_nblks
-                                    * entry.block_hash_state.get_block_size() as isize
+                                replica_index,
+                                entry.block_hash_state.pred_hit_tokens(),
+                                hit_token_cnt,
+                                inc_hit_nblks * bs as isize,
+                                entry.block_hash_state.decision_epoch(),
+                                current_epoch
                             );
                             metric_delta.prefill_tokens_dec += inc_hit_nblks
                                 * entry.block_hash_state.get_block_size() as isize;
                             entry.append_state(new_tokens, &tbt);
+                            } else {
+                                tracing::warn!(
+                                    "Ignoring PREFILL update for unknown request_id={}: \
+                                     likely stale SSE event from previous session",
+                                    request_id
+                                );
+                                // Undo the metric delta we already applied above
+                                metric_delta.all_tokens_inc -= new_tokens.len() as isize;
+                            }
                         }
                     }
                     "DECODE" => {
@@ -514,17 +560,34 @@ mod task_assignment {
                                 // NOTE:
                                 temp_leaving_entries.0.push(request_id);
                                 temp_leaving_entries.1.push(entry);
+                            } else {
+                                tracing::warn!(
+                                    "Ignoring finished DECODE for unknown request_id={}: \
+                                     likely stale SSE event from previous session",
+                                    request_id
+                                );
                             }
                         } else {
-                            let entry = entries.get_mut(&request_id).unwrap_or_else(|| {
-                                except_context.put(ExtState::Live(request_id));
-                                except_context.entries.get_mut(&request_id).unwrap()
-                            });
-                            entry.append_state(new_tokens, &tbt);
-                            // postcond: `Some(entry.tpot)`
-                            metric_delta.all_tokens_inc += new_tokens.len() as isize;
-                            metric_delta.tpot +=
-                                entry.time_of_per_token.unwrap().as_secs_f32();
+                            if let Some(entry) = entries.get_mut(&request_id) {
+                                entry.append_state(new_tokens, &tbt);
+                                // postcond: `Some(entry.tpot)`
+                                metric_delta.all_tokens_inc += new_tokens.len() as isize;
+                                metric_delta.tpot +=
+                                    entry.time_of_per_token.unwrap().as_secs_f32();
+                            } else if let Some(entry) = except_context.entries.get_mut(&request_id) {
+                                entry.append_state(new_tokens, &tbt);
+                                metric_delta.all_tokens_inc += new_tokens.len() as isize;
+                                metric_delta.tpot +=
+                                    entry.time_of_per_token.unwrap().as_secs_f32();
+                            } else {
+                                // Stale SSE event for unknown request (e.g., from a
+                                // previous router session). Skip gracefully.
+                                tracing::warn!(
+                                    "Ignoring DECODE update for unknown request_id={}: \
+                                     likely stale SSE event from previous session",
+                                    request_id
+                                );
+                            }
                         }
                     }
                     _ => {
@@ -536,8 +599,9 @@ mod task_assignment {
             let mut sctx = schedule_context.lock().await;
 
             // Update PrefixBlockHash
+            let epoch_before = sctx.block_hash.epoch();
             if !m.evicted_block_ids.is_empty() {
-                tracing::debug!("Backend removes bids {:?}", m.evicted_block_ids);
+                tracing::info!("EVICTION engine#{}: {} block_ids removed", replica_index, m.evicted_block_ids.len());
             }
             sctx.block_hash.remove(m.evicted_block_ids.clone());
             for (rid, block_indices) in &m.cur_used_block_ids {
@@ -558,6 +622,7 @@ mod task_assignment {
                 tracing::debug!("Entry_{rid} update backend bids {:?}", block_indices);
                 entry.block_hash_state.set_bids(block_indices.clone());
             }
+            let mut total_inserted: usize = 0;
             for (rid, block_indices) in &m.new_block_hashes_ids {
                 if block_indices.is_empty() {
                     continue;
@@ -579,7 +644,8 @@ mod task_assignment {
                             onto_hashes,
                             block_indices
                         );
-                        sctx.block_hash.insert(onto_hashes, block_indices.clone());
+                        let n = sctx.block_hash.insert(onto_hashes, block_indices.clone());
+                        total_inserted += n;
                     }
                     Err(backend_bids) => {
                         let err_msg = format!("Entry_{rid} inconsistent bid: frontend marking occupied {:?} | backend newly committed {:?}", backend_bids, block_indices);
@@ -588,6 +654,13 @@ mod task_assignment {
                     }
                 }
             }
+            let epoch_after = sctx.block_hash.epoch();
+            tracing::info!(
+                "SSE_EVENT engine#{}: step_id={} evicted={} inserted={} epoch_before={} epoch_after={}",
+                replica_index, m.step_id,
+                m.evicted_block_ids.len(), total_inserted,
+                epoch_before, epoch_after
+            );
             // Publishes updated instance-level metric state
             sctx.lmetric -= metric_delta;
             drop(sctx);
@@ -620,6 +693,7 @@ mod task_assignment {
                             request_id,
                             hit_token_cnt,
                             &new_token_ids,
+                            &shared_tokenizer,
                         )
                         .await
                         {
@@ -644,7 +718,7 @@ mod task_assignment {
                     "DECODE" if entries.get(&request_id).is_some() => {
                         let entry = entries.get_mut(&request_id).unwrap();
                         if let Err(ExtExcept::FrontendAbort) =
-                            on_decode(replica_index, entry, request_id, &new_token_ids)
+                            on_decode(replica_index, entry, request_id, &new_token_ids, &shared_tokenizer)
                                 .await
                         {
                             cancel_req_ids.push(request_id);

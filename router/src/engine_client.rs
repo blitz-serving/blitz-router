@@ -96,6 +96,8 @@ pub struct EngineStepOutput {
     pub preempted_ids: Vec<u64>,
     /// Request IDs that were aborted by the engine.
     pub aborted_requests: Vec<u64>,
+    /// Monotonic step counter from the engine.
+    pub step_id: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +294,7 @@ mod vllm_impl {
             op_exec_log: m.op_exec_log,
             preempted_ids: m.preempted_ids,
             aborted_requests: m.aborted_requests,
+            step_id: m.step_id,
         }
     }
 
@@ -463,6 +466,7 @@ mod zmq_impl {
                 op_exec_log: None,
                 preempted_ids: Vec::new(),
                 aborted_requests: Vec::new(),
+                step_id: outputs.step_id.unwrap_or(0) as u64,
             })
         }
     }
