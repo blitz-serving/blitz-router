@@ -1,0 +1,20 @@
+FROM metro-node:cu128-vllm0.10.1dev1
+
+# Wholesale .py overlay: ensures all Python files come from a consistent yaullm commit
+# (prevents version mismatches like missing mark_as_waiting / poll_evicted_block_hashes)
+COPY vllm/ /tmp/vllm-new/
+RUN cd /tmp/vllm-new && \
+    find . -name "*.py" -exec install -D -m 644 {} /usr/local/lib/python3.12/dist-packages/vllm/{} \; && \
+    rm -rf /tmp/vllm-new
+
+# Tools required for run_metro_8gpu.sh and router build
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        iproute2 psmisc protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+LABEL maintainer="metro" \
+      base.image="metro-node:cu128-vllm0.10.1dev1" \
+      yaullm.commit="9e1d6c4ea" \
+      yaullm.branch="lmetric/step-reporter-v2" \
+      description="metro-node with consistent yaullm Python files for lmetric staleness validation"
