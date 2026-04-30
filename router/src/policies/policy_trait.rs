@@ -9,10 +9,10 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::validation::ValidGenerateRequest;
+use crate::policies::Entry;
 use crate::ScheduleContext;
 
-/// A scheduling policy. Picks one replica from `sctxs` for `req`,
+/// A scheduling policy. Picks one replica from `all_sctx` for `entry`,
 /// possibly reading and updating `gctx`.
 ///
 /// Returning `None` signals cluster-overload (no admissible replica);
@@ -28,8 +28,8 @@ pub trait Policy {
     type GlobalContext: Default + Send + Sync + 'static;
 
     fn schedule<'a>(
-        req: &'a ValidGenerateRequest,
-        sctxs: &'a [Arc<Mutex<ScheduleContext>>],
+        entry: &'a Entry,
+        all_sctx: &'a [Arc<Mutex<ScheduleContext>>],
         gctx: &'a mut Self::GlobalContext,
     ) -> impl Future<Output = Option<usize>> + Send + 'a;
 }

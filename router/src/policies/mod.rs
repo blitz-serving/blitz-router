@@ -1,35 +1,36 @@
 // Scheduling policies for replica selection.
 //
-// This module replaces the former macro-based codegen in `queue.rs` with a
-// trait-based design.  Every policy implements `QueuePlusPlus` (scoring) and
-// optionally provides a `Sampler`.  The generic `QueueRunner<P>` struct
-// supplies the background task, `QueuePro` implementation, and constructor
-// for free -- no macros required.
+// Every policy is emitted by the `policy!` proc macro from `policy-dsl/`,
+// which lowers a paper-form DSL expression (`docs/dsl-schema.md` §8) into
+// an `impl Policy for X` block. The generic `PolicyRunner<P: Policy>` in
+// `policy_runner.rs` drives any such P with the queue management /
+// commit-buffer / batch-dispatch boilerplate.
+//
+// The legacy `QueuePlusPlus` / `AssignScore` / `NaiiveLattice` /
+// `DeterministicPolicy` / `StochasticPolicy` / `ScheduleStep` /
+// `SamplerFn` scaffolding lower in this file is kept as dead code
+// pending Phase 4 retirement; nothing in `policies/*.rs` implements
+// it any more.
 
 pub(crate) mod aibrix;
 pub(crate) mod bailian;
-pub(crate) mod bounded_most_hit;
+pub(crate) mod dsl_runtime;
 pub(crate) mod dynamo;
-pub(crate) mod least_wait_token;
 pub(crate) mod lmetric;
+pub(crate) mod policy_runner;
 pub(crate) mod policy_trait;
 pub(crate) mod preble;
-pub(crate) mod random;
-pub(crate) mod round_robin;
-pub(crate) mod shortest_q_weight;
+pub(crate) mod simple;
 
-// Re-export the concrete types so the rest of the crate can refer to them by
-// their original short names.
+// Re-export concrete policy structs (each emitted by `policy!`).
 pub(crate) use aibrix::AibrixQ;
 pub(crate) use bailian::BailianImplQ;
-pub(crate) use bounded_most_hit::JBoundMostHitQ2;
-pub(crate) use dynamo::{DynamoQ, DynamoDecodeQ};
-pub(crate) use least_wait_token::JLeastWaitTokenQ;
+pub(crate) use dynamo::{DynamoDecodeQ, DynamoQ};
 pub(crate) use lmetric::LmetricQ;
 pub(crate) use preble::PrebleQ;
-pub(crate) use random::RandomQ;
-pub(crate) use round_robin::RRQueue;
-pub(crate) use shortest_q_weight::JShortestQWeight;
+pub(crate) use simple::{
+    JBoundMostHitQ2, JLeastWaitTokenQ, JShortestQ, JShortestQWeight, RandomQ, RoundRobinQ,
+};
 
 use crate::infer::{InferError, InferStreamResponse};
 use crate::kvcache::{BlockHash, BlockHashState};
@@ -807,32 +808,36 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Feature-gated TaskAssigner alias
+// Feature-gated TaskAssigner alias.
+// Each policy is now wired through PolicyRunner<P: Policy>; QueueRunner is
+// retained as dead code pending Phase 4.
 // ---------------------------------------------------------------------------
 
+use policy_runner::PolicyRunner;
+
 #[cfg(feature = "bailian-impl-q")]
-pub(crate) type TaskAssigner = QueueRunner<BailianImplQ>;
+pub(crate) type TaskAssigner = PolicyRunner<BailianImplQ>;
 #[cfg(feature = "bounded-most-hit-q")]
-pub(crate) type TaskAssigner = QueueRunner<JBoundMostHitQ2>;
+pub(crate) type TaskAssigner = PolicyRunner<JBoundMostHitQ2>;
 #[cfg(feature = "least-wait-token-q")]
-pub(crate) type TaskAssigner = QueueRunner<JLeastWaitTokenQ>;
+pub(crate) type TaskAssigner = PolicyRunner<JLeastWaitTokenQ>;
 #[cfg(feature = "aibrix-q")]
-pub(crate) type TaskAssigner = QueueRunner<AibrixQ>;
+pub(crate) type TaskAssigner = PolicyRunner<AibrixQ>;
 #[cfg(feature = "dynamo-q")]
-pub(crate) type TaskAssigner = QueueRunner<DynamoQ>;
+pub(crate) type TaskAssigner = PolicyRunner<DynamoQ>;
 #[cfg(feature = "dynamo-decoupled-q")]
-pub(crate) type TaskAssigner = QueueRunner<DynamoDecodeQ>;
+pub(crate) type TaskAssigner = PolicyRunner<DynamoDecodeQ>;
 #[cfg(feature = "lmetric-q")]
-pub(crate) type TaskAssigner = QueueRunner<LmetricQ>;
+pub(crate) type TaskAssigner = PolicyRunner<LmetricQ>;
 #[cfg(feature = "preble-q")]
-pub(crate) type TaskAssigner = QueueRunner<PrebleQ>;
+pub(crate) type TaskAssigner = PolicyRunner<PrebleQ>;
 #[cfg(feature = "join-shortest-q-weight")]
-pub(crate) type TaskAssigner = QueueRunner<JShortestQWeight>;
+pub(crate) type TaskAssigner = PolicyRunner<JShortestQWeight>;
 #[cfg(feature = "round-robin-q")]
-pub(crate) type TaskAssigner = QueueRunner<RRQueue>;
+pub(crate) type TaskAssigner = PolicyRunner<RoundRobinQ>;
 #[cfg(feature = "random-q")]
-pub(crate) type TaskAssigner = QueueRunner<RandomQ>;
-// Legacy aliases
+pub(crate) type TaskAssigner = PolicyRunner<RandomQ>;
+// `join-shortest-q` (default catch-all) → JShortestQ (vLLM 4·waiting + bs).
 #[cfg(all(feature = "join-shortest-q", not(any(
     feature = "bailian-impl-q",
     feature = "bounded-most-hit-q",
@@ -843,4 +848,4 @@ pub(crate) type TaskAssigner = QueueRunner<RandomQ>;
     feature = "round-robin-q",
     feature = "random-q",
 ))))]
-pub(crate) type TaskAssigner = QueueRunner<AibrixQ>;
+pub(crate) type TaskAssigner = PolicyRunner<JShortestQ>;

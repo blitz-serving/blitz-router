@@ -1,32 +1,20 @@
 //! Scheduling-policy DSL — proc-macro crate.
 //!
-//! See `docs/dsl-schema.md` for the full specification. This crate exports
-//! a single proc macro, `policy!`, that takes a DSL expression and emits an
-//! `impl Policy for <Name> { fn schedule(...) { ... } }` block plus the
-//! associated `GlobalContext` type when needed.
+//! See `docs/dsl-schema.md` for the full specification, especially §13
+//! (rewrite table + lint).
 //!
-//! Architecture:
+//! Exports a single `policy!` macro:
 //!
-//! ```text
-//!   #[policy(name = "..."-q, gctx = ...)]
-//!   policy! {
-//!       <DSL expression>
-//!       after: <after-clause>
-//!   }
-//!         │
-//!         ▼  parse.rs
-//!   AST  ─── ast.rs
-//!         │
-//!         ▼  check.rs (after-clause static check, §10)
-//!   AST'
-//!         │
-//!         ▼  lower.rs
-//!   TokenStream emitting `impl Policy for ...`
+//! ```ignore
+//! policy! {
+//!     name: RandomQ,
+//!     gctx: (),
+//!     body: { select_rand_by(&root_target(&observations), |_o| 1.0_f32) },
+//! }
 //! ```
 //!
-//! Phase 2 status: skeleton only. The macro accepts any input and emits an
-//! empty-body stub. Per-construct parsing and lowering land in Phase 3 as
-//! each policy migration exercises a slice of the surface.
+//! Optional `after_extra: { stmts; ... }` appends extra mutations after
+//! the canonical `apply_default_after` call (with `chosen: usize` in scope).
 
 use proc_macro::TokenStream;
 
@@ -35,18 +23,13 @@ mod check;
 mod lower;
 mod parse;
 
-/// `policy! { ... }` — primary DSL entry point.
-///
-/// Takes a DSL expression (see `docs/dsl-schema.md` §2) and emits an
-/// `impl Policy for <Name>Q { ... }` block. Skeleton implementation
-/// for now: parses to a stub AST and emits a placeholder.
 #[proc_macro]
 pub fn policy(input: TokenStream) -> TokenStream {
     let parsed = match parse::parse_policy(input.into()) {
         Ok(ast) => ast,
         Err(err) => return err.to_compile_error().into(),
     };
-    if let Err(err) = check::after_clause_well_formed(&parsed) {
+    if let Err(err) = check::lint_policy(&parsed) {
         return err.to_compile_error().into();
     }
     lower::lower(&parsed).into()

@@ -310,4 +310,74 @@ Conversely, anything inside `after:` that mutates `sctx` or `gctx` IS under DSL 
 
 ---
 
-Reviewer to check: §3 (scope cardinalities), §5 (named-fn library completeness), §6 (reducer set sufficiency for all 11 policies), §8 (DSL listings against intended algorithm), §9 (trait signature), §10 (static check formulation). Decisions in §12 are settled. Approval of this document gates Phase 2 (proc-macro implementation).
+Reviewer to check: §3 (scope cardinalities), §5 (named-fn library completeness), §6 (reducer set sufficiency for all 11 policies), §8 (DSL listings against intended algorithm), §9 (trait signature), §10 (static check formulation), §13 (rewrite table + lint). Decisions in §12 are settled. Approval of this document gates Phase 2 (proc-macro implementation).
+
+## 13. Implementation surface and DSL ↔ impl interchange
+
+The `policy!` proc macro does **not** parse the paper DSL syntax (§2) literally. Instead, the macro accepts a Rust-syntactic body restricted to a closed allowlist of constructs, and the paper DSL ↔ Rust impl correspondence is a **fixed mechanical rewrite** that a reviewer can apply in either direction. This decision trades surface-syntax fidelity for radical implementation simplicity (the macro is ~100 LOC of allowlist lint + boilerplate emission, not ~700 LOC of recursive-descent parser + lowering).
+
+### 13.1 Rewrite table
+
+Each row is a 1:1 syntactic correspondence between the paper-form DSL (left, what §8 prints) and the implementation-form Rust accepted inside `policy!` (right, what the source actually contains). The mapping is total in both directions: every paper construct has exactly one impl form, and the macro lint (§13.2) rejects any impl construct not in this table.
+
+| # | Paper DSL form | Implementation form |
+|---|---|---|
+| 1 | `Filter (P) { A } else { B }` | `filter_then(target, \|o\| P, \|t\| { A }, \|t\| { B })` |
+| 2 | `Select min by F` | `select_min_by(target, \|o\| F)` |
+| 3 | `Select max by F` | `select_max_by(target, \|o\| F)` |
+| 4 | `Select rand by F` | `select_rand_by(target, \|o\| F)` |
+| 5 | `With τ = E in body` | `{ let τ = E; body }` |
+| 6 | `Mean .f` | `mean_of_usize(&observations, \|o\| o.f)` |
+| 7 | `Std .f` | `std_of_usize(&observations, \|o\| o.f)` |
+| 8 | `Sum .f` | `sum_of_usize(&observations, \|o\| o.f)` |
+| 9 | `Min .f` | `min_of_usize(&observations, \|o\| o.f)` |
+| 10 | `Max .f` | `max_of_usize(&observations, \|o\| o.f)` |
+| 11 | `Count` | `observations.len()` |
+| 12 | `after default` | (auto-emitted by macro; absent from body) |
+| 13 | `after default; gctx.X ← E` | `policy! { ..., after { gctx.X = E; } }` |
+
+`target` is the bound name of the current candidate set inside the closure scope; for the outermost expression it is `&observations`. `t` is the inner candidate set inside `filter_then`'s on_pass / on_fail branches. `req` and `gctx` are bound at the top of the generated `schedule` body.
+
+### 13.2 Proc-macro lint (allowlist)
+
+Inside the `policy!` body, the macro accepts only:
+
+- Function calls to the **closed allowlist**:
+  - Combinators: `filter_then`, `select_min_by`, `select_max_by`, `select_rand_by`
+  - Reducers: `mean_of_usize`, `std_of_usize`, `sum_of_usize`, `min_of_usize`, `max_of_usize`
+  - Named pure fns (§5): `new_tokens`, `queued_tokens`, `prefill_tokens`, `hit_blocks`, `match_blocks`, `hit_pct`, `decode_blocks`, `preble_cost`
+- `let` bindings (any name, any RHS satisfying these rules transitively)
+- Closures `|name| ...` and `|name1, name2, ...| ...`
+- Field access: `o.bs`, `req.input_tokens`, `gctx.field`, `t[idx]`, etc.
+- Method calls on `&[Observation]` / `Option`: `.len()`, `.is_empty()`, `.as_ref()`, etc. (also allowlisted)
+- Arithmetic and comparison operators
+- Boolean operators
+- Tuple construction
+- `if`/`else` expressions
+- Block expressions `{ ... }`
+- Numeric and string literals; named constants imported via `use`
+
+The macro **rejects** (with a compile error pointing to the offending source line):
+
+- Any function call not in the allowlist (catches `unsafe { ... }` calls, arbitrary stdlib usage, custom helpers smuggled in via `use`)
+- `for` / `while` / `loop` constructs
+- `match` (use `if`/`else` chains via `select_*_by`'s comparator instead)
+- `unsafe` blocks
+- `return` / `break` / `continue`
+- Macro invocations other than `policy!` itself
+
+The lint is a `syn::visit::Visit` walk of the body's `syn::Expr` tree. Implementation lives in `policy-dsl/src/check.rs`.
+
+### 13.3 Reverse interchange (impl → DSL)
+
+A reviewer auditing a `policy!` invocation reads the Rust body, applies §13.1's table right-to-left mechanically, and recovers the paper-form DSL. The lint guarantees this is always well-defined: every legal body is built from table entries, and each entry has a unique paper form. There is no construct in the impl that "cannot be expressed in DSL" — the lint rejects such bodies at compile time.
+
+This eliminates the standard "is the implementation faithful to the spec?" trust gap: instead of relying on author discipline, the macro enforces faithfulness statically. Paper readers of §8 and source readers of `policies/*.rs` are looking at the same machine, with the rewrite table as the public bijection between the two views.
+
+### 13.4 Where each piece lives
+
+- **Runtime helpers** (combinators, reducers, named pure fns, `apply_default_after`): `router/src/policies/dsl_runtime.rs`. Audited once, depended on by every policy.
+- **`Policy` trait**: `router/src/policies/policy_trait.rs`. 5 lines.
+- **`policy!` macro** (parse + lint + emit): `policy-dsl/`. ~150 LOC total.
+- **Per-policy invocations**: `router/src/policies/{simple,bailian,aibrix,dynamo,lmetric,preble}.rs`. Each ≤ 30 lines.
+- **`PolicyRunner<P: Policy>`** (queue management dispatching to `P::schedule`): `router/src/policies/policy_runner.rs`. Sibling of legacy `QueueRunner` (Phase 4 deletes the latter).

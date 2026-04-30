@@ -1,42 +1,71 @@
-//! AST → TokenStream lowering.
+//! AST → TokenStream lowering for `policy!`.
 //!
-//! Emits an `impl router::policies::Policy for <Name>` block. Phase 2
-//! status: emits a stub body that compiles but always returns
-//! `Some(0)` (route everything to replica 0). Each policy migration in
-//! Phase 3 implements one branch of the AST visitor and the
-//! corresponding TokenStream emission.
+//! Emits:
+//!
+//! ```ignore
+//! pub(crate) struct {Name};
+//! impl crate::policies::policy_trait::Policy for {Name} {
+//!     type GlobalContext = {GctxTy};
+//!     fn schedule<'a>(...) -> impl Future<...> + 'a {
+//!         async move {
+//!             use crate::policies::dsl_runtime::*;
+//!             let req = &entry.request;
+//!             let observations = capture_observations(entry, all_sctx).await;
+//!             let chosen: Option<usize> = { #body };
+//!             if let Some(idx) = chosen {
+//!                 apply_default_after(entry, all_sctx, idx, &observations[idx]).await;
+//!                 let chosen = idx;
+//!                 #after_extra
+//!             }
+//!             chosen
+//!         }
+//!     }
+//! }
+//! ```
 
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ast::Policy;
+use crate::ast::PolicyInput;
 
-pub fn lower(policy: &Policy) -> TokenStream {
+pub fn lower(policy: &PolicyInput) -> TokenStream {
     let name = &policy.name;
-    let gctx_ty = policy
-        .gctx_ty
-        .as_ref()
-        .map(|t| quote! { #t })
-        .unwrap_or_else(|| quote! { () });
+    let gctx = &policy.gctx;
+    let body = &policy.body;
 
-    // Stub body. Real lowering walks `policy.body` and emits the
-    // partition / iter().min_by_key() / categorical-sample chain plus
-    // the `after:` block. Lands in Phase 3 per policy.
+    let after_extra = policy
+        .after_extra
+        .as_ref()
+        .map(|block| {
+            let stmts = &block.stmts;
+            quote! { #(#stmts)* }
+        })
+        .unwrap_or_default();
+
     quote! {
         pub(crate) struct #name;
 
         impl crate::policies::policy_trait::Policy for #name {
-            type GlobalContext = #gctx_ty;
+            type GlobalContext = #gctx;
 
-            #[allow(unused_variables)]
+            #[allow(unused_variables, clippy::let_and_return)]
             fn schedule<'a>(
-                req: &'a crate::validation::ValidGenerateRequest,
-                sctxs: &'a [std::sync::Arc<tokio::sync::Mutex<crate::ScheduleContext>>],
+                entry: &'a crate::policies::Entry,
+                all_sctx: &'a [std::sync::Arc<tokio::sync::Mutex<crate::ScheduleContext>>],
                 gctx: &'a mut Self::GlobalContext,
             ) -> impl std::future::Future<Output = Option<usize>> + Send + 'a {
                 async move {
-                    // Phase 2 stub. Real codegen lands per policy in Phase 3.
-                    if sctxs.is_empty() { None } else { Some(0) }
+                    use crate::policies::dsl_runtime::*;
+                    let req = &entry.request;
+                    let observations = capture_observations(entry, all_sctx).await;
+                    let chosen: Option<usize> = { #body };
+                    if let Some(idx) = chosen {
+                        apply_default_after(entry, all_sctx, idx, &observations[idx]).await;
+                        #[allow(unused_variables)]
+                        let chosen: usize = idx;
+                        #after_extra
+                    }
+                    chosen
                 }
             }
         }

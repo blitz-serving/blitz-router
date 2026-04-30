@@ -1,130 +1,44 @@
-// Bailian scheduling policy.
-//
-// Uses a three-component weighted score (cache hit ratio, request count,
-// token count) with normalization and stochastic sampling.
+//! `bailian-impl-q` — Bailian's three-component normalize-and-sample policy.
+//!
+//! Paper-form DSL (`docs/dsl-schema.md` §8):
+//!
+//! ```text
+//! With M_bs  = Max .bs,
+//!      M_tok = Max .all_tokens in
+//! Select rand by α · hit_pct(req, sctx)
+//!               + β · (1 - sctx.bs / M_bs)
+//!               + γ · (1 - sctx.tokens / M_tok)
+//! ```
+//!
+//! The actual normalization in `select_rand_by`'s closure is a
+//! per-component `(value - lo) / (hi - lo)` clamp, matching the existing
+//! sampler (which used `inf_w`/`sup_w` from `NaiiveLattice` join/meet).
+//! Reducers compute `lo` and `hi` once per call via `min_of_*` /
+//! `max_of_*` and the With-bound names are read inside the closure.
 
-use super::{
-    AssignScore, EmptyContext, Entry, NaiiveLattice, NumHitKvBlock, QueuePlusPlus,
-    SamplerFn, ScheduleStep, StochasticPolicy, step_stochastic,
-};
-use crate::kvcache::BlockHash;
-use crate::{ScheduleContext, BAILIAN_ALPHA, BAILIAN_BETA, BAILIAN_GAMMA};
+use crate::metrics::{BAILIAN_ALPHA, BAILIAN_BETA, BAILIAN_GAMMA};
+use policy_dsl::policy;
 
-use rand::{thread_rng, Rng};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
-// Lattice instance for the three-component weight vector.
-impl NaiiveLattice for (f32, f32, f32) {
-    fn meet(&self, other: &Self) -> Self {
-        (
-            self.0.min(other.0),
-            self.1.min(other.1),
-            self.2.min(other.2),
-        )
-    }
-
-    fn join(&self, other: &Self) -> Self {
-        (
-            self.0.max(other.0),
-            self.1.max(other.1),
-            self.2.max(other.2),
-        )
-    }
-
-    const TOP: Self = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
-    const BOTTOM: Self = (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-}
-
-/// Bailian's scheduling queue: normalizes a 3-component score across all
-/// replicas and samples proportionally.
-pub(crate) struct BailianImplQ;
-
-fn bailian_sampler(
-    all_scores: Vec<(usize, (f32, f32, f32), Option<(usize, u64)>)>,
-    lower_bound: (f32, f32, f32),
-    upper_bound: (f32, f32, f32),
-) -> (usize, Option<(usize, u64)>) {
-    let eps = 1e-6f32;
-    let dx0 = (upper_bound.0 - lower_bound.0).abs().max(eps);
-    let dx1 = (upper_bound.1 - lower_bound.1).abs().max(eps);
-    let dx2 = (upper_bound.2 - lower_bound.2).abs().max(eps);
-
-    let mut total_weight = 0.0f32;
-    let mut norm_scores = Vec::with_capacity(all_scores.len());
-
-    tracing::debug!("All scores: {:?}", all_scores);
-
-    for (replica_id, (hit_ratio, nreqs, ntkns), cached) in all_scores.into_iter() {
-        // Normalize to [0,1]
-        let n0 = ((hit_ratio - lower_bound.0) / dx0).clamp(0.0, 1.0);
-        let n1 = ((upper_bound.1 - nreqs) / dx1).clamp(0.0, 1.0);
-        let n2 = ((upper_bound.2 - ntkns) / dx2).clamp(0.0, 1.0);
-
-        // Linear combination with configurable weights
-        let p = n0 * BAILIAN_ALPHA + n1 * BAILIAN_BETA + n2 * BAILIAN_GAMMA;
-        let p = if p.is_finite() && p > 0.0 { p } else { 0.0 };
-
-        total_weight += p;
-        norm_scores.push((replica_id, p, cached));
-    }
-
-    let mut rng = thread_rng();
-    let mut r = rng.gen::<f32>() * total_weight;
-
-    tracing::debug!("Normed scores: {:?}; r={r}", norm_scores);
-
-    let mut ret = (0, None);
-    for (replica_id, p, cached) in norm_scores {
-        if r <= p {
-            return (replica_id, cached);
-        }
-        r -= p;
-        ret = (replica_id, cached);
-    }
-
-    ret
-}
-
-impl QueuePlusPlus for BailianImplQ {
-    type QueueContext = EmptyContext;
-    type Measure = ();
-    type Weight = (f32, f32, f32);
-
-    fn eligible_with_kvblock_hit(
-        _replica_id: usize,
-        entry: &Entry,
-        _qctx: &Self::QueueContext,
-        sctx: &ScheduleContext,
-    ) -> Option<(AssignScore<(), Self::Weight>, Option<NumHitKvBlock>)> {
-        let ScheduleContext { lmetric, block_hash } = sctx;
-        let request = &entry.request;
-
-        let hit_nblks = block_hash.get(entry.block_hash_state.get_hashes());
-        let hit_ratio = (hit_nblks * entry.block_hash_state.get_block_size()) as f32
-            / request.input_tokens.len() as f32;
-        let num_requests = lmetric.bs as f32;
-        let num_tokens = lmetric.all_tokens as f32;
-
-        Some((
-            AssignScore::Weighted((hit_ratio, num_requests, num_tokens)),
-            Some(hit_nblks),
-        ))
-    }
-}
-
-impl StochasticPolicy for BailianImplQ {
-    fn sampler() -> SamplerFn<Self::Weight> {
-        bailian_sampler
-    }
-}
-
-impl ScheduleStep for BailianImplQ {
-    fn schedule_step(
-        entry: &Entry,
-        qctx: &Self::QueueContext,
-        all_sctx: &[Arc<Mutex<ScheduleContext>>],
-    ) -> impl std::future::Future<Output = Option<usize>> + Send {
-        step_stochastic::<Self>(entry, qctx, all_sctx)
-    }
+policy! {
+    name: BailianImplQ,
+    gctx: (),
+    body: {
+        let lo_hit = min_of_f32(&observations, |o| hit_pct(req, o));
+        let hi_hit = max_of_f32(&observations, |o| hit_pct(req, o));
+        let lo_bs  = min_of_usize(&observations, |o| o.bs) as f32;
+        let hi_bs  = max_of_usize(&observations, |o| o.bs) as f32;
+        let lo_tok = min_of_usize(&observations, |o| o.all_tokens) as f32;
+        let hi_tok = max_of_usize(&observations, |o| o.all_tokens) as f32;
+        let eps = 1e-6_f32;
+        let dx_hit = (hi_hit - lo_hit).abs().max(eps);
+        let dx_bs  = (hi_bs - lo_bs).abs().max(eps);
+        let dx_tok = (hi_tok - lo_tok).abs().max(eps);
+        select_rand_by(&root_target(&observations), |o| {
+            let n0 = ((hit_pct(req, o) - lo_hit) / dx_hit).clamp(0.0, 1.0);
+            let n1 = ((hi_bs - o.bs as f32) / dx_bs).clamp(0.0, 1.0);
+            let n2 = ((hi_tok - o.all_tokens as f32) / dx_tok).clamp(0.0, 1.0);
+            let p = n0 * BAILIAN_ALPHA + n1 * BAILIAN_BETA + n2 * BAILIAN_GAMMA;
+            if p.is_finite() && p > 0.0 { p } else { 0.0 }
+        })
+    },
 }
