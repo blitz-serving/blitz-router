@@ -412,18 +412,21 @@ where
 async fn apply_schedule_decision<P: QueuePlusPlus>(
     entry: &Entry,
     replica_idx: usize,
-    hit_nblks: Option<usize>,
+    _hit_nblks: Option<usize>,
     all_sctx: &[Arc<Mutex<ScheduleContext>>],
 ) {
     let request = &entry.request;
     let ScheduleContext { lmetric, block_hash } =
         &mut *all_sctx[replica_idx].lock().await;
 
-    let hit_nblks: usize = if hit_nblks.is_none() {
-        block_hash.get(entry.block_hash_state.get_hashes())
-    } else {
-        hit_nblks.unwrap()
-    };
+    // Re-evaluate the prediction under THIS lock acquisition so the recorded
+    // hit_nblks and decision_epoch are consistent. The hit_nblks computed in
+    // select_best_replica/weigh_replica was under a separate lock acquisition;
+    // an SSE handler may have advanced block_hash.epoch() in the window
+    // between scoring and decision recording, leaving the score stale relative
+    // to the current epoch. Recording the stale prediction together with the
+    // newer epoch is the TOCTOU bug verify_staleness flagged on dynamo-q.
+    let hit_nblks: usize = block_hash.get(entry.block_hash_state.get_hashes());
     entry.block_hash_state.set_pred_block_hits(hit_nblks);
     entry.block_hash_state.set_decision_epoch(block_hash.epoch());
     let new_ntkns = request.input_tokens.len()

@@ -1,4 +1,5 @@
 use nohash_hasher::{self, BuildNoHashHasher, IntMap};
+use smallvec::{smallvec, SmallVec};
 
 use std::collections::HashMap;
 use std::mem::{self};
@@ -10,6 +11,13 @@ use xxhash_rust::xxh3::xxh3_64_with_seed;
 use core::hint::spin_loop;
 use std::sync::atomic::AtomicBool;
 use std::thread::yield_now;
+
+/// Per-position bid container in `RadixTreeBlockHash`. Inline storage for the
+/// common case (one bid per hash position); spills to heap only when multiple
+/// requests in the same step concurrently prefill the same prefix and end up
+/// allocating distinct backend block_ids that hash to the same value (a real
+/// vLLM/yaullm chunked-prefill phenomenon — see L739 insert in this module).
+pub(crate) type Bids = SmallVec<[u64; 1]>;
 
 pub(crate) struct SpinLock {
     flag: AtomicBool, // false: unlocked, true: locked
@@ -176,10 +184,10 @@ pub trait BlockHash {
 }
 
 pub(crate) struct RadixTreeBlockHash {
-    root: *mut Node<u64, u64>,
+    root: *mut Node<u64, Bids>,
     size: usize,
     nodes: AtomicUsize,
-    block_to_node: Vec<*mut Node<u64, u64>>,
+    block_to_node: Vec<*mut Node<u64, Bids>>,
     mtx: SpinLock,
     epoch: u64,
 }
@@ -203,7 +211,7 @@ impl RadixTreeBlockHash {
     ///   - `common` < `block_hashes.len()` otherwise, its a perfect match
     unsafe fn split_node_at_insert(
         &mut self,
-        node: *mut Node<u64, u64>,
+        node: *mut Node<u64, Bids>,
         common: usize,
         block_hashes: &[u64],
         mut block_indices: Vec<u64>,
@@ -225,7 +233,20 @@ impl RadixTreeBlockHash {
         let insert_new_node = Node::new();
         self.nodes.fetch_add(1, Ordering::Relaxed);
         (*insert_new_node).value = block_hashes[common..].to_vec();
-        (*insert_new_node).payload = block_indices.split_off(common);
+        (*insert_new_node).payload =
+            block_indices.split_off(common).into_iter().map(|b| smallvec![b]).collect();
+        // After `split_off(common)`, `block_indices` retains its first `common`
+        // elements — these are the bids the caller supplied for the matched
+        // prefix (positions 0..common in `node`'s pre-split payload, now `node`
+        // post-split). They must be aliased into `node`'s payload so a later
+        // remove(bid) can find them; otherwise they leak (the dynamo-q
+        // duplicate-prefix bug).
+        for (i, &alias_bid) in block_indices.iter().enumerate() {
+            if self.block_to_node[alias_bid as usize].is_null() {
+                (*node).payload[i].push(alias_bid);
+                self.block_to_node[alias_bid as usize] = node;
+            }
+        }
 
         // update the node to valid state
         // (*node).value has been split by `split_off`
@@ -233,25 +254,29 @@ impl RadixTreeBlockHash {
         (*node).children = Children::Small(vec![split_new_node, insert_new_node]);
 
         // validate block to node
-        for &block_id in (*split_new_node).payload.iter() {
-            assert_eq!(
-                self.block_to_node[block_id as usize],
-                node,
-                "block#{} |-> {:?}",
-                block_id,
-                (*self.block_to_node[block_id as usize]).value
-            );
-            self.block_to_node[block_id as usize] = split_new_node;
+        for bids in (*split_new_node).payload.iter() {
+            for &block_id in bids.iter() {
+                assert_eq!(
+                    self.block_to_node[block_id as usize],
+                    node,
+                    "block#{} |-> {:?}",
+                    block_id,
+                    (*self.block_to_node[block_id as usize]).value
+                );
+                self.block_to_node[block_id as usize] = split_new_node;
+            }
         }
-        for &block_id in (*insert_new_node).payload.iter() {
-            assert_eq!(
-                self.block_to_node[block_id as usize],
-                null_mut(),
-                "block#{} |-> {:?}",
-                block_id,
-                (*self.block_to_node[block_id as usize]).value
-            );
-            self.block_to_node[block_id as usize] = insert_new_node;
+        for bids in (*insert_new_node).payload.iter() {
+            for &block_id in bids.iter() {
+                assert_eq!(
+                    self.block_to_node[block_id as usize],
+                    null_mut(),
+                    "block#{} |-> {:?}",
+                    block_id,
+                    (*self.block_to_node[block_id as usize]).value
+                );
+                self.block_to_node[block_id as usize] = insert_new_node;
+            }
         }
     }
 
@@ -264,11 +289,11 @@ impl RadixTreeBlockHash {
     ///   - FullMatch => empty(key) OR all children are NoMatch
     unsafe fn common_prefix_full_combo<'a, 'b>(
         &'a self,
-        subroot: *mut Node<u64, u64>,
+        subroot: *mut Node<u64, Bids>,
         key: &'b [u64],
-    ) -> (CommonPrefixInner<u64, u64>, &'b [u64]) {
+    ) -> (CommonPrefixInner<u64, Bids>, &'b [u64]) {
         if key.is_empty() {
-            return (CommonPrefixInner::FullMatch(subroot as *mut Node<u64, u64>), key);
+            return (CommonPrefixInner::FullMatch(subroot as *mut Node<u64, Bids>), key);
         }
         // postcond: NOT empty(key)
         match &mut (*subroot).children {
@@ -298,7 +323,7 @@ impl RadixTreeBlockHash {
                     i += 1;
                 }
                 // postcond: no match with any child
-                return (CommonPrefixInner::FullMatch(subroot as *mut Node<u64, u64>), key);
+                return (CommonPrefixInner::FullMatch(subroot as *mut Node<u64, Bids>), key);
             }
             Children::Large(m) => {
                 if let Some(&child) = m.get(&key[0]) {
@@ -327,7 +352,7 @@ impl RadixTreeBlockHash {
                     }
                 } else {
                     // postcond: no match with any child
-                    return (CommonPrefixInner::FullMatch(subroot as *mut Node<u64, u64>), key);
+                    return (CommonPrefixInner::FullMatch(subroot as *mut Node<u64, Bids>), key);
                 }
             }
         }
@@ -336,7 +361,7 @@ impl RadixTreeBlockHash {
     /// Inserts a new node as direct child of `node`
     unsafe fn insert_as_child(
         &mut self,
-        node: *mut Node<u64, u64>,
+        node: *mut Node<u64, Bids>,
         block_hashes: &[u64],
         block_indices: Vec<u64>,
     ) {
@@ -344,7 +369,7 @@ impl RadixTreeBlockHash {
         let new_node = Node::new();
         self.nodes.fetch_add(1, Ordering::Relaxed);
         (*new_node).value = block_hashes.to_vec();
-        (*new_node).payload = block_indices;
+        (*new_node).payload = block_indices.into_iter().map(|b| smallvec![b]).collect();
         // add sequence to the children of current node
         match &mut (*node).children {
             Children::Small(v) => {
@@ -353,9 +378,9 @@ impl RadixTreeBlockHash {
                     // (NOTE) precond: NOT empty((*n).value)
                     //   + this is beacuse there are 16 children, and empty children can't exist,
                     //     it will be absorbed by its parent
-                    let tmp: IntMap<u64, *mut Node<u64, u64>> =
+                    let tmp: IntMap<u64, *mut Node<u64, Bids>> =
                         v.iter().map(|&n| ((&(*n).value)[0], n)).collect();
-                    let _ = mem::replace(&mut (*node).children, Children::<u64, u64>::Large(tmp));
+                    let _ = mem::replace(&mut (*node).children, Children::<u64, Bids>::Large(tmp));
                 }
             }
             Children::Large(m) => {
@@ -368,9 +393,61 @@ impl RadixTreeBlockHash {
         }
 
         // validate block to node map
-        for &block_id in (*new_node).payload.iter() {
-            assert_eq!(self.block_to_node[block_id as usize], null_mut());
-            self.block_to_node[block_id as usize] = new_node;
+        for bids in (*new_node).payload.iter() {
+            for &block_id in bids.iter() {
+                assert_eq!(self.block_to_node[block_id as usize], null_mut());
+                self.block_to_node[block_id as usize] = new_node;
+            }
+        }
+    }
+
+    /// Walk the trie path corresponding to `key`, registering each
+    /// `aliases[i]` as an alias bid at the matching (node, position).
+    ///
+    /// Precondition: caller has verified the trie already contains `key` as a
+    /// complete prefix path of length `key.len()`. Aliases that are already
+    /// registered (block_to_node not null) are idempotently skipped.
+    ///
+    /// This is the corrective path for the chunked-prefill duplicate-prefix
+    /// case: when two requests in the same scheduler step both prefill the
+    /// same prefix and yaullm allocates distinct backend block_ids that hash
+    /// to the same (chained) values, both bids must end up tracked in the
+    /// trie payload's SmallVec — otherwise eviction of the primary bid would
+    /// truncate the trie even though yaullm still holds the prefix via the
+    /// alias bid, causing router under-prediction.
+    unsafe fn alias_path(&mut self, key: &[u64], aliases: &[u64]) {
+        debug_assert_eq!(key.len(), aliases.len());
+        if key.is_empty() {
+            return;
+        }
+        let mut cur = self.root;
+        let mut consumed = 0;
+        while consumed < key.len() {
+            let child_opt = match &(*cur).children {
+                Children::Small(v) => v.iter().copied().find(|&n| {
+                    !(*n).value.is_empty() && (*n).value[0] == key[consumed]
+                }),
+                Children::Large(m) => m.get(&key[consumed]).copied(),
+            };
+            let Some(child) = child_opt else {
+                debug_assert!(false, "alias_path: trie path missing for key prefix");
+                return;
+            };
+            let val_len = (*child).value.len();
+            let mut i = 0;
+            while i < val_len && consumed < key.len() && (*child).value[i] == key[consumed] {
+                let alias_bid = aliases[consumed];
+                if self.block_to_node[alias_bid as usize].is_null() {
+                    (*child).payload[i].push(alias_bid);
+                    self.block_to_node[alias_bid as usize] = child;
+                }
+                i += 1;
+                consumed += 1;
+            }
+            if consumed >= key.len() {
+                break;
+            }
+            cur = child;
         }
     }
 
@@ -421,26 +498,44 @@ impl RadixTreeBlockHash {
             CommonPrefixInner::FullMatch(node) => {
                 // postcond: a first level node fully matches key
                 match self.common_prefix_full_combo(node, &key[(*node).value.len()..]) {
-                    (CommonPrefixInner::FullMatch(node), key1) => {
+                    (CommonPrefixInner::FullMatch(_node), key1) => {
                         if key1.is_empty() {
-                            // postcond: perfect match
+                            // postcond: perfect match — register `value` as
+                            // aliases at every existing position along the path
+                            self.alias_path(key, &value);
                             return 0;
                         }
-                        // postcond: unmatched key sequence
+                        // postcond: unmatched key suffix; matched prefix
+                        // (value[0..full_match_len]) must be aliased before we
+                        // truncate `value` via split_off.
                         let full_match_len = key.len() - key1.len();
+                        let alias_value = value[..full_match_len].to_vec();
                         let remain_value = value.split_off(full_match_len);
                         // invariant: key1 |-> remain_value
                         assert_eq!(key1.len(), remain_value.len());
+                        self.alias_path(&key[..full_match_len], &alias_value);
+                        // Re-resolve `node` since alias_path may have walked deeper
+                        // than the originally matched outer node; we need the
+                        // tail-most node where the extension attaches. The
+                        // common_prefix_full_combo result `node` is the right
+                        // one — we just trust it (alias_path doesn't relocate).
+                        let node = _node;
                         if (*node).children.is_empty() {
                             (*node).value.extend_from_slice(key1);
-                            (*node).payload.extend(remain_value);
-                            // validate block to node map
-                            for &block_id in (*node).payload.iter() {
-                                assert!(
-                                    self.block_to_node[block_id as usize].is_null()
-                                        || self.block_to_node[block_id as usize] == node
-                                );
-                                self.block_to_node[block_id as usize] = node;
+                            for &b in remain_value.iter() {
+                                (*node).payload.push(smallvec![b]);
+                            }
+                            // validate block to node map for the newly extended
+                            // suffix only (existing positions were already valid)
+                            let new_start = (*node).payload.len() - remain_value.len();
+                            for bids in (*node).payload[new_start..].iter() {
+                                for &block_id in bids.iter() {
+                                    assert!(
+                                        self.block_to_node[block_id as usize].is_null()
+                                            || self.block_to_node[block_id as usize] == node
+                                    );
+                                    self.block_to_node[block_id as usize] = node;
+                                }
                             }
                         } else {
                             self.insert_as_child(node, key1, remain_value);
@@ -449,14 +544,21 @@ impl RadixTreeBlockHash {
                     }
                     (CommonPrefixInner::PartialMatch(node, common), key1) => {
                         if key1.len() == common {
-                            // postcond: perfect match
+                            // postcond: perfect match — alias `value` along path
+                            self.alias_path(key, &value);
                             return 0;
                         }
-                        // postcond: imperfect match
+                        // postcond: imperfect match; the matched prefix
+                        // (value[0..key.len()-key1.len()]) plus the partial
+                        // match within `node` (value at positions
+                        // [full_match_len .. full_match_len+common]) must be
+                        // aliased before split_node_at_insert discards them.
                         let full_match_len = key.len() - key1.len();
+                        let alias_value = value[..full_match_len].to_vec();
                         let remain_value = value.split_off(full_match_len);
                         // invariant: key1 |-> remain_value
                         assert_eq!(key1.len(), remain_value.len());
+                        self.alias_path(&key[..full_match_len], &alias_value);
                         self.split_node_at_insert(node, common, key1, remain_value);
                         return key1.len() - common;
                     }
@@ -468,7 +570,8 @@ impl RadixTreeBlockHash {
             CommonPrefixInner::PartialMatch(node, common) => {
                 // postcond: a first level node partially matches key
                 if key.len() == common {
-                    // postcond: perfect match
+                    // postcond: perfect match — alias `value` along path
+                    self.alias_path(key, &value);
                     return 0;
                 }
                 self.split_node_at_insert(node, common, key, value);
@@ -564,29 +667,30 @@ impl RadixTreeBlockHash {
 
     fn common_prefix(
         &self,
-        node: *const Node<u64, u64>,
+        node: *const Node<u64, Bids>,
         key: &[u64],
-    ) -> CommonPrefixInner<u64, u64> {
+    ) -> CommonPrefixInner<u64, Bids> {
         let mut i = 0;
         unsafe {
             while i < (&(*node).value).len() && i < key.len() && (&(*node).value)[i] == key[i] {
-                debug_assert_eq!(
-                    self.block_to_node[(&(*node).payload)[i] as usize],
-                    node as *mut Node<u64, u64>
+                debug_assert!(
+                    (&(*node).payload)[i].iter().all(|&b| {
+                        self.block_to_node[b as usize] == node as *mut Node<u64, Bids>
+                    })
                 );
                 i += 1;
             }
             if i == 0 {
-                return CommonPrefixInner::NoMatch(node as *mut Node<u64, u64>);
+                return CommonPrefixInner::NoMatch(node as *mut Node<u64, Bids>);
             } else if i == (*node).value.len() {
-                return CommonPrefixInner::FullMatch(node as *mut Node<u64, u64>);
+                return CommonPrefixInner::FullMatch(node as *mut Node<u64, Bids>);
             } else {
-                return CommonPrefixInner::PartialMatch(node as *mut Node<u64, u64>, i);
+                return CommonPrefixInner::PartialMatch(node as *mut Node<u64, Bids>, i);
             }
         }
     }
 
-    unsafe fn lazy_gc(&mut self, node: *mut Node<u64, u64>) {
+    unsafe fn lazy_gc(&mut self, node: *mut Node<u64, Bids>) {
         drop(Box::from_raw(node));
         self.nodes.fetch_sub(1, Ordering::Relaxed);
     }
@@ -596,12 +700,12 @@ impl RadixTreeBlockHash {
     ///
     /// # Precondition:
     ///   + `self.mtx` is held by current thread
-    unsafe fn atomize_manually_lazy_gc(&self, node: *mut Node<u64, u64>) {
+    unsafe fn atomize_manually_lazy_gc(&self, node: *mut Node<u64, Bids>) {
         drop(Box::from_raw(node));
         self.nodes.fetch_sub(1, Ordering::Relaxed);
     }
 
-    unsafe fn clear_inner(&mut self, node: *mut Node<u64, u64>, to_drop: bool) -> usize {
+    unsafe fn clear_inner(&mut self, node: *mut Node<u64, Bids>, to_drop: bool) -> usize {
         if (*node).is_empty() {
             if to_drop {
                 drop(Box::from_raw(node));
@@ -611,9 +715,11 @@ impl RadixTreeBlockHash {
         }
 
         let mut n = 0;
-        for &block_id in (*node).payload.iter() {
-            self.block_to_node[block_id as usize] = null_mut();
-            n += 1;
+        for bids in (*node).payload.iter() {
+            for &block_id in bids.iter() {
+                self.block_to_node[block_id as usize] = null_mut();
+                n += 1;
+            }
         }
         (*node).value.clear();
         (*node).payload.clear();
@@ -646,18 +752,38 @@ impl RadixTreeBlockHash {
                 continue;
             }
             // precond: `node` is not nil
-            // precond: `block_id` must exist in `node`
+            // precond: `block_id` must exist in some `payload[pos]` of `node`
             let mut pos = 0;
-            while pos < (&(*node).payload).len() && (&(*node).payload)[pos] != block_id {
+            while pos < (*node).payload.len() && !(*node).payload[pos].contains(&block_id) {
                 pos += 1;
             }
             debug_assert!(pos < (*node).payload.len());
-            // update `node` to valid state
+
+            // Remove this specific bid from the SmallVec at pos.
+            let bids_at_pos = &mut (*node).payload[pos];
+            let idx = bids_at_pos.iter().position(|&b| b == block_id).unwrap();
+            bids_at_pos.remove(idx);
+            self.block_to_node[block_id as usize] = null_mut();
+            nblock_canary += 1;
+
+            // If aliases still occupy this position, keep the position alive.
+            // The trie path to this position is still valid in yaullm's view
+            // (since the aliased bids still cover this hash), so we must not
+            // truncate. This is the fix for the dynamo-q under-prediction:
+            // previously the trie had no concept of aliases and any bid eviction
+            // would truncate the suffix even when concurrent-prefill duplicates
+            // were still alive on the engine.
+            if !bids_at_pos.is_empty() {
+                continue;
+            }
+            // Otherwise, truncate from pos onward and cascade-evict children.
             (*node).value.truncate(pos);
-            let block_id_to_rm = (*node).payload.split_off(pos);
-            for bid in block_id_to_rm {
-                self.block_to_node[bid as usize] = null_mut();
-                nblock_canary += 1;
+            let payload_to_rm = (*node).payload.split_off(pos);
+            for tail_bids in payload_to_rm {
+                for tail_bid in tail_bids {
+                    self.block_to_node[tail_bid as usize] = null_mut();
+                    nblock_canary += 1;
+                }
             }
             if !(*node).children.is_empty() {
                 match &(*node).children {
@@ -713,7 +839,7 @@ impl Drop for RadixTreeBlockHash {
 
 impl BlockHash for RadixTreeBlockHash {
     fn new(num_blocks: usize) -> Self {
-        let root = Node::<u64, u64>::new();
+        let root = Node::<u64, Bids>::new();
         Self {
             root,
             size: 0,
@@ -801,7 +927,15 @@ mod hashtable_block_hash {
                         if bids.contains(&bid) {
                             debug_assert_eq!(self.block_to_hash[bid as usize].unwrap(), *h);
                         } else {
+                            // Duplicate hash with a new bid (e.g. two requests in the same
+                            // step both prefilling the same prefix). The new bid must be
+                            // tracked in block_to_hash too so a later remove(bid) works;
+                            // without this the bid becomes a phantom in `bids` and
+                            // `map[h]` never empties.
+                            debug_assert!(self.block_to_hash[bid as usize].is_none());
+                            self.block_to_hash[bid as usize] = Some(*h);
                             bids.push(bid);
+                            n += 1;
                         }
                     })
                     .or_insert_with(|| {
