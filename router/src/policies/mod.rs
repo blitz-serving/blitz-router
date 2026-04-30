@@ -12,6 +12,7 @@ pub(crate) mod bounded_most_hit;
 pub(crate) mod dynamo;
 pub(crate) mod least_wait_token;
 pub(crate) mod lmetric;
+pub(crate) mod policy_trait;
 pub(crate) mod preble;
 pub(crate) mod random;
 pub(crate) mod round_robin;

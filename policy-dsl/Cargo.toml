@@ -1,0 +1,13 @@
+[package]
+name = "policy-dsl"
+version.workspace = true
+edition.workspace = true
+description = "Proc-macro crate for the scheduling-policy DSL. See docs/dsl-schema.md."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
