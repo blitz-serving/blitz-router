@@ -117,7 +117,6 @@ dynamo-decoupled-q = []
 lmetric-q = []
 preble-q = []
 # Legacy aliases (prefer system-specific names above)
-join-shortest-q-tuple = []
 join-shortest-q-weight = []
 
 stochastic-schedule = []

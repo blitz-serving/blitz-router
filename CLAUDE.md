@@ -9,18 +9,10 @@ This repo was extracted from `blitz-infer-pack`, retaining only the Rust router.
 
 **lmetric uses HTTP + SSE, NOT gRPC.**
 
-The router supports two backend modes selected at compile time via Cargo features:
-
-| | `vllm-backend` (lmetric) | `blitzllm-backend` (BlitzScale legacy) |
-|---|---|---|
-| **Engine** | yaullm (patched vLLM) | BlitzTransformer (C++) |
-| **Inference transport** | HTTP (OpenAI-compatible API) | gRPC (`TextGenerationService`) |
-| **Metrics transport** | SSE push (`/v1/metrics`) | gRPC response fields |
-| **Entry point** | `vllmlet.rs` → `VllmClient` | `stub.rs` → `Stub` (gRPC) |
-| **Used by lmetric?** | **YES** | No |
+The legacy `blitzllm-backend` mode (with C++ BlitzTransformer engine over gRPC) has been removed. Only `vllm-backend` remains; it is the default and effectively non-optional. Entry point: `vllmlet.rs` → `VllmClient` (HTTP) plus `/v1/metrics` SSE consumption.
 
 ### Why proto/ and rust-proto/ still exist
-The protobuf-generated types (`Tokens`, `GeneratedText`, `Batch`, `Request`, `CachedBatch`, etc.) are used as **internal data structures** throughout the router (queue, infer, validation, replica) regardless of backend mode. They are NOT used as a wire protocol in lmetric — the actual transport is HTTP/SSE via `VllmClient` in `vllmlet.rs`.
+The protobuf-generated types (`Tokens`, `GeneratedText`, `Batch`, `Request`, `CachedBatch`, etc.) are used as **internal data structures** throughout the router (queue, infer, validation, colocation) regardless of backend. They are NOT used as a wire protocol — the actual transport is HTTP/SSE via `VllmClient` in `vllmlet.rs`. `rust-grpc` is similarly vestigial.
 
 ### lmetric Data Flow
 ```
@@ -51,54 +43,79 @@ This drives cache-aware routing (via `evicted_block_ids`) and scheduling decisio
 | Engine | yaullm (patched vLLM) | Custom | Custom |
 | Router↔Engine protocol | HTTP + SSE | gRPC / custom | gRPC / custom |
 | KV Cache Routing | RadixTree prefix matching | Simplified | Cache-aware |
-| Scheduling Policies | 8+ compile-time switchable | Fixed | Fixed |
+| Scheduling Policies | 11 compile-time switchable | Fixed | Fixed |
 | Metrics | Real-time SSE push per engine step | Basic | Limited telemetry |
 | Config Polymorphism | Cargo feature flags (zero-overhead) | Runtime config | Runtime config |
 
 ## Project Structure
 
+> **Note**: As of commit 2327a08, the crate `router_v2/` was renamed to `router/`. Anything that still says `router_v2` in scripts or older notes is stale.
+
 ```
 blitz-router/
-├── router_v2/src/           # Rust router (~8,400 LOC)
+├── router/src/              # Rust router (~14,000 LOC)
 │   ├── main.rs              # CLI args & entry point
-│   ├── server.rs            # HTTP server (Axum): /generate, /info, /health, /metrics
-│   ├── infer.rs             # Inference orchestration (730 LOC)
-│   ├── queue.rs             # Request queue & scheduling policies (1,653 LOC)
-│   ├── kvcache.rs           # KV cache tracking with BlockHashState (1,373 LOC)
-│   ├── radixtrie.rs         # Patricia trie for prefix matching (1,072 LOC)
-│   ├── vllmlet.rs           # ** yaullm/vLLM HTTP+SSE backend (lmetric path) **
-│   ├── stub.rs              # gRPC stubs (blitzllm-backend only, NOT lmetric)
+│   ├── lib.rs               # Crate root
+│   ├── server.rs            # HTTP server (Axum): /generate, /info, /health, /metrics (~1,140 LOC)
+│   ├── infer.rs             # Inference orchestration (~530 LOC)
+│   ├── queue.rs             # Request queue scaffolding (~380 LOC; policy logic now in policies/)
+│   ├── kvcache.rs           # KV cache tracking with BlockHashState (~2,020 LOC)
+│   ├── radixtrie.rs         # Patricia trie for prefix matching (~1,470 LOC)
+│   ├── verified_radix.rs    # Cross-checked RadixTree implementation
+│   ├── colocation.rs        # Co-location controller (formerly replica/colocation.rs) (~1,120 LOC)
+│   ├── engine_client.rs     # Engine client trait & dispatch (~510 LOC)
+│   ├── vllmlet.rs           # yaullm/vLLM HTTP+SSE backend
+│   ├── zmq_engine.rs        # ZMQ engine variant
+│   ├── metrics.rs           # SystemMetric counters & replica states
 │   ├── validation.rs        # Request validation
-│   └── replica/             # Replica state machine & controllers (~4,500 LOC)
-│       ├── config.rs         # DisaggregationConfig
-│       ├── metrics.rs        # SystemMetric (AtomicUsize counters), 20+ replica states
-│       ├── disaggregation.rs # P-D disaggregation controller
-│       ├── colocation.rs     # Co-location controller (vllm-backend)
-│       ├── steersman.rs      # Replica lifecycle management
-│       └── cybernetics/      # Dynamic scaling planner & execution
-│           ├── planner.rs    # ScalePlan generation
-│           ├── exec_blitz.rs # Scaling execution (114K)
-│           └── exec_serverless.rs
+│   ├── chat_template.rs     # Chat template handling
+│   ├── model_config.rs      # Model config auto-discovery
+│   ├── statistic.rs         # Statistics collection
+│   ├── health.rs            # Health checks
+│   ├── error.rs             # Error types
+│   └── policies/            # Scheduling policies (one file per algorithm)
+│       ├── mod.rs               # QueuePlusPlus trait, Deterministic/StochasticPolicy (~825 LOC)
+│       ├── random.rs            # random-q
+│       ├── round_robin.rs       # round-robin-q (stateful — RR counter)
+│       ├── least_wait_token.rs  # least-wait-token-q
+│       ├── bounded_most_hit.rs  # bounded-most-hit-q (cache-aware)
+│       ├── shortest_q_weight.rs # join-shortest-q + variants
+│       ├── lmetric.rs           # lmetric-q (multiplicative scoring)
+│       ├── bailian.rs           # bailian-impl-q (linear combination + sample)
+│       └── aibrix/prefix_cache.rs   # aibrix-q port
 ├── proto/generate.proto     # Protobuf type definitions (used as internal data structures)
-├── rust-proto/              # Protobuf codegen (internal types, NOT wire protocol in lmetric)
-├── rust-grpc/               # gRPC metadata injection (blitzllm-backend only)
+├── rust-proto/              # Protobuf codegen (internal types only)
+├── rust-grpc/               # gRPC metadata injection (vestigial)
 ├── request-sim/             # Request simulator (git submodule, main branch)
-├── config/                  # 39 TOML configs (lmetric*, metrics_*, dense_*, eval_*)
+├── tokenizer/               # Tokenizer library
+├── formal/tlaplus/          # TLA+ spec — colocation/CompletionLoop entry lifecycle (NOT a policy spec)
+├── config/                  # 39+ TOML configs (lmetric*, metrics_*, dense_*, eval_*)
+├── exps/                    # Experiment harness & generated configs
 ├── scripts/                 # e2e tests, batch utils, debug tools
-└── tokenizer/               # Tokenizer library
+└── docs/                    # reproduce.md
 ```
+
+The legacy `replica/` subdirectory and the `cybernetics/` planner code described in earlier revisions of this file have been removed; their relevant pieces are flattened into the top-level `router/src/` files (`colocation.rs`, `metrics.rs`, `engine_client.rs`).
 
 ## Key Components
 
-### Scheduling Policies (compile-time via features)
-- `random-q`: Random replica selection
-- `round-robin-q`: Cyclic distribution
-- `join-shortest-q`: Shortest queue depth
-- `least-wait-token-q`: Minimize total waiting tokens
-- `bounded-most-hit-q`: Prefer replicas with more KV cache hits
-- `join-shortest-q-tuple`: Multi-objective optimization
-- `join-shortest-q-weight`: Weighted queue depth
-- `bailian-impl-q`: Proprietary algorithm
+### Scheduling Policies (compile-time via Cargo features)
+
+Each policy is one Cargo feature flag and exactly one file under `router/src/policies/`. Feature names are the source of truth — anything not in this list is stale.
+
+- `random-q` — Uniform random replica selection (`policies/random.rs`).
+- `round-robin-q` — Cyclic distribution; **stateful** (RR counter in `RRContext`) (`policies/round_robin.rs`).
+- `join-shortest-q` — Shortest queue depth (uses `shortest_q_weight.rs`).
+- `least-wait-token-q` — Minimize total waiting tokens, prospective (`policies/least_wait_token.rs`).
+- `bounded-most-hit-q` — Max KV cache hits subject to prefill-token budget filter (`policies/bounded_most_hit.rs`).
+- `bailian-impl-q` — Per-component normalize then sample with weights `(α, β, γ)` over `(hit_ratio, req_count_inv, token_count_inv)` (`policies/bailian.rs`).
+- `aibrix-q` — Port of AIBrix prefix-cache routing: load-imbalance gate then sort-and-stddev-sample (`policies/aibrix/prefix_cache.rs`).
+- `dynamo-q` — Dynamo logit `w·potential_prefill_blocks + decode_blocks`.
+- `dynamo-decoupled-q` — Dynamo variant decoupling per-request prefill from engine state; pairs with `dynamo-q` for ablation.
+- `lmetric-q` — Multiplicative score `(queued_prefill + new_prefill) × (bs+1)`; the lmetric paper's contribution (`policies/lmetric.rs`).
+- `preble-q` — Preble cost-model port; under QueuePlusPlus simplifies to `new_prefill + all_tokens`.
+
+Earlier revisions referred to `join-shortest-q-tuple` and `join-shortest-q-weight` — those are not Cargo features and have been superseded by `aibrix-q` and `shortest_q_weight.rs` respectively.
 
 ### KV Cache Tracking
 - **RadixTree** (`radixtrie.rs`): Patricia trie mapping token sequences to block hashes
@@ -116,27 +133,27 @@ Prefill → MutatingToDecode → Decode → ShuttingDecode → Inactive
 Broadcasting: NvlCasting, RdmaCasting, TanzCasting, RdmaSending, RdmaLoading
 ```
 
-### Conditional Compilation (backend selection)
-The backend is selected at compile time. Key `#[cfg]` guards:
-- `main.rs`: `VllmClient::new()` (vllm-backend) vs `Stub::connect()` (blitzllm-backend)
-- `infer.rs`: `Infer` struct definition differs per backend
-- `server.rs`: Backend-specific imports and handler parameters
+### Conditional Compilation (policy selection)
+The scheduling policy is selected at compile time via Cargo features. Each policy file under `policies/` is gated by `#[cfg(feature = "<name>-q")]`. Exactly one policy feature should be enabled per build.
 
 ## Build
 
 ```bash
-# lmetric build (vllm-backend with a scheduling policy)
-cargo build -p router_v2 --features vllm-backend,join-shortest-q
+# Default build (lmetric scoring policy)
+cargo build -p router --features lmetric-q
 
-# Full feature build (legacy, for blitzllm + scaling)
-cargo build -p router_v2 --features impl_blitz,impl_fast_pro,impl_live_pro
+# Pick any other policy by swapping the feature
+cargo build -p router --features bounded-most-hit-q
+cargo build -p router --features aibrix-q
 ```
 
-**Cargo workspace members**: `tokenizer`, `router_v2`, `request-sim`, `rust-grpc`, `rust-proto`
+`vllm-backend` is the only backend and is enabled implicitly by other features that depend on it; you do not normally need to pass it explicitly. The legacy `blitzllm-backend`, `impl_blitz`, `impl_fast_pro`, `impl_live_pro` features no longer exist.
+
+**Cargo workspace members**: `tokenizer`, `router`, `request-sim`, `rust-grpc`, `rust-proto`
 
 ## Configuration
 
-### CLI Arguments (router_v2)
+### CLI Arguments (router)
 ```
 --max-concurrent-requests     (default: 128)
 --max-batch-prefill-tokens    (default: 4096)

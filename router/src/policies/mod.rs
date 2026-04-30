@@ -9,7 +9,6 @@
 pub(crate) mod aibrix;
 pub(crate) mod bailian;
 pub(crate) mod bounded_most_hit;
-pub(crate) mod dbg_round_robin;
 pub(crate) mod dynamo;
 pub(crate) mod least_wait_token;
 pub(crate) mod lmetric;
@@ -23,7 +22,6 @@ pub(crate) mod shortest_q_weight;
 pub(crate) use aibrix::AibrixQ;
 pub(crate) use bailian::BailianImplQ;
 pub(crate) use bounded_most_hit::JBoundMostHitQ2;
-pub(crate) use dbg_round_robin::DbgRRQueue;
 pub(crate) use dynamo::{DynamoQ, DynamoDecodeQ};
 pub(crate) use least_wait_token::JLeastWaitTokenQ;
 pub(crate) use lmetric::LmetricQ;
@@ -425,7 +423,12 @@ async fn apply_schedule_decision<P: QueuePlusPlus>(
     // an SSE handler may have advanced block_hash.epoch() in the window
     // between scoring and decision recording, leaving the score stale relative
     // to the current epoch. Recording the stale prediction together with the
-    // newer epoch is the TOCTOU bug verify_staleness flagged on dynamo-q.
+    // newer epoch would be a TOCTOU hazard for any policy that reads
+    // block_hash, not specific to any particular scheduling algorithm. (This
+    // re-eval was an early hypothesis for the staleness violations tracked in
+    // issue #10; the actual root cause turned out to be alias-bid drops in
+    // RadixTreeBlockHash, fixed in kvcache.rs. This rescore is kept as a
+    // strict observability enhancement — sub-microsecond cost, no regression.)
     let hit_nblks: usize = block_hash.get(entry.block_hash_state.get_hashes());
     entry.block_hash_state.set_pred_block_hits(hit_nblks);
     entry.block_hash_state.set_decision_epoch(block_hash.epoch());
@@ -809,15 +812,12 @@ pub(crate) type TaskAssigner = QueueRunner<RRQueue>;
 #[cfg(feature = "random-q")]
 pub(crate) type TaskAssigner = QueueRunner<RandomQ>;
 // Legacy aliases
-#[cfg(all(feature = "join-shortest-q-tuple", not(feature = "aibrix-q")))]
-pub(crate) type TaskAssigner = QueueRunner<AibrixQ>;
 #[cfg(all(feature = "join-shortest-q", not(any(
     feature = "bailian-impl-q",
     feature = "bounded-most-hit-q",
     feature = "least-wait-token-q",
     feature = "aibrix-q",
     feature = "dynamo-q",
-    feature = "join-shortest-q-tuple",
     feature = "join-shortest-q-weight",
     feature = "round-robin-q",
     feature = "random-q",
