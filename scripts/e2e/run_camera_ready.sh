@@ -19,7 +19,7 @@ declare -A POLICY_BINS=(
   [bailian]="router_bailian-impl-q"
   [aibrix]="router_aibrix-q"
   [dynamo-t1]="router_dynamo-q"
-  [dynamo-t2]="router_dynamo-decoupled-q"
+  [dynamo-t2]="router_dynamo-po-q"
   [lmetric]="router_lmetric-q"
   [preble]="router_preble-q"
 )

@@ -9,7 +9,7 @@ declare -a POLICIES=(
   "bailian-impl-q"
   "aibrix-q"
   "dynamo-q"
-  "dynamo-decoupled-q"
+  "dynamo-po-q"
   "lmetric-q"
   "preble-q"
 )

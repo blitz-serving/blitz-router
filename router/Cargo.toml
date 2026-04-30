@@ -114,7 +114,7 @@ least-wait-token-q = []
 bailian-impl-q = []
 aibrix-q = []
 dynamo-q = []
-dynamo-decoupled-q = []
+dynamo-po-q = []
 lmetric-q = []
 preble-q = []
 # Legacy aliases (prefer system-specific names above)

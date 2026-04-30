@@ -73,16 +73,23 @@ blitz-router/
 │   ├── statistic.rs         # Statistics collection
 │   ├── health.rs            # Health checks
 │   ├── error.rs             # Error types
-│   └── policies/            # Scheduling policies (one file per algorithm)
-│       ├── mod.rs               # QueuePlusPlus trait, Deterministic/StochasticPolicy (~825 LOC)
-│       ├── random.rs            # random-q
-│       ├── round_robin.rs       # round-robin-q (stateful — RR counter)
-│       ├── least_wait_token.rs  # least-wait-token-q
-│       ├── bounded_most_hit.rs  # bounded-most-hit-q (cache-aware)
-│       ├── shortest_q_weight.rs # join-shortest-q + variants
-│       ├── lmetric.rs           # lmetric-q (multiplicative scoring)
-│       ├── bailian.rs           # bailian-impl-q (linear combination + sample)
-│       └── aibrix/prefix_cache.rs   # aibrix-q port
+│   └── policies/            # Scheduling policies — DSL-driven
+│       ├── mod.rs               # ~160 LOC: Entry, QueuePro, TaskAssigner aliases
+│       ├── policy_trait.rs      # `Policy` trait (5 lines, lowering target)
+│       ├── policy_runner.rs     # `PolicyRunner<P: Policy>` queue runner
+│       ├── dsl_runtime.rs       # combinators, reducers, named pure fns,
+│       │                        # `apply_default_after`, Observation schema
+│       ├── simple.rs            # random-q, round-robin-q, join-shortest-q,
+│       │                        # join-shortest-q-weight, least-wait-token-q,
+│       │                        # bounded-most-hit-q (each is 1–10 line `policy!`)
+│       ├── lmetric.rs           # lmetric-q
+│       ├── bailian.rs           # bailian-impl-q
+│       ├── aibrix.rs            # aibrix-q
+│       ├── dynamo.rs            # dynamo-q + dynamo-po-q (T1 + T2 ablation)
+│       └── preble/              # preble-q + cost_model/histogram/router utils
+├── policy-dsl/              # ~150 LOC proc-macro: parser + lint + lowering
+│   └── src/{lib,ast,parse,check,lower}.rs
+├── docs/dsl-schema.md       # DSL spec (§1–§13)
 ├── proto/generate.proto     # Protobuf type definitions (used as internal data structures)
 ├── rust-proto/              # Protobuf codegen (internal types only)
 ├── rust-grpc/               # gRPC metadata injection (vestigial)
@@ -99,21 +106,22 @@ The legacy `replica/` subdirectory and the `cybernetics/` planner code described
 
 ## Key Components
 
-### Scheduling Policies (compile-time via Cargo features)
+### Scheduling Policies (DSL-driven, compile-time via Cargo features)
 
-Each policy is one Cargo feature flag and exactly one file under `router/src/policies/`. Feature names are the source of truth — anything not in this list is stale.
+Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `router/src/policies/` that the `policy-dsl/` proc macro lowers into an `impl Policy for X { fn schedule(...) }` block. The macro enforces an allowlist lint (`docs/dsl-schema.md` §13.2) so the impl always corresponds 1:1 to a paper-form DSL listing (§8) via the rewrite table (§13.1). `PolicyRunner<P: Policy>` is the dispatch shim. Feature names are the source of truth — anything not in this list is stale.
 
-- `random-q` — Uniform random replica selection (`policies/random.rs`).
-- `round-robin-q` — Cyclic distribution; **stateful** (RR counter in `RRContext`) (`policies/round_robin.rs`).
-- `join-shortest-q` — Shortest queue depth (uses `shortest_q_weight.rs`).
-- `least-wait-token-q` — Minimize total waiting tokens, prospective (`policies/least_wait_token.rs`).
-- `bounded-most-hit-q` — Max KV cache hits subject to prefill-token budget filter (`policies/bounded_most_hit.rs`).
-- `bailian-impl-q` — Per-component normalize then sample with weights `(α, β, γ)` over `(hit_ratio, req_count_inv, token_count_inv)` (`policies/bailian.rs`).
-- `aibrix-q` — Port of AIBrix prefix-cache routing: load-imbalance gate then sort-and-stddev-sample (`policies/aibrix/prefix_cache.rs`).
-- `dynamo-q` — Dynamo logit `w·potential_prefill_blocks + decode_blocks`.
-- `dynamo-decoupled-q` — Dynamo variant decoupling per-request prefill from engine state; pairs with `dynamo-q` for ablation.
-- `lmetric-q` — Multiplicative score `(queued_prefill + new_prefill) × (bs+1)`; the lmetric paper's contribution (`policies/lmetric.rs`).
-- `preble-q` — Preble cost-model port; under QueuePlusPlus simplifies to `new_prefill + all_tokens`.
+- `random-q` — `Select rand by 1` (`simple.rs`).
+- `round-robin-q` — LRU-style with `RRGCtx { next_replica_id }` global state (`simple.rs`).
+- `join-shortest-q` — vLLM `4·waiting + bs` (`simple.rs`).
+- `join-shortest-q-weight` — same formula, separate cargo flag (`simple.rs`).
+- `least-wait-token-q` — `Select min by prefill_tokens(req, sctx)` (`simple.rs`).
+- `bounded-most-hit-q` — `Filter (queued_tokens < BOUND) (max hit) (min prefill_tokens)`, with the attention-black-hole fallback fix (`simple.rs`).
+- `bailian-impl-q` — Per-component normalize then weighted-sample `(α, β, γ)` over `(hit_pct, 1-bs/M_bs, 1-tok/M_tok)` (`bailian.rs`).
+- `aibrix-q` — Nested `Filter` (load-imbalance gate × stddev threshold) with tuple-keyed `(-hit_pct, bs)` selection (`aibrix.rs`).
+- `dynamo-q` — Dynamo logit (T1, prefill perspective): `w·prefill_block + floor(prefill_block)` (`dynamo.rs`).
+- `dynamo-po-q` — Dynamo "prefill-only" variant (T2): `w·new_block + (new_blocks + decode_blocks)`. (Renamed from legacy `dynamo-decoupled-q`.)
+- `lmetric-q` — `Select min by prefill_tokens · (bs+1)` (`lmetric.rs`).
+- `preble-q` — Dual-stage Preble: `Filter (match_pct > 0.5) (max match) (min preble_cost)`; SlidingWindowHistogram updated via `after_extra` (`preble/`).
 
 Earlier revisions referred to `join-shortest-q-tuple` and `join-shortest-q-weight` — those are not Cargo features and have been superseded by `aibrix-q` and `shortest_q_weight.rs` respectively.
 
