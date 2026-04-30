@@ -59,10 +59,10 @@ pub(crate) struct AibrixQ;
 ///
 /// 5. Fallback: last candidate in the sorted list (per AIBrix behavior).
 fn aibrix_prefix_cache_sampler(
-    all_scores: Vec<(usize, (f32, f32), Option<usize>)>,
+    all_scores: Vec<(usize, (f32, f32), Option<(usize, u64)>)>,
     _lower_bound: (f32, f32),
     _upper_bound: (f32, f32),
-) -> (usize, Option<usize>) {
+) -> (usize, Option<(usize, u64)>) {
     debug_assert!(!all_scores.is_empty());
 
     let all_req_counts: Vec<f32> = all_scores.iter().map(|s| s.1 .1).collect();
@@ -74,7 +74,7 @@ fn aibrix_prefix_cache_sampler(
 
     // Step 1: Load imbalance check.
     let imbalanced = (max_req - min_req) > AIBRIX_IMBALANCE_ABS_COUNT as f32;
-    let candidates: Vec<(usize, (f32, f32), Option<usize>)> = if imbalanced {
+    let candidates: Vec<(usize, (f32, f32), Option<(usize, u64)>)> = if imbalanced {
         all_scores
             .into_iter()
             .filter(|s| (s.1 .1 - min_req).abs() < 0.5)
@@ -113,9 +113,9 @@ fn aibrix_prefix_cache_sampler(
     });
 
     // Step 4: Select first replica within the threshold.
-    for &(replica_id, (_, req_count), hit_nblks) in sorted.iter() {
+    for &(replica_id, (_, req_count), cached) in sorted.iter() {
         if req_count <= threshold {
-            return (replica_id, hit_nblks);
+            return (replica_id, cached);
         }
     }
 

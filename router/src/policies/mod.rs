@@ -235,10 +235,15 @@ pub(crate) trait QueuePlusPlus {
 // Sampler -- optional weighted-sampling callback
 // ---------------------------------------------------------------------------
 
-/// A sampler takes the collected `(replica_id, weight, hit_nblks)` triples
+/// A sampler takes the collected `(replica_id, weight, cached_hit)` triples
 /// together with global lower/upper bounds and returns the chosen replica.
+/// `cached_hit` is `Option<(hit_nblks, epoch_at_score)>` — the radix lookup
+/// performed during scoring, plus the epoch observed under that same lock.
+/// The sampler is opaque to this third element and just passes it through;
+/// `apply_schedule_decision` uses the epoch to decide whether to skip a
+/// post-decision re-lookup.
 pub(crate) type SamplerFn<W> =
-    fn(Vec<(usize, W, Option<usize>)>, W, W) -> (usize, Option<usize>);
+    fn(Vec<(usize, W, Option<(usize, u64)>)>, W, W) -> (usize, Option<(usize, u64)>);
 
 /// Marker trait: policies that use `select_best_replica` (deterministic).
 /// Implement this for policies that use `step!`-style scheduling.
@@ -264,7 +269,7 @@ async fn select_best_replica<P>(
 ) -> Option<(
     usize,
     AssignScore<P::Measure, P::Weight>,
-    Option<NumHitKvBlock>,
+    Option<(NumHitKvBlock, u64)>,
 )>
 where
     P: QueuePlusPlus,
@@ -279,8 +284,12 @@ where
             let qctx = qctx.clone();
             async move {
                 let sctx = sched_ctx.lock().await;
-                P::eligible_with_kvblock_hit(replica_id, entry, &qctx, &sctx)
-                    .map(|(score, hit_nblks)| (replica_id, score, hit_nblks))
+                let result = P::eligible_with_kvblock_hit(replica_id, entry, &qctx, &sctx);
+                // Capture epoch under the same lock acquisition that produced
+                // `hit_nblks`; this lets apply_schedule_decision skip a
+                // re-lookup when the radix tree hasn't mutated since.
+                let epoch = sctx.block_hash.epoch();
+                result.map(|(score, hit)| (replica_id, score, hit.map(|h| (h, epoch))))
             }
         },
     );
@@ -291,7 +300,7 @@ where
         |best_replica: Option<(
             usize,
             AssignScore<P::Measure, P::Weight>,
-            Option<NumHitKvBlock>,
+            Option<(NumHitKvBlock, u64)>,
         )>,
          next_replica| match best_replica {
             None => Some(next_replica),
@@ -317,7 +326,11 @@ async fn weigh_replica<P>(
     entry: &Entry,
     qctx: &P::QueueContext,
     all_sctx: &[Arc<Mutex<ScheduleContext>>],
-) -> (Vec<(usize, P::Weight, Option<usize>)>, P::Weight, P::Weight)
+) -> (
+    Vec<(usize, P::Weight, Option<(usize, u64)>)>,
+    P::Weight,
+    P::Weight,
+)
 where
     P: QueuePlusPlus,
     P::Weight: NaiiveLattice,
@@ -331,8 +344,9 @@ where
             let qctx = qctx.clone();
             async move {
                 let sctx = sched_ctx.lock().await;
-                P::eligible_with_kvblock_hit(replica_id, entry, &qctx, &sctx)
-                    .map(|(score, hit_nblks)| (replica_id, score, hit_nblks))
+                let result = P::eligible_with_kvblock_hit(replica_id, entry, &qctx, &sctx);
+                let epoch = sctx.block_hash.epoch();
+                result.map(|(score, hit)| (replica_id, score, hit.map(|h| (h, epoch))))
             }
         },
     );
@@ -344,11 +358,11 @@ where
             <P::Weight as NaiiveLattice>::TOP,
             <P::Weight as NaiiveLattice>::BOTTOM,
         ),
-        |(mut all_scores, mut inf_w, mut sup_w), (replica_id, score, hit_nblks)| {
+        |(mut all_scores, mut inf_w, mut sup_w), (replica_id, score, cached)| {
             if let AssignScore::Weighted(w) = score {
                 inf_w = inf_w.meet(&w);
                 sup_w = sup_w.join(&w);
-                all_scores.push((replica_id, w, hit_nblks));
+                all_scores.push((replica_id, w, cached));
             }
 
             (all_scores, inf_w, sup_w)
@@ -371,10 +385,10 @@ where
     P: DeterministicPolicy,
     P::Measure: Ord,
 {
-    if let Some((replica_idx, _score, hit_nblks)) =
+    if let Some((replica_idx, _score, cached)) =
         select_best_replica::<P>(entry, qctx, all_sctx).await
     {
-        apply_schedule_decision::<P>(entry, replica_idx, hit_nblks, all_sctx).await;
+        apply_schedule_decision::<P>(entry, replica_idx, cached, all_sctx).await;
         Some(replica_idx)
     } else {
         tracing::info!("Cluster overloaded!");
@@ -400,8 +414,8 @@ where
         None
     } else {
         let sampler = P::sampler();
-        let (replica_idx, hit_nblks) = sampler(all_scores, lower_bound, upper_bound);
-        apply_schedule_decision::<P>(entry, replica_idx, hit_nblks, all_sctx).await;
+        let (replica_idx, cached) = sampler(all_scores, lower_bound, upper_bound);
+        apply_schedule_decision::<P>(entry, replica_idx, cached, all_sctx).await;
         Some(replica_idx)
     }
 }
@@ -410,28 +424,34 @@ where
 async fn apply_schedule_decision<P: QueuePlusPlus>(
     entry: &Entry,
     replica_idx: usize,
-    _hit_nblks: Option<usize>,
+    cached: Option<(usize, u64)>,
     all_sctx: &[Arc<Mutex<ScheduleContext>>],
 ) {
     let request = &entry.request;
     let ScheduleContext { lmetric, block_hash } =
         &mut *all_sctx[replica_idx].lock().await;
 
-    // Re-evaluate the prediction under THIS lock acquisition so the recorded
-    // hit_nblks and decision_epoch are consistent. The hit_nblks computed in
-    // select_best_replica/weigh_replica was under a separate lock acquisition;
-    // an SSE handler may have advanced block_hash.epoch() in the window
-    // between scoring and decision recording, leaving the score stale relative
-    // to the current epoch. Recording the stale prediction together with the
-    // newer epoch would be a TOCTOU hazard for any policy that reads
-    // block_hash, not specific to any particular scheduling algorithm. (This
-    // re-eval was an early hypothesis for the staleness violations tracked in
-    // issue #10; the actual root cause turned out to be alias-bid drops in
-    // RadixTreeBlockHash, fixed in kvcache.rs. This rescore is kept as a
-    // strict observability enhancement — sub-microsecond cost, no regression.)
-    let hit_nblks: usize = block_hash.get(entry.block_hash_state.get_hashes());
+    // The hit_nblks computed in select_best_replica/weigh_replica was under
+    // a separate lock acquisition together with the epoch observed at that
+    // moment. If the radix tree hasn't mutated since (epoch unchanged), the
+    // cached prediction is still valid and we can skip a redundant
+    // block_hash.get(...). Otherwise an SSE handler advanced the epoch in
+    // the window between scoring and decision recording, and we must
+    // re-evaluate so the recorded hit_nblks and decision_epoch are
+    // mutually consistent.
+    //
+    // (This pairing was originally an early hypothesis for the staleness
+    // violations tracked in issue #10; the actual root cause turned out to
+    // be alias-bid drops in RadixTreeBlockHash, fixed in kvcache.rs. The
+    // re-eval is kept as a strict observability enhancement and the
+    // epoch-skip optimization makes its hot-path cost zero.)
+    let current_epoch = block_hash.epoch();
+    let hit_nblks: usize = match cached {
+        Some((h, e)) if e == current_epoch => h,
+        _ => block_hash.get(entry.block_hash_state.get_hashes()),
+    };
     entry.block_hash_state.set_pred_block_hits(hit_nblks);
-    entry.block_hash_state.set_decision_epoch(block_hash.epoch());
+    entry.block_hash_state.set_decision_epoch(current_epoch);
     let new_ntkns = request.input_tokens.len()
         - /*inconsistent=*/ hit_nblks * entry.block_hash_state.get_block_size();
 
@@ -440,7 +460,7 @@ async fn apply_schedule_decision<P: QueuePlusPlus>(
         request_id = request.request_id,
         engine = replica_idx,
         predicted_hits = hit_nblks,
-        radix_epoch = block_hash.epoch(),
+        radix_epoch = current_epoch,
         new_tokens = new_ntkns,
         "DECISION"
     );

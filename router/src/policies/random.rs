@@ -31,10 +31,10 @@ impl QueuePlusPlus for RandomQ {
 }
 
 fn random_sampler(
-    all_scores: Vec<(usize, (), Option<usize>)>,
+    all_scores: Vec<(usize, (), Option<(usize, u64)>)>,
     _lower_bound: (),
     _upper_bound: (),
-) -> (usize, Option<usize>) {
+) -> (usize, Option<(usize, u64)>) {
     let mut rng = thread_rng();
     let x = rng.gen_range(0..all_scores.len());
     let (id, _, hit) = all_scores.get(x).copied().unwrap();

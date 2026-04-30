@@ -41,10 +41,10 @@ impl NaiiveLattice for (f32, f32, f32) {
 pub(crate) struct BailianImplQ;
 
 fn bailian_sampler(
-    all_scores: Vec<(usize, (f32, f32, f32), Option<usize>)>,
+    all_scores: Vec<(usize, (f32, f32, f32), Option<(usize, u64)>)>,
     lower_bound: (f32, f32, f32),
     upper_bound: (f32, f32, f32),
-) -> (usize, Option<usize>) {
+) -> (usize, Option<(usize, u64)>) {
     let eps = 1e-6f32;
     let dx0 = (upper_bound.0 - lower_bound.0).abs().max(eps);
     let dx1 = (upper_bound.1 - lower_bound.1).abs().max(eps);
@@ -55,7 +55,7 @@ fn bailian_sampler(
 
     tracing::debug!("All scores: {:?}", all_scores);
 
-    for (replica_id, (hit_ratio, nreqs, ntkns), hit_nblks) in all_scores.into_iter() {
+    for (replica_id, (hit_ratio, nreqs, ntkns), cached) in all_scores.into_iter() {
         // Normalize to [0,1]
         let n0 = ((hit_ratio - lower_bound.0) / dx0).clamp(0.0, 1.0);
         let n1 = ((upper_bound.1 - nreqs) / dx1).clamp(0.0, 1.0);
@@ -66,7 +66,7 @@ fn bailian_sampler(
         let p = if p.is_finite() && p > 0.0 { p } else { 0.0 };
 
         total_weight += p;
-        norm_scores.push((replica_id, p, hit_nblks));
+        norm_scores.push((replica_id, p, cached));
     }
 
     let mut rng = thread_rng();
@@ -75,12 +75,12 @@ fn bailian_sampler(
     tracing::debug!("Normed scores: {:?}; r={r}", norm_scores);
 
     let mut ret = (0, None);
-    for (replica_id, p, hit_nblks) in norm_scores {
+    for (replica_id, p, cached) in norm_scores {
         if r <= p {
-            return (replica_id, hit_nblks);
+            return (replica_id, cached);
         }
         r -= p;
-        ret = (replica_id, hit_nblks);
+        ret = (replica_id, cached);
     }
 
     ret
