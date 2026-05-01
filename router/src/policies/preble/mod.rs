@@ -1,68 +1,66 @@
 //! Preble scheduling policy — DSL form using `policy!` macro.
 //!
 //! See `docs/dsl-schema.md` §8 (canonical DSL listing) and the §13.1
-//! rewrite table. The cost-model state lives in a `OnceLock<Mutex<...>>`
-//! local to this module (its conceptual home is `GlobalContext`, but
-//! migrating that belongs to a follow-up — the scope of this DSL pass
-//! is to retire `QueuePlusPlus`, not to redesign Preble's state plumbing).
+//! rewrite table. The cost-model state lives in `PrebleGCtx` (passed
+//! through `Policy::GlobalContext`), promoted from the previous
+//! module-static `OnceLock` per the user's "state is a first-class
+//! scope, not a backdoor" framing.
 //!
 //! Submodules `cost_model`, `histogram`, `router` are unchanged
-//! utility modules used by `preble_cost` / `update_histogram` runtime
-//! helpers.
+//! utility modules used by `preble_cost` / `preble_update_after`
+//! runtime helpers.
 
 pub(crate) mod cost_model;
 pub(crate) mod histogram;
 #[allow(dead_code)]
 pub(crate) mod router;
 
-use std::sync::{Mutex, OnceLock};
-
 use histogram::{node_key_from_prefix, SlidingWindowHistogram};
 
 use policy_dsl::policy;
 
 // =========================================================================
-// Global Preble state — temporary location pending GlobalContext migration
+// PrebleGCtx — Policy::GlobalContext for PrebleQ
 // =========================================================================
+//
+// `SlidingWindowHistogram::new` requires `num_replicas`, which is only
+// known when PolicyRunner first calls `schedule()`. We therefore wrap the
+// histogram in `Option<...>` and lazy-init on first use via
+// `ensure_init`. After init the histogram lives across all subsequent
+// schedule calls — its purpose is exactly to model cross-request traffic.
 
-static PREBLE_STATE: OnceLock<Mutex<PrebleGlobalState>> = OnceLock::new();
-
-pub(crate) struct PrebleGlobalState {
-    histogram: SlidingWindowHistogram,
+#[derive(Default)]
+pub(crate) struct PrebleGCtx {
+    histogram: Option<SlidingWindowHistogram>,
 }
 
-impl PrebleGlobalState {
-    pub(crate) fn allocation_cost_per_replica(&self) -> Vec<f64> {
-        self.histogram.get_allocation_cost_per_replica()
+impl PrebleGCtx {
+    /// Initialize the histogram if not yet present. Idempotent.
+    pub(crate) fn ensure_init(&mut self, num_replicas: usize) -> &mut SlidingWindowHistogram {
+        if self.histogram.is_none() {
+            self.histogram = Some(SlidingWindowHistogram::new(
+                num_replicas,
+                cost_model::TargetGpu::default(),
+            ));
+        }
+        self.histogram.as_mut().unwrap()
+    }
+
+    /// Read-only access for `preble_cost`. Returns `None` if not yet
+    /// initialized (in which case `preble_cost` falls back to the
+    /// no-cost-adjustment path, equivalent to the OnceLock-uninitialized
+    /// branch in the previous implementation).
+    pub(crate) fn histogram(&self) -> Option<&SlidingWindowHistogram> {
+        self.histogram.as_ref()
     }
 }
 
-fn get_or_init_state(num_replicas: usize) -> &'static Mutex<PrebleGlobalState> {
-    PREBLE_STATE.get_or_init(|| {
-        Mutex::new(PrebleGlobalState {
-            histogram: SlidingWindowHistogram::new(
-                num_replicas,
-                cost_model::TargetGpu::default(),
-            ),
-        })
-    })
-}
+// =========================================================================
+// Histogram update — called from PrebleQ's after_extra
+// =========================================================================
 
-/// Read-only access for the `preble_cost` runtime helper.
-pub(crate) fn peek_state() -> Option<&'static Mutex<PrebleGlobalState>> {
-    PREBLE_STATE.get()
-}
-
-/// Initialise the Preble state at router startup.
-#[allow(unused)]
-pub(crate) fn init_preble_state(num_replicas: usize) {
-    let _ = get_or_init_state(num_replicas);
-}
-
-/// Update the Preble histogram after a routing decision (called from the
-/// `preble_update_after` runtime helper, which is itself invoked from
-/// PrebleQ's `after_extra` clause).
-pub(crate) fn update_histogram(
+pub(crate) fn update_histogram_into(
+    gctx: &mut PrebleGCtx,
     block_hashes: &[u64],
     hit_nblks: usize,
     input_len: usize,
@@ -70,20 +68,18 @@ pub(crate) fn update_histogram(
     replica_id: usize,
     num_replicas: usize,
 ) {
-    let state_lock = get_or_init_state(num_replicas);
-    if let Ok(mut state) = state_lock.lock() {
-        let node_key = node_key_from_prefix(block_hashes, hit_nblks);
-        let context_length = hit_nblks * block_size;
-        let num_tokens = input_len.saturating_sub(context_length);
-        let decoding_length = state.histogram.default_decoding_length();
-        state.histogram.update(
-            node_key,
-            num_tokens,
-            context_length,
-            replica_id,
-            decoding_length,
-        );
-    }
+    let histogram = gctx.ensure_init(num_replicas);
+    let node_key = node_key_from_prefix(block_hashes, hit_nblks);
+    let context_length = hit_nblks * block_size;
+    let num_tokens = input_len.saturating_sub(context_length);
+    let decoding_length = histogram.default_decoding_length();
+    histogram.update(
+        node_key,
+        num_tokens,
+        context_length,
+        replica_id,
+        decoding_length,
+    );
 }
 
 // =========================================================================
@@ -95,37 +91,25 @@ pub(crate) fn update_histogram(
 //   Filter (match_blocks(req, sctx) / req.input_tokens > 0.5)
 //     (Select max by match_blocks(req, sctx))
 //     (Select min by preble_cost(req, sctx))
-//   after default; preble_update_after(req, &observations[chosen], Count)
+//   after default; preble_update_after(...)
 //
-// The dual-stage routing: stage 1 picks the longest-matching replica
-// when prefix-match ratio > 50%, else stage 2 picks the lowest cost.
+// Stage 1 picks the longest-matching replica when prefix-match ratio
+// > 50%, else stage 2 picks the lowest cost.
 
 policy! {
     name: PrebleQ,
-    gctx: (),
+    gctx: PrebleGCtx,
     body: {
         filter_then(
             &root_target(&observations),
             |o| (o.hit_blocks * o.block_size) as f64 / req.input_tokens.len().max(1) as f64 > 0.5,
             |t| select_max_by(t, |o| match_blocks(req, o)),
-            |t| select_min_by(t, |o| preble_cost(req, o)),
+            |t| select_min_by(t, |o| preble_cost(req, o, gctx)),
         )
     },
     after_extra: {
         let count = observations.len().max(1);
-        preble_update_after(entry, &observations[chosen], count);
+        preble_update_after(entry, &observations[chosen], count, gctx);
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_init_global_state() {
-        init_preble_state(4);
-        let state = PREBLE_STATE.get().unwrap();
-        let guard = state.lock().unwrap();
-        assert_eq!(guard.histogram.num_replicas(), 4);
-    }
-}

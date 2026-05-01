@@ -118,15 +118,19 @@ pub(crate) fn decode_blocks(sctx: &Observation) -> usize {
     }
 }
 
-/// Preble cost model query (reads global SlidingWindowHistogram via the
-/// `preble` submodule's OnceLock). Returns the per-replica score
-/// adjustment that PrebleQ adds on top of `(new_tokens + all_tokens)`.
+/// Preble cost model query. Reads the `SlidingWindowHistogram` out of
+/// `gctx` (the policy's `GlobalContext` — see `policies::preble::PrebleGCtx`)
+/// and adds the per-replica score adjustment that PrebleQ overlays on
+/// top of `(new_tokens + all_tokens)`.
 ///
 /// Splitting out as a named pure fn lets the policy DSL stay a one-liner
 /// while concentrating the `match_ratio > 0.5` bonus + the histogram
-/// cost lookup in one auditable place. See `policies::preble::mod.rs`
-/// for the underlying state transitions.
-pub(crate) fn preble_cost(req: &ValidGenerateRequest, sctx: &Observation) -> i64 {
+/// cost lookup in one auditable place.
+pub(crate) fn preble_cost(
+    req: &ValidGenerateRequest,
+    sctx: &Observation,
+    gctx: &crate::policies::preble::PrebleGCtx,
+) -> i64 {
     let new_pre = new_tokens(req, sctx);
     let all = sctx.all_tokens;
     let mut score = (new_pre + all) as i64;
@@ -137,25 +141,26 @@ pub(crate) fn preble_cost(req: &ValidGenerateRequest, sctx: &Observation) -> i64
         let bonus = (match_ratio * input_len as f64 * 0.5) as i64;
         score -= bonus;
     }
-    if let Some(state_lock) = crate::policies::preble::peek_state() {
-        if let Ok(state) = state_lock.lock() {
-            let costs = state.allocation_cost_per_replica();
-            if sctx.idx < costs.len() {
-                score += (costs[sctx.idx] * 1000.0) as i64;
-            }
+    if let Some(histogram) = gctx.histogram() {
+        let costs = histogram.get_allocation_cost_per_replica();
+        if sctx.idx < costs.len() {
+            score += (costs[sctx.idx] * 1000.0) as i64;
         }
     }
     score
 }
 
 /// `after_extra` hook for PrebleQ: updates the sliding-window histogram
-/// with the routing decision so future `preble_cost` calls reflect it.
+/// in `gctx` with the routing decision so future `preble_cost` calls
+/// reflect it. Lazy-initializes the histogram on first call.
 pub(crate) fn preble_update_after(
     entry: &Entry,
     chosen: &Observation,
     num_replicas: usize,
+    gctx: &mut crate::policies::preble::PrebleGCtx,
 ) {
-    crate::policies::preble::update_histogram(
+    crate::policies::preble::update_histogram_into(
+        gctx,
         entry.block_hash_state.get_hashes(),
         chosen.hit_blocks,
         entry.request.input_tokens.len(),

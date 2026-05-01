@@ -25,11 +25,19 @@ pub(crate) mod preble;
 pub(crate) mod simple;
 
 // Re-export concrete policy structs (each emitted by `policy!`).
+// `#[allow(unused_imports)]` because exactly one is referenced per
+// build via the cargo-feature-gated `TaskAssigner` alias below.
+#[allow(unused_imports)]
 pub(crate) use aibrix::AibrixQ;
+#[allow(unused_imports)]
 pub(crate) use bailian::BailianImplQ;
+#[allow(unused_imports)]
 pub(crate) use dynamo::{DynamoDecodeQ, DynamoQ};
+#[allow(unused_imports)]
 pub(crate) use lmetric::LmetricQ;
+#[allow(unused_imports)]
 pub(crate) use preble::PrebleQ;
+#[allow(unused_imports)]
 pub(crate) use simple::{
     JBoundMostHitQ2, JLeastWaitTokenQ, JShortestQ, JShortestQWeight, RandomQ, RoundRobinQ,
 };
@@ -42,9 +50,9 @@ use std::time::Duration;
 
 use nohash_hasher::IntMap;
 use pb::generate::v2::Batch;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::time::Instant;
-use tracing::{instrument, Span};
+use tracing::Span;
 
 // ---------------------------------------------------------------------------
 // Common type aliases
