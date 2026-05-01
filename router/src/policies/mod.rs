@@ -32,7 +32,7 @@ pub(crate) use aibrix::AibrixQ;
 #[allow(unused_imports)]
 pub(crate) use bailian::BailianImplQ;
 #[allow(unused_imports)]
-pub(crate) use dynamo::{DynamoDecodeQ, DynamoQ};
+pub(crate) use dynamo::{DynamoPoQ, DynamoQ};
 #[allow(unused_imports)]
 pub(crate) use lmetric::LmetricQ;
 #[allow(unused_imports)]
@@ -140,7 +140,7 @@ pub(crate) type TaskAssigner = PolicyRunner<AibrixQ>;
 #[cfg(feature = "dynamo-q")]
 pub(crate) type TaskAssigner = PolicyRunner<DynamoQ>;
 #[cfg(feature = "dynamo-po-q")]
-pub(crate) type TaskAssigner = PolicyRunner<DynamoDecodeQ>;
+pub(crate) type TaskAssigner = PolicyRunner<DynamoPoQ>;
 #[cfg(feature = "lmetric-q")]
 pub(crate) type TaskAssigner = PolicyRunner<LmetricQ>;
 #[cfg(feature = "preble-q")]

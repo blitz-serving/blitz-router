@@ -118,8 +118,8 @@ Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `ro
 - `bounded-most-hit-q` — `Filter (queued_tokens < BOUND) (max hit) (min prefill_tokens)`, with the attention-black-hole fallback fix (`simple.rs`).
 - `bailian-impl-q` — Per-component normalize then weighted-sample `(α, β, γ)` over `(hit_pct, 1-bs/M_bs, 1-tok/M_tok)` (`bailian.rs`).
 - `aibrix-q` — Nested `Filter` (load-imbalance gate × stddev threshold) with tuple-keyed `(-hit_pct, bs)` selection (`aibrix.rs`).
-- `dynamo-q` — Dynamo logit (T1, prefill perspective): `w·prefill_block + floor(prefill_block)` (`dynamo.rs`).
-- `dynamo-po-q` — Dynamo "prefill-only" variant (T2): `w·new_block + (new_blocks + decode_blocks)`. (Renamed from legacy `dynamo-decoupled-q`.)
+- `dynamo-q` — Dynamo's **Decode-node** formula: `Select min by w·(new_tokens/block_size) + (new_blocks + decode_blocks)` (`dynamo.rs`).
+- `dynamo-po-q` — Dynamo's **Prefill-node** formula ("po" = prefill-only node, NOT "uses new_tokens only"): `Select min by w·(prefill_tokens/block_size) + floor(prefill_blocks)`. (Renamed from legacy `dynamo-decoupled-q`.)
 - `lmetric-q` — `Select min by prefill_tokens · (bs+1)` (`lmetric.rs`).
 - `preble-q` — Dual-stage Preble: `Filter (match_pct > 0.5) (max match) (min preble_cost)`; SlidingWindowHistogram updated via `after_extra` (`preble/`).
 

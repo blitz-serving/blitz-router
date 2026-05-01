@@ -75,6 +75,20 @@ pub(crate) fn new_tokens(req: &ValidGenerateRequest, sctx: &Observation) -> usiz
         .saturating_sub(sctx.hit_blocks * sctx.block_size)
 }
 
+/// New (uncached) blocks `req` would allocate at `sctx`. Equals
+/// `⌈req.tokens / sctx.block_size⌉ − hit_blocks(req, sctx)`. Distinct from
+/// `new_tokens / block_size` at partial-block boundaries (the trailing
+/// partial token always rounds up to one extra block here).
+#[inline]
+pub(crate) fn new_blocks(req: &ValidGenerateRequest, sctx: &Observation) -> usize {
+    if sctx.block_size == 0 {
+        return 0;
+    }
+    req.input_tokens.len()
+        .div_ceil(sctx.block_size)
+        .saturating_sub(sctx.hit_blocks)
+}
+
 /// Already-queued prefill tokens at this replica, request-independent.
 #[inline]
 pub(crate) fn queued_tokens(sctx: &Observation) -> usize {

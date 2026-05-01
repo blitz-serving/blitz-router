@@ -112,6 +112,7 @@ These functions are the *only* way `<fn>`/`<pred>` may consume per-request × pe
 | Name | Signature | Body | Reads |
 |---|---|---|---|
 | `new_tokens(req, sctx)` | `(Req, ScheduleContext) → usize` | `req.tokens - hit_blocks(req, sctx) * sctx.block_size` | `req.input_tokens`, `sctx.block_hash`, `sctx.block_size` |
+| `new_blocks(req, sctx)` | `(Req, ScheduleContext) → usize` | `req.tokens.div_ceil(sctx.block_size).saturating_sub(hit_blocks(req, sctx))` (returns 0 if `block_size == 0`) | `req.input_tokens`, `sctx.block_hash`, `sctx.block_size` |
 | `queued_tokens(sctx)` | `ScheduleContext → usize` | `sctx.queued_pre.max(0) as usize` | `sctx.queued_pre` |
 | `prefill_tokens(req, sctx)` | `(Req, ScheduleContext) → usize` | `queued_tokens(sctx) + new_tokens(req, sctx)` | (composition) |
 | `hit_blocks(req, sctx)` | `(Req, ScheduleContext) → usize` | `sctx.block_hash.get(req.block_hash_state.get_hashes())` | `req.block_hash_state`, `sctx.block_hash` |
@@ -188,13 +189,16 @@ policy bounded-most-hit-q (gctx: ()):
       (Select min by prefill_tokens(req, sctx))
     after: default
 
-policy dynamo-q (gctx: ()):
-    Select min by w · (prefill_tokens(req, sctx) / sctx.block_size)
-                  + decode_blocks(sctx)
+policy dynamo-q (gctx: ()):                              # Dynamo Decode-node logit
+    Select min by w · (new_tokens(req, sctx) / sctx.block_size)
+                  + new_blocks(req, sctx) + decode_blocks(sctx)
     after: default
 
-policy dynamo-po-q (gctx: ()):                          # was dynamo-decoupled-q
-    Select min by w · new_tokens(req, sctx) + sctx.all_tokens
+policy dynamo-po-q (gctx: ()):                           # Dynamo Prefill-node logit
+                                                         # ("po" = prefill-only node;
+                                                         # was dynamo-decoupled-q)
+    Select min by w · (prefill_tokens(req, sctx) / sctx.block_size)
+                  + floor(prefill_tokens(req, sctx) / sctx.block_size)
     after: default
 
 policy lmetric-q (gctx: ()):
@@ -346,7 +350,7 @@ Inside the `policy!` body, the macro accepts only:
 - Function calls to the **closed allowlist**:
   - Combinators: `filter_then`, `select_min_by`, `select_max_by`, `select_rand_by`
   - Reducers: `mean_of_usize`, `std_of_usize`, `sum_of_usize`, `min_of_usize`, `max_of_usize`
-  - Named pure fns (§5): `new_tokens`, `queued_tokens`, `prefill_tokens`, `hit_blocks`, `match_blocks`, `hit_pct`, `decode_blocks`, `preble_cost`
+  - Named pure fns (§5): `new_tokens`, `new_blocks`, `queued_tokens`, `prefill_tokens`, `hit_blocks`, `match_blocks`, `hit_pct`, `decode_blocks`, `preble_cost`
 - `let` bindings (any name, any RHS satisfying these rules transitively)
 - Closures `|name| ...` and `|name1, name2, ...| ...`
 - Field access: `o.bs`, `req.input_tokens`, `gctx.field`, `t[idx]`, etc.

@@ -33,6 +33,7 @@ const ALLOWED_FNS: &[&str] = &[
     "max_of_f32",
     // Named pure fns (docs/dsl-schema.md §5)
     "new_tokens",
+    "new_blocks",
     "queued_tokens",
     "prefill_tokens",
     "hit_blocks",
