@@ -28,7 +28,7 @@ pub(crate) struct Observation {
     pub idx: usize,
     pub bs: usize,
     pub waiting: usize,
-    pub queued_pre: isize,
+    pub queued_tokens: isize,
     pub all_tokens: usize,
     pub block_size: usize,
     pub hit_blocks: usize,
@@ -54,7 +54,7 @@ pub(crate) async fn capture_observations(
             idx,
             bs: sctx.lmetric.bs,
             waiting: sctx.lmetric.waiting_reqs,
-            queued_pre: sctx.lmetric.prefill_tokens,
+            queued_tokens: sctx.lmetric.prefill_tokens,
             all_tokens: sctx.lmetric.all_tokens,
             block_size,
             hit_blocks,
@@ -92,7 +92,7 @@ pub(crate) fn new_blocks(req: &ValidGenerateRequest, sctx: &Observation) -> usiz
 /// Already-queued prefill tokens at this replica, request-independent.
 #[inline]
 pub(crate) fn queued_tokens(sctx: &Observation) -> usize {
-    sctx.queued_pre.max(0) as usize
+    sctx.queued_tokens.max(0) as usize
 }
 
 /// Total prefill tokens at this replica if `req` were routed here.
