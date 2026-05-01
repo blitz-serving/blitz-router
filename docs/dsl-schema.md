@@ -238,8 +238,8 @@ policy least-waiting-q (gctx: ()):                       # llm-d load-aware-scor
     Select min by sctx.waiting                           # = queue-depth-scorer single
     after: default
 
-policy least-running-q (gctx: ()):                       # llm-d running-requests-scorer single
-    Select min by sctx.bs
+policy least-bs-q (gctx: ()):                            # llm-d running-requests-scorer
+    Select min by sctx.bs                                # single (composite: bs = running + queued)
     after: default
 
 policy least-active-q (gctx: ()):                        # llm-d kv-cache-utilization-scorer

@@ -19,7 +19,7 @@ pub(crate) mod bailian;
 pub(crate) mod dsl_runtime;
 pub(crate) mod dynamo;
 pub(crate) mod least_active;
-pub(crate) mod least_running;
+pub(crate) mod least_bs;
 pub(crate) mod least_token_load;
 pub(crate) mod least_waiting;
 pub(crate) mod lmetric;
@@ -45,7 +45,7 @@ pub(crate) use most_hit::MostHitQ;
 #[allow(unused_imports)]
 pub(crate) use least_active::LeastActiveQ;
 #[allow(unused_imports)]
-pub(crate) use least_running::LeastRunningQ;
+pub(crate) use least_bs::LeastBsQ;
 #[allow(unused_imports)]
 pub(crate) use least_token_load::LeastTokenLoadQ;
 #[allow(unused_imports)]
@@ -164,8 +164,8 @@ pub(crate) type TaskAssigner = PolicyRunner<PrebleQ>;
 pub(crate) type TaskAssigner = PolicyRunner<MostHitQ>;
 #[cfg(feature = "least-waiting-q")]
 pub(crate) type TaskAssigner = PolicyRunner<LeastWaitingQ>;
-#[cfg(feature = "least-running-q")]
-pub(crate) type TaskAssigner = PolicyRunner<LeastRunningQ>;
+#[cfg(feature = "least-bs-q")]
+pub(crate) type TaskAssigner = PolicyRunner<LeastBsQ>;
 #[cfg(feature = "least-active-q")]
 pub(crate) type TaskAssigner = PolicyRunner<LeastActiveQ>;
 #[cfg(feature = "least-token-load-q")]
@@ -188,7 +188,7 @@ pub(crate) type TaskAssigner = PolicyRunner<RandomQ>;
     feature = "random-q",
     feature = "most-hit-q",
     feature = "least-waiting-q",
-    feature = "least-running-q",
+    feature = "least-bs-q",
     feature = "least-active-q",
     feature = "least-token-load-q",
 ))))]

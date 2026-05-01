@@ -118,7 +118,7 @@ Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `ro
 - `bounded-most-hit-q` — `Filter (queued_tokens < BOUND) (max hit) (min prefill_tokens)`, with the attention-black-hole fallback fix (`simple.rs`).
 - `most-hit-q` — `Select max by hit_blocks(req, sctx)`. Native name for our port of llm-d's production baseline (`sim-epp-kvcache-config.yaml`: precise-prefix-cache-scorer w=10 + max-score-picker). Single-scorer + constant-weight + min-max-norm reduces to `argmax hit_blocks` (`most_hit.rs`).
 - `least-waiting-q` — `Select min by sctx.waiting`. llm-d's `load-aware-scorer` and `queue-depth-scorer` as single-scorer ablations both collapse to this argmin (`least_waiting.rs`).
-- `least-running-q` — `Select min by sctx.bs`. llm-d's `running-requests-scorer` single-scorer ablation (`least_running.rs`).
+- `least-bs-q` — `Select min by sctx.bs`. Closest single-scorer port of llm-d's `running-requests-scorer`; honest about composite signal (`sctx.bs = running + queued` per §4.2, not pure RunningRequestsSize) (`least_bs.rs`).
 - `least-active-q` — `Select min by sctx.all_tokens`. llm-d's `kv-cache-utilization-scorer` single-scorer ablation, cap-free (`1 − all_tokens/CAP` argmax = `all_tokens` argmin for any fixed CAP) (`least_active.rs`).
 - `least-token-load-q` — `Select min by queued_tokens(sctx) + sctx.all_tokens`. llm-d's `token-load-scorer` single-scorer ablation (`least_token_load.rs`).
 - `bailian-impl-q` — Per-component normalize then weighted-sample `(α, β, γ)` over `(hit_pct, 1-bs/M_bs, 1-tok/M_tok)` (`bailian.rs`).
