@@ -163,7 +163,7 @@ Explicitly **forbidden**: any iteration over `[sctx]` (use a reducer in `With`);
 
 This is the audit surface: any DSL `<fn>` is a finite straight-line expression over the schema. The codegen lowers it to a function with no allocations and no calls outside the named-fn library.
 
-## 8. The 12 policies (canonical DSL listings)
+## 8. The 16 policies (canonical DSL listings)
 
 ```
 policy random-q (gctx: ()):
@@ -232,6 +232,22 @@ policy preble-q (gctx: PrebleGCtx):
 
 policy most-hit-q (gctx: ()):                            # llm-d kvcache baseline
     Select max by hit_blocks(req, sctx)                  # see most_hit.rs header
+    after: default
+
+policy least-waiting-q (gctx: ()):                       # llm-d load-aware-scorer single
+    Select min by sctx.waiting                           # = queue-depth-scorer single
+    after: default
+
+policy least-running-q (gctx: ()):                       # llm-d running-requests-scorer single
+    Select min by sctx.bs
+    after: default
+
+policy least-active-q (gctx: ()):                        # llm-d kv-cache-utilization-scorer
+    Select min by sctx.all_tokens                        # single (cap-free; argmin invariant)
+    after: default
+
+policy least-token-load-q (gctx: ()):                    # llm-d token-load-scorer single
+    Select min by queued_tokens(sctx) + sctx.all_tokens
     after: default
 ```
 

@@ -18,6 +18,10 @@ pub(crate) mod aibrix;
 pub(crate) mod bailian;
 pub(crate) mod dsl_runtime;
 pub(crate) mod dynamo;
+pub(crate) mod least_active;
+pub(crate) mod least_running;
+pub(crate) mod least_token_load;
+pub(crate) mod least_waiting;
 pub(crate) mod lmetric;
 pub(crate) mod most_hit;
 pub(crate) mod policy_runner;
@@ -38,6 +42,14 @@ pub(crate) use dynamo::{DynamoPoQ, DynamoQ};
 pub(crate) use lmetric::LmetricQ;
 #[allow(unused_imports)]
 pub(crate) use most_hit::MostHitQ;
+#[allow(unused_imports)]
+pub(crate) use least_active::LeastActiveQ;
+#[allow(unused_imports)]
+pub(crate) use least_running::LeastRunningQ;
+#[allow(unused_imports)]
+pub(crate) use least_token_load::LeastTokenLoadQ;
+#[allow(unused_imports)]
+pub(crate) use least_waiting::LeastWaitingQ;
 #[allow(unused_imports)]
 pub(crate) use preble::PrebleQ;
 #[allow(unused_imports)]
@@ -150,6 +162,14 @@ pub(crate) type TaskAssigner = PolicyRunner<LmetricQ>;
 pub(crate) type TaskAssigner = PolicyRunner<PrebleQ>;
 #[cfg(feature = "most-hit-q")]
 pub(crate) type TaskAssigner = PolicyRunner<MostHitQ>;
+#[cfg(feature = "least-waiting-q")]
+pub(crate) type TaskAssigner = PolicyRunner<LeastWaitingQ>;
+#[cfg(feature = "least-running-q")]
+pub(crate) type TaskAssigner = PolicyRunner<LeastRunningQ>;
+#[cfg(feature = "least-active-q")]
+pub(crate) type TaskAssigner = PolicyRunner<LeastActiveQ>;
+#[cfg(feature = "least-token-load-q")]
+pub(crate) type TaskAssigner = PolicyRunner<LeastTokenLoadQ>;
 #[cfg(feature = "join-shortest-q-weight")]
 pub(crate) type TaskAssigner = PolicyRunner<JShortestQWeight>;
 #[cfg(feature = "round-robin-q")]
@@ -167,5 +187,9 @@ pub(crate) type TaskAssigner = PolicyRunner<RandomQ>;
     feature = "round-robin-q",
     feature = "random-q",
     feature = "most-hit-q",
+    feature = "least-waiting-q",
+    feature = "least-running-q",
+    feature = "least-active-q",
+    feature = "least-token-load-q",
 ))))]
 pub(crate) type TaskAssigner = PolicyRunner<JShortestQ>;

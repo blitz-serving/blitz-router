@@ -118,6 +118,10 @@ dynamo-po-q = []
 lmetric-q = []
 preble-q = []
 most-hit-q = []
+least-waiting-q = []
+least-running-q = []
+least-active-q = []
+least-token-load-q = []
 # Legacy aliases (prefer system-specific names above)
 join-shortest-q-weight = []
 
