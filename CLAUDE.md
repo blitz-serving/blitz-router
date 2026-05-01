@@ -209,3 +209,24 @@ Apache-2.0. Code derived from Hugging Face Text Generation Inference (TGI).
 ## Memory Policy
 
 Project-level memory (operational lessons, deployment pitfalls, design decisions) MUST be stored in `.claude/memory/` within this repo, NOT in user-level `~/.claude/projects/` directories. This ensures all agents and sessions working on this project share the same knowledge.
+
+## Doc-Code Consistency at Commit Time
+
+Before every commit that changes code, scan **all related doc surfaces** and fold any required doc updates into the SAME commit. Doc surfaces drift coherently — the dynamo formula swap and the `queued_pre` type drift incidents (see [issue #11](https://github.com/blitz-serving/blitz-router/issues/11)) both involved a prior session writing the same error into code AND every sibling doc surface. The scan must therefore cover every surface a future reader might cite to verify the change, not just the files `git diff` shows touched.
+
+Per-change-type checklist (apply when relevant):
+
+- **Policy added / renamed / deleted** → `router/Cargo.toml` features, `router/src/policies/mod.rs` (module decl + re-export + TaskAssigner alias + catch-all exclusion list), `docs/dsl-schema.md` §8 listing + count, `CLAUDE.md` scheduling-policies list, file header doc, `.claude/memory/*.md` if a memory file references it.
+- **Algorithm change inside a policy body** → file header doc, `docs/dsl-schema.md` §8 listing, `CLAUDE.md` one-liner, related `.claude/memory/*.md` if any.
+- **New / renamed / removed named-fn or reducer** → `docs/dsl-schema.md` §5 + §13.1 rewrite table + §13.2 allowlist doc, `policy-dsl/src/check.rs` `ALLOWED_FNS`.
+- **`Observation` field rename or removal from DSL surface** → `docs/dsl-schema.md` §4.2 (or remove the row if no longer DSL-canonical) + §5 Body / Reads columns referring to it + §8 listings using it, file headers using it, `policy-dsl/src/check.rs` if relevant.
+- **New cargo feature** → `router/Cargo.toml`, `mod.rs` catch-all exclusion list, `CLAUDE.md`, `docs/dsl-schema.md` §8 if applicable.
+- **Tunable constant added** → `router/src/metrics.rs` (per dsl-schema.md §12.4 convention), file header pointer, `CLAUDE.md` if user-facing.
+- **Public API / CLI flag change** → `README.md`, `CLAUDE.md` Configuration section, related `.claude/memory/*.md`.
+
+Two failure modes to handle differently:
+
+1. **Push failure (your commit creates inconsistency)** — fold the doc fix INTO the same commit. Do not defer. A separate "doc cleanup" commit invites further drift.
+2. **Pull failure (drift was already there before your commit, inherited from a prior session)** — fix it as a separate post-mortem commit AND open a GitHub issue documenting the swap-and-codify pattern (template: issue #11). Do NOT silently fix inherited drift inside an unrelated feature commit; that pattern is what created the original drift in the first place.
+
+This rule is the **push-side** prevention. The **pull-side** complement (independent verification against upstream sources at audit time, e.g. `selector.rs:150` for Dynamo) lives in issue #11's reviewer guard. Both are needed; this rule is the stronger lever because it activates at every commit (no reliance on future-reader discipline) and lives in always-loaded context.
