@@ -124,7 +124,12 @@ This list is **closed** for the initial DSL. Adding a new function requires a se
 
 ## 6. Reducer vocabulary
 
-Closed set of six. Each takes a projection `.field` over `[ScheduleContext]` and returns a scalar.
+Closed set of six. Each takes a projection over `[ScheduleContext]` and returns a scalar. The projection may be either:
+
+- a `.field` access (a §4.2 ScheduleContext field), e.g. `Min .bs`, or
+- a §5 named-fn applied with the per-replica `sctx`, e.g. `Min hit_blocks(req, ·)`. The `·` denotes the iteration position; `req` (and any other top-level arg) is captured from the surrounding policy scope.
+
+Both projection forms iterate over `[sctx]` and return a single scalar. The named-fn form is what `bailian-impl-q` and `most-hit-load-q` rely on for per-component min-max normalization across candidate replicas.
 
 | Reducer | Type | Body |
 |---|---|---|
@@ -163,7 +168,7 @@ Explicitly **forbidden**: any iteration over `[sctx]` (use a reducer in `With`);
 
 This is the audit surface: any DSL `<fn>` is a finite straight-line expression over the schema. The codegen lowers it to a function with no allocations and no calls outside the named-fn library.
 
-## 8. The 16 policies (canonical DSL listings)
+## 8. The 18 policies (canonical DSL listings)
 
 ```
 policy random-q (gctx: ()):
@@ -249,6 +254,25 @@ policy least-active-q (gctx: ()):                        # llm-d kv-cache-utiliz
 policy least-token-load-q (gctx: ()):                    # llm-d token-load-scorer single
     Select min by queued_tokens(sctx) + sctx.all_tokens
     after: default
+
+policy most-hit-load-q (gctx: ()):                       # llm-d precise + load-aware
+    With M_h = Max hit_blocks(req, ·),
+         m_h = Min hit_blocks(req, ·) in
+    Select max by w_hit  · ((hit_blocks(req, sctx) − m_h) / (M_h − m_h))
+                + w_load · (if sctx.waiting == 0 then 0.5
+                            else 0.5 · (1 − min(sctx.waiting, T) / T))
+    after: default
+    # defaults: w_hit=10, w_load=1, T=128 (see metrics.rs)
+
+policy most-hit-load-active-q (gctx: ()):                # llm-d precise + load-aware + kv-util
+    With M_h = Max hit_blocks(req, ·), m_h = Min hit_blocks(req, ·),
+         M_a = Max .all_tokens,        m_a = Min .all_tokens in
+    Select max by w_hit  · ((hit_blocks(req, sctx) − m_h) / (M_h − m_h))
+                + w_load · (if sctx.waiting == 0 then 0.5
+                            else 0.5 · (1 − min(sctx.waiting, T) / T))
+                + w_kv   · (1 − (sctx.all_tokens − m_a) / (M_a − m_a))
+    after: default
+    # defaults: w_hit=10, w_load=1, w_kv=1, T=128 (see metrics.rs)
 ```
 
 `chosen` in the `after:` clause is the `usize` index of the selected replica (see §12.2). It is a reserved name; codegen binds it after the `<expr>` evaluates.
@@ -355,7 +379,9 @@ Each row is a 1:1 syntactic correspondence between the paper-form DSL (left, wha
 | 7 | `Std .f` | `std_of_usize(&observations, \|o\| o.f)` |
 | 8 | `Sum .f` | `sum_of_usize(&observations, \|o\| o.f)` |
 | 9 | `Min .f` | `min_of_usize(&observations, \|o\| o.f)` |
+| 9b | `Min named_fn(req, ·)` | `min_of_usize(&observations, \|o\| named_fn(req, o))` |
 | 10 | `Max .f` | `max_of_usize(&observations, \|o\| o.f)` |
+| 10b | `Max named_fn(req, ·)` | `max_of_usize(&observations, \|o\| named_fn(req, o))` |
 | 11 | `Count` | `observations.len()` |
 | 12 | `after default` | (auto-emitted by macro; absent from body) |
 | 13 | `after default; gctx.X ← E` | `policy! { ..., after { gctx.X = E; } }` |

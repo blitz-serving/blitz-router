@@ -121,6 +121,8 @@ Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `ro
 - `least-bs-q` — `Select min by sctx.bs`. Closest single-scorer port of llm-d's `running-requests-scorer`; honest about composite signal (`sctx.bs = running + queued` per §4.2, not pure RunningRequestsSize) (`least_bs.rs`).
 - `least-active-q` — `Select min by sctx.all_tokens`. llm-d's `kv-cache-utilization-scorer` single-scorer ablation, cap-free (`1 − all_tokens/CAP` argmax = `all_tokens` argmin for any fixed CAP) (`least_active.rs`).
 - `least-token-load-q` — `Select min by queued_tokens(sctx) + sctx.all_tokens`. llm-d's `token-load-scorer` single-scorer ablation (`least_token_load.rs`).
+- `most-hit-load-q` — llm-d's two-scorer combo (precise-prefix-cache w=10 + load-aware w=1): per-component min-max-norm + weighted sum, argmax via `select_max_by`. Tunables in `metrics.rs::MOST_HIT_LOAD_W_*` (`most_hit_load.rs`).
+- `most-hit-load-active-q` — three-scorer combo (above + kv-cache-utilization w=1, cap-free via `1 − norm(all_tokens)`). Tunables `MOST_HIT_LOAD_ACTIVE_W_*` (`most_hit_load_active.rs`).
 - `bailian-impl-q` — Per-component normalize then weighted-sample `(α, β, γ)` over `(hit_pct, 1-bs/M_bs, 1-tok/M_tok)` (`bailian.rs`).
 - `aibrix-q` — Nested `Filter` (load-imbalance gate × stddev threshold) with tuple-keyed `(-hit_pct, bs)` selection (`aibrix.rs`).
 - `dynamo-q` — Dynamo's **Decode-node** formula: `Select min by w·(new_tokens/block_size) + (new_blocks + decode_blocks)` (`dynamo.rs`).

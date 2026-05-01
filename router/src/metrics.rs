@@ -17,6 +17,15 @@ pub(crate) static WAITINGT_PREFILL_TOKEN_BOUND: usize = 2048;
 pub(crate) static BAILIAN_ALPHA: f32 = 0.7; // prefix cache hit block (paper-tuned for ChatBot)
 pub(crate) static BAILIAN_BETA: f32 = 0.15; // num requests on instance
 pub(crate) static BAILIAN_GAMMA: f32 = 0.15; // num tokens on instance
+/// llm-d load-aware-scorer's queue-depth threshold (default in upstream)
+pub(crate) static LOAD_AWARE_QUEUE_T: f32 = 128.0;
+/// most-hit-load-q (llm-d precise-prefix-cache + load-aware combo)
+pub(crate) static MOST_HIT_LOAD_W_HIT: f32 = 10.0;
+pub(crate) static MOST_HIT_LOAD_W_LOAD: f32 = 1.0;
+/// most-hit-load-active-q (above + kv-cache-utilization)
+pub(crate) static MOST_HIT_LOAD_ACTIVE_W_HIT: f32 = 10.0;
+pub(crate) static MOST_HIT_LOAD_ACTIVE_W_LOAD: f32 = 1.0;
+pub(crate) static MOST_HIT_LOAD_ACTIVE_W_KV: f32 = 1.0;
 
 fn serialize_f32_3<S>(x: &f32, s: S) -> Result<S::Ok, S::Error>
 where
