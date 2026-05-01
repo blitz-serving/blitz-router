@@ -80,7 +80,7 @@ Scope is what makes the design markovian: state lives in exactly one scope and o
 |---|---|---|---|
 | `sctx.bs` | `lmetric.bs` | `usize` | active batch size (running + queued) |
 | `sctx.waiting` | `lmetric.waiting_reqs` | `usize` | requests in waiting queue |
-| `sctx.queued_pre` | `lmetric.prefill_tokens` | `usize` | queued prefill tokens |
+| `sctx.queued_pre` | `lmetric.prefill_tokens` | `isize` | internal lmetric accounting (transiently negative); see Notes |
 | `sctx.all_tokens` | `lmetric.all_tokens` | `usize` | total active tokens (prefill + decode) |
 | `sctx.idx` | implicit replica index | `usize` | this replica's index in `[sctx]` |
 | `sctx.block_hash` | `block_hash` field | `&dyn BlockHash` | radix tree (only via named fns, not raw access) |
@@ -88,6 +88,7 @@ Scope is what makes the design markovian: state lives in exactly one scope and o
 
 Notes:
 - `sctx.block_hash` is **not** a directly readable DSL field — the radix tree is large and policy `<fn>`s should not iterate it. Access is mediated by the named functions in §5 (`hit_blocks`, `match_blocks`, etc.), each of which performs exactly one `block_hash.get(...)` call.
+- `sctx.queued_pre` is **internal lmetric accounting** and may be transiently negative under commit/return races (hence `isize`). DSL `<fn>`/`<pred>` bodies must read it via `queued_tokens(sctx)` (§5), which clamps to 0 and casts to `usize`. Direct access in a policy body bypasses the clamp and triggers type-mismatch errors when combined with `usize` fields (e.g. `sctx.queued_pre + sctx.all_tokens` does not typecheck). The §6 reducers `Min .queued_pre` / `Max .queued_pre` are similarly off-limits — use them through the named-fn projection once §6 is extended to function projections, never the raw field.
 - `sctx.idx` is implicit: the codegen iterating over `[sctx]` knows the index without policy declaration.
 
 ### 4.3 GlobalContext field schema
@@ -111,7 +112,7 @@ These functions are the *only* way `<fn>`/`<pred>` may consume per-request × pe
 | Name | Signature | Body | Reads |
 |---|---|---|---|
 | `new_tokens(req, sctx)` | `(Req, ScheduleContext) → usize` | `req.tokens - hit_blocks(req, sctx) * sctx.block_size` | `req.input_tokens`, `sctx.block_hash`, `sctx.block_size` |
-| `queued_tokens(sctx)` | `ScheduleContext → usize` | `sctx.queued_pre` | `sctx.queued_pre` |
+| `queued_tokens(sctx)` | `ScheduleContext → usize` | `sctx.queued_pre.max(0) as usize` | `sctx.queued_pre` |
 | `prefill_tokens(req, sctx)` | `(Req, ScheduleContext) → usize` | `queued_tokens(sctx) + new_tokens(req, sctx)` | (composition) |
 | `hit_blocks(req, sctx)` | `(Req, ScheduleContext) → usize` | `sctx.block_hash.get(req.block_hash_state.get_hashes())` | `req.block_hash_state`, `sctx.block_hash` |
 | `hit_pct(req, sctx)` | `(Req, ScheduleContext) → f32` | `(hit_blocks(req, sctx) * sctx.block_size) as f32 / req.tokens as f32` | (composition) |
@@ -182,7 +183,7 @@ policy least-wait-token-q (gctx: ()):
     after: default
 
 policy bounded-most-hit-q (gctx: ()):
-    Filter (sctx.queued_pre < BOUND)
+    Filter (queued_tokens(sctx) < BOUND)
       (Select max by hit_blocks(req, sctx))
       (Select min by prefill_tokens(req, sctx))
     after: default
