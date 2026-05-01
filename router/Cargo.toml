@@ -117,6 +117,7 @@ dynamo-q = []
 dynamo-po-q = []
 lmetric-q = []
 preble-q = []
+most-hit-q = []
 # Legacy aliases (prefer system-specific names above)
 join-shortest-q-weight = []
 

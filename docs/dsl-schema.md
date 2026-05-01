@@ -163,7 +163,7 @@ Explicitly **forbidden**: any iteration over `[sctx]` (use a reducer in `With`);
 
 This is the audit surface: any DSL `<fn>` is a finite straight-line expression over the schema. The codegen lowers it to a function with no allocations and no calls outside the named-fn library.
 
-## 8. The 11 policies (canonical DSL listings)
+## 8. The 12 policies (canonical DSL listings)
 
 ```
 policy random-q (gctx: ()):
@@ -229,6 +229,10 @@ policy preble-q (gctx: PrebleGCtx):
       (Select max by match_blocks(req, sctx))
       (Select min by preble_cost(req, sctx, gctx.H))
     after: default; gctx.H <- gctx.H.insert(chosen, req)
+
+policy most-hit-q (gctx: ()):                            # llm-d kvcache baseline
+    Select max by hit_blocks(req, sctx)                  # see most_hit.rs header
+    after: default
 ```
 
 `chosen` in the `after:` clause is the `usize` index of the selected replica (see §12.2). It is a reserved name; codegen binds it after the `<expr>` evaluates.

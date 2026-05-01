@@ -116,6 +116,7 @@ Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `ro
 - `join-shortest-q-weight` — same formula, separate cargo flag (`simple.rs`).
 - `least-wait-token-q` — `Select min by prefill_tokens(req, sctx)` (`simple.rs`).
 - `bounded-most-hit-q` — `Filter (queued_tokens < BOUND) (max hit) (min prefill_tokens)`, with the attention-black-hole fallback fix (`simple.rs`).
+- `most-hit-q` — `Select max by hit_blocks(req, sctx)`. Native name for our port of llm-d's production baseline (`sim-epp-kvcache-config.yaml`: precise-prefix-cache-scorer w=10 + max-score-picker). Single-scorer + constant-weight + min-max-norm reduces to `argmax hit_blocks` (`most_hit.rs`).
 - `bailian-impl-q` — Per-component normalize then weighted-sample `(α, β, γ)` over `(hit_pct, 1-bs/M_bs, 1-tok/M_tok)` (`bailian.rs`).
 - `aibrix-q` — Nested `Filter` (load-imbalance gate × stddev threshold) with tuple-keyed `(-hit_pct, bs)` selection (`aibrix.rs`).
 - `dynamo-q` — Dynamo's **Decode-node** formula: `Select min by w·(new_tokens/block_size) + (new_blocks + decode_blocks)` (`dynamo.rs`).
