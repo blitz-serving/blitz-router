@@ -48,8 +48,6 @@ use crate::validation::ValidGenerateRequest;
 
 use std::time::Duration;
 
-use nohash_hasher::IntMap;
-use pb::generate::v2::Batch;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::Span;
@@ -59,8 +57,6 @@ use tracing::Span;
 // ---------------------------------------------------------------------------
 
 pub(crate) type NextRequest = (u64, Entry);
-pub(crate) type NextBatch = (IntMap<u64, Entry>, Batch, Span);
-pub(crate) type ReplicaIndex = usize;
 
 // ---------------------------------------------------------------------------
 // Entry -- a single queued request
@@ -68,6 +64,7 @@ pub(crate) type ReplicaIndex = usize;
 
 /// Queue entry
 #[derive(Debug)]
+#[allow(dead_code)] // span/temp_span carried for tracing context, accessed via Debug
 pub(crate) struct Entry {
     /// Request
     pub request: ValidGenerateRequest,
@@ -122,10 +119,7 @@ impl Entry {
 
 pub(crate) trait QueuePro {
     fn append(&self, entry: Entry);
-    async fn next_batch(&self, replica_id: usize) -> Option<NextBatch>;
     async fn next_request(&self, replica_id: usize) -> Option<NextRequest>;
-    async fn waiting_requests(&self) -> usize;
-    async fn waiting_prefill_tokens(&self) -> usize;
 }
 
 // ---------------------------------------------------------------------------

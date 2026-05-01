@@ -58,7 +58,7 @@ pub fn lower(policy: &PolicyInput) -> TokenStream {
                     use crate::policies::dsl_runtime::*;
                     let req = &entry.request;
                     let observations = capture_observations(entry, all_sctx).await;
-                    let chosen: Option<usize> = { #body };
+                    let chosen: Option<usize> = #body;
                     if let Some(idx) = chosen {
                         apply_default_after(entry, all_sctx, idx, &observations[idx]).await;
                         #[allow(unused_variables)]

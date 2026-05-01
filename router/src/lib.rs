@@ -7,7 +7,8 @@
 compile_error!("You must enable either `vllm-backend` or `zmq-backend`!");
 
 mod kvcache;
-#[cfg(any(test, kani))]
+#[cfg(test)]
+#[allow(dead_code)]
 mod radixtrie;
 mod policies;
 mod colocation;
@@ -20,7 +21,9 @@ pub mod engine_client;
 pub mod chat_template;
 pub mod model_config;
 
+#[allow(unused_imports)]
 pub use colocation::*;
+#[allow(unused_imports)]
 pub use metrics::*;
 pub use vllmlet::*;
 pub use chat_template::{ChatRenderer, load_chat_template};
@@ -36,7 +39,7 @@ use infer::Infer;
 use policies::Entry;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use validation::{Validation, ValidationError};
+use validation::Validation;
 
 // `TokenizerRender`
 use std::path::Path;

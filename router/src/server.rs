@@ -6,7 +6,6 @@
 // © 2022-present Hugging Face Inc. – Apache-2.0.
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 

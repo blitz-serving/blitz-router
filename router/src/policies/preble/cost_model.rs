@@ -12,6 +12,7 @@
 ///
 /// Go: `var targetGPU = utils.LoadEnv(PREBLE_TARGET_GPU, "V100")`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // A6000/V100 reserved for future GPU configs; default is A800
 pub(crate) enum TargetGpu {
     A6000,
     V100,

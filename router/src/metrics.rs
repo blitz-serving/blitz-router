@@ -7,14 +7,6 @@ use crate::kvcache::PrefixBlockHash;
 use serde::Serialize;
 use tokio::time::Instant;
 
-/// Only turn on throttle when filled with enough requests
-pub(crate) static THROTTLE_THLD: usize = 999;
-/// Colocated replica keeps tps >= TPS_THRESHOLD,
-/// or it will be throttled from add prefill requests
-pub(crate) static TPS_THRESHOLD: usize = 10;
-/// Colocated replica keeps tpot_mili <= TPOT_THRESHOLD
-/// or it will be throttled from add prefill requests
-pub(crate) static TPOT_THRESHOLD: usize = 50;
 /// Parameter for prefill token/s EMA updation
 static PREFILL_TKN_FREQ_EMA_GAMMA: f32 = 0.75;
 /// Parameter for TBT EMA updation

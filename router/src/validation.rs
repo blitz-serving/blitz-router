@@ -401,6 +401,7 @@ type TokenizerRequest = (
 );
 
 #[derive(Debug)]
+#[allow(dead_code)] // request fields carried for tracing/debug; Debug derive references them
 pub(crate) struct ValidGenerateRequest {
     pub request_id: u64,
     /// Raw user input prompt

@@ -461,6 +461,7 @@ impl SlidingWindowHistogram {
     }
 
     /// Record a TPOT measurement for a replica.
+    #[allow(dead_code)] // exposed by histogram API; no current caller in DSL runtime
     pub fn record_tpot(&mut self, replica_id: usize, tpot: f64) {
         if replica_id < self.replicas.len() {
             let times = &mut self.replicas[replica_id].avg_time_per_token;
@@ -479,6 +480,7 @@ impl SlidingWindowHistogram {
     }
 
     /// Get number of replicas.
+    #[allow(dead_code)] // exposed by histogram API; no current caller in DSL runtime
     pub fn num_replicas(&self) -> usize {
         self.num_replicas
     }

@@ -285,6 +285,7 @@ pub(crate) fn max_of_usize(obs: &[Observation], proj: impl Fn(&Observation) -> u
 }
 
 #[inline]
+#[allow(dead_code)] // closed reducer vocabulary; kept for future policies
 pub(crate) fn sum_of_usize(obs: &[Observation], proj: impl Fn(&Observation) -> usize) -> usize {
     obs.iter().map(proj).sum()
 }
@@ -292,12 +293,14 @@ pub(crate) fn sum_of_usize(obs: &[Observation], proj: impl Fn(&Observation) -> u
 // f32 variants for policies whose reducers operate over f32 quantities (e.g., hit_pct, normalized scores in bailian, aibrix's stddev over request counts as f32).
 
 #[inline]
+#[allow(dead_code)] // closed reducer vocabulary; kept for future policies
 pub(crate) fn mean_of_f32(obs: &[Observation], proj: impl Fn(&Observation) -> f32) -> f32 {
     if obs.is_empty() { return 0.0; }
     obs.iter().map(proj).sum::<f32>() / obs.len() as f32
 }
 
 #[inline]
+#[allow(dead_code)] // closed reducer vocabulary; kept for future policies
 pub(crate) fn std_of_f32(obs: &[Observation], proj: impl Fn(&Observation) -> f32 + Copy) -> f32 {
     if obs.len() <= 1 { return 0.0; }
     let m = mean_of_f32(obs, proj);

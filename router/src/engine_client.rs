@@ -128,6 +128,7 @@ pub trait EngineStepReceiver: Send {
 #[async_trait::async_trait]
 pub trait EngineClient: Send {
     /// Send an inference request to the engine.
+    #[allow(private_interfaces)]
     async fn add_request(
         &mut self,
         id: u64,
@@ -300,6 +301,7 @@ mod vllm_impl {
 
     #[async_trait::async_trait]
     impl EngineClient for VllmEngineClient {
+        #[allow(private_interfaces)]
         async fn add_request(
             &mut self,
             id: u64,

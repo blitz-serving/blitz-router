@@ -1,11 +1,12 @@
 use crate::{
     engine_client::EngineClient,
     queue::TaskAssigner,
-    LMetric, ScheduleContext, THROTTLE_THLD, TPOT_THRESHOLD, TPS_THRESHOLD,
+    ScheduleContext,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[allow(dead_code)] // referenced by start_vllm_colocation_event_loop's return; fields not currently consumed
 pub(crate) struct ColocationController {
     pub all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>>,
     pub batching_queue: TaskAssigner,
@@ -14,6 +15,7 @@ pub(crate) struct ColocationController {
 impl ColocationController {}
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)] // BackendFault carries error context for future surfacing
 pub(crate) enum ExtExcept {
     #[error("frontend aborted: client dropped the response channel")]
     FrontendAbort,
@@ -40,28 +42,6 @@ pub(crate) fn start_vllm_colocation_event_loop(
 
     let controller = ColocationController { batching_queue: queue, all_schedule_contexts };
     Arc::new(controller)
-}
-
-#[deprecated]
-fn throttle_for_decoding(idx: usize, lmetric: &LMetric, throttled: &mut bool) {
-    let nreq = lmetric.bs;
-    let tps = lmetric.tps;
-    let tpot_mili = (lmetric.tpot * 1000.) as usize;
-    if nreq > THROTTLE_THLD && (tps < TPS_THRESHOLD || tpot_mili > TPOT_THRESHOLD) {
-        if !*throttled {
-            *throttled = true;
-            tracing::warn!(
-                target: "metrics",
-                engine = idx,
-                num_requests = nreq,
-                tps = tps,
-                tpot_ms = tpot_mili,
-                "THROTTLE_ON"
-            );
-        }
-    } else {
-        *throttled = false;
-    }
 }
 
 mod task_assignment {
@@ -877,6 +857,7 @@ mod except_management {
     ///
     /// These are the *inputs* to the state machine, not the states themselves.
     /// Each variant triggers a well-defined transition in `ExtStInner`.
+    #[allow(dead_code)] // Live(_) reserved for SSE-keep-alive transitions
     pub(super) enum ExtState {
         /// Frontend aborted the request; entry moves into exception tracking.
         Abort(u64, Entry),
