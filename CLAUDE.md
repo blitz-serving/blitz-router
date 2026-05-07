@@ -94,11 +94,13 @@ blitz-router/
 │   │       └── least_active.rs / least_bs.rs / least_token_load.rs / least_waiting.rs
 │   └── simulator/           # Latency simulator (feature-gated `simulator`)
 │       ├── mod.rs               # piggyback observation entry points (on_sse, on_admit, query)
-│       ├── pctx.rs              # process-wide PredictorContext (OnceLock)
+│       ├── pctx.rs              # process-wide PredictorContext (OnceLock); 3-layer state machine
 │       ├── batch.rs             # BatchForPredictor (inner-regressor input)
 │       ├── predictor.rs         # Predictor + TrainedPredictor traits
 │       ├── rollout.rs           # RolloutBuffer + RolloutSlot + RolloutGist
-│       ├── mirror.rs            # PCtx L1 incremental mirror around radixtrie
+│       ├── mirror.rs            # PCtx L1 incremental mirror (V=ReqId tree)
+│       ├── req_id_tree.rs       # RadixTreeReqIdHash (V=ReqId variant of PrefixBlockHash)
+│       ├── sched.rs             # PCtx SchedSnapshot (per-request progress: waiting/running)
 │       ├── vidur_rf.rs          # VidurRfPredictor (port of everparadise LlamaPredictor)
 │       └── config.rs            # SimulatorConfig (CSV path, model_hash, granularities)
 ├── policy-dsl/              # ~150 LOC proc-macro: parser + lint + lowering
@@ -192,7 +194,9 @@ The scheduling policy is selected at compile time via Cargo features. Each polic
 
 **Piggyback mode (default and only mode today):** when built with `--features simulator,<name>-q` AND launched with `--enable-simulator`, the simulator observes the active `<name>-q` policy via two hooks: `simulator::on_sse(replica_index, &EngineStepOutput)` from `colocation.rs::completion_event_loop` (per SSE event) and `simulator::on_admit(replica_index, request_id)` from `policy_runner.rs::queue_task` (per admission, both Append and NextRequest paths). It emits Prometheus histograms (`simulator_predicted_ms`, `simulator_actual_ms`, `simulator_signed_error_ms`, `simulator_abs_error_ms`, `simulator_relative_error`). **It does not influence routing.** The `Policy` trait is untouched; PCtx is owned by a process-wide `OnceLock` initialised from `main.rs` at startup.
 
-PCtx exposes three triggers (the public API): `query(candidate_id) → RolloutGist` (Trigger A, used by future `simulator-q`), `on_admit(request_id)` (Trigger B), `on_sse(batch, &EngineStepOutput) → (predicted_ms, actual_ms)` (Trigger C). They drive a three-layer state model — L1 incremental mirror, L2 online-corrected regressor, L3 ephemeral rollout buffer — with a load-bearing invariant: when the engine has prefill work in progress, the L3 buffer must be non-empty. See `.claude/memory/project_lmetric_predictor_design.md` §"Locked spec" for the full state machine.
+PCtx exposes three triggers (the public API): `query(candidate_id, input_length, hashes, sctx_prefix_hits) → RolloutGist` (Trigger A — speculative rollout used by the future `simulator-q`), `on_admit(&Entry)` (Trigger B — populates L1 mirror + sched waiting + L3 promote-or-drop), `on_sse(batch, &EngineStepOutput) → (predicted_ms, actual_ms)` (Trigger C — drives L2 calibration, sched.sync, mirror.apply_sse, F3 cross-check). Three-layer state model: L1 incremental mirror (V=ReqId trie, self-arbitrating evict), L2 online-corrected regressor, L3 single-slot ephemeral rollout. Plus auxiliary `SchedSnapshot` (per-request progress, cloned by `query`'s schedule loop). Lock order: `sched → mirror → ephemeral`. Load-bearing invariant: when the engine has prefill work in progress, the L3 buffer must be non-empty.
+
+`query`'s schedule loop is a discrete-event simulator that clones `SchedSnapshot`, pushes the candidate to `waiting.back()` (FCFS), then per-slot: assigns the running decoders 1 token each, fills remaining `token_budget` with chunked prefill (continuing prefillers first, then pulling from waiting), calls the inner regressor for per-step latency, tracks the candidate's `prefill_begin_step` / `prefill_end_step` / `in_decode_step`, and stops one slot after the candidate enters DECODE. The composite cache-hit estimate is `max(SCtx.block_hash.get(hashes), mirror.prefix_match(hashes))` per A2's max-merge rule. See `.claude/memory/project_lmetric_predictor_design.md` §"Locked spec" + §"Phase 3" for the full state machine and Group A/B/C decisions.
 
 **CLI flags** (all behind `simulator` feature; no-op otherwise):
 - `--enable-simulator` — turn the subsystem on at runtime.

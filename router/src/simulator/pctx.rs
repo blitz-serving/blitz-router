@@ -750,6 +750,82 @@ mod tests {
     }
 
     #[test]
+    fn end_to_end_admit_step_query_lifecycle() {
+        // Walks the full Phase-3 surface in one shot: admit a few
+        // requests, drive the engine via several synthetic SSE steps,
+        // then query a fresh candidate and verify the resulting gist
+        // is non-trivial and the L3/sched/mirror state is consistent.
+        let pctx = pctx();
+
+        // Admit r1 (input=200) and r2 (input=300) with prefix hashes.
+        pctx.on_admit(1, 200, &[10, 20, 30]);
+        pctx.on_admit(2, 300, &[40, 50, 60]);
+        assert_eq!(pctx.in_flight_count(), 2);
+        assert_eq!(pctx.sched_in_flight_count(), 2);
+
+        // Step 1: r1 starts PREFILL (200 tokens chunked at 200/step).
+        let s1 = step(
+            1,
+            200,
+            vec![{
+                let mut o = out(1, "PREFILL", false);
+                o.prev_computed_tokens = 0;
+                o
+            }],
+        );
+        let _ = pctx.on_sse(&BatchForPredictor::default(), &s1);
+        // After step 1, r1's processed_tokens = 200 (prefill done).
+        assert_eq!(pctx.sched.lock().unwrap().running[&1].processed_tokens, 200);
+
+        // Step 2: r2 starts PREFILL (300 tokens chunked at 300/step).
+        let s2 = step(
+            2,
+            300,
+            vec![{
+                let mut o = out(2, "PREFILL", false);
+                o.prev_computed_tokens = 0;
+                o
+            }],
+        );
+        let _ = pctx.on_sse(&BatchForPredictor::default(), &s2);
+        assert_eq!(pctx.sched.lock().unwrap().running[&2].processed_tokens, 300);
+
+        // Step 3: both in DECODE.
+        let s3 = step(3, 0, vec![out(1, "DECODE", false), out(2, "DECODE", false)]);
+        let _ = pctx.on_sse(&BatchForPredictor::default(), &s3);
+        let sched = pctx.sched.lock().unwrap();
+        assert_eq!(sched.running[&1].processed_tokens, 201);
+        assert_eq!(sched.running[&2].processed_tokens, 301);
+        drop(sched);
+
+        // Now query a fresh candidate (id=99, input=500 tokens).
+        let gist = pctx.query(99, 500, &[], 0);
+        assert!(gist.ttft_ms.is_some(), "ttft_ms must be populated");
+        assert!(gist.chunked_prefill_steps.is_some(), "prefill steps populated");
+        assert!(gist.in_decode_tbt_ms.is_some(), "in-decode TBT populated");
+
+        // 500 tokens, budget=1024, 2 ongoing decoders eat 2 tokens →
+        // candidate's chunk fits in one slot.
+        assert_eq!(gist.chunked_prefill_steps, Some(1));
+
+        // Inspect L3 buffer composition for slot 0 — candidate
+        // PREFILL alongside r1+r2 DECODE.
+        let slot = pctx.ephemeral.lock().unwrap();
+        let buf = &slot.as_ref().unwrap().buffer;
+        assert!(buf.slots.len() >= 2);
+        assert_eq!(&buf.slots[0].prefill_rids[..], &[99]);
+        let mut s0_dec: Vec<u64> = buf.slots[0].decode_rids.iter().copied().collect();
+        s0_dec.sort();
+        assert_eq!(s0_dec, vec![1, 2]);
+        // Slot 1: candidate joins decode set.
+        let mut s1_dec: Vec<u64> = buf.slots[1].decode_rids.iter().copied().collect();
+        s1_dec.sort();
+        assert_eq!(s1_dec, vec![1, 2, 99]);
+        // Anchor must be the latest SSE step we sent.
+        assert_eq!(slot.as_ref().unwrap().sse_anchor_step_id, 3);
+    }
+
+    #[test]
     fn query_sim_empty_sched_candidate_alone() {
         let pctx = pctx();
         // Candidate input = 800 tokens, token_budget = 1024 → fits in
