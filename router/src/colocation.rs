@@ -458,7 +458,7 @@ mod task_assignment {
             // fast path: update metrics
             let tbt = Duration::from_millis(m.latency);
             #[cfg(feature = "simulator")]
-            crate::simulator::record_step(replica_index, &m);
+            crate::simulator::on_sse(replica_index, &m);
             let mut metric_delta = LMetricDec::new(&tbt);
             // NOTE: `prefill_tokens` doesn't count hit tokens, while
             //       `all_tokens` does count hit tokens

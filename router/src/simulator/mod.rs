@@ -32,7 +32,8 @@ use std::sync::{Arc, OnceLock};
 use crate::engine_client::EngineStepOutput;
 
 /// Process-wide per-replica predictor contexts. Set once at startup by
-/// `init()`; read on the SSE consumer hot path by `record_step()`.
+/// `init()`; read on the SSE consumer hot path by `on_sse()` and on the
+/// policy admit hook by `on_admit()`.
 static SIMULATOR: OnceLock<SimulatorRuntime> = OnceLock::new();
 
 struct SimulatorRuntime {
@@ -79,7 +80,11 @@ pub fn is_active() -> bool {
 /// SSE consumer hook (piggyback). No-op when the simulator is inactive.
 /// Reconstructs `BatchForPredictor` from the just-completed step, predicts
 /// + calibrates via PCtx, and emits Prometheus histograms.
-pub(crate) fn record_step(replica_index: usize, m: &EngineStepOutput) {
+///
+/// Phase-2 will additionally drive the L1 (mirror) and L3 (ephemeral
+/// rollout) state machines off of this event; for now the body is the
+/// piggyback predict-vs-actual loop only.
+pub(crate) fn on_sse(replica_index: usize, m: &EngineStepOutput) {
     let Some(rt) = SIMULATOR.get() else {
         return;
     };
@@ -100,6 +105,25 @@ pub(crate) fn record_step(replica_index: usize, m: &EngineStepOutput) {
             (signed.abs() / actual) as f64
         );
     }
+}
+
+/// Admission-time hook (piggyback). Called by `policy_runner` immediately
+/// after the chosen <name>-q policy commits a request to a specific
+/// replica's commit buffer. No-op when the simulator is inactive.
+///
+/// Phase-1 body is a structural stub: it locates the target PCtx and
+/// returns. Phase-2 will use it to (a) ADD the candidate's blocks to the
+/// L1 mirror's speculative_set and (b) promote the matching L3 ephemeral
+/// rollout buffer from "candidate-bound" to "baseline" — or rebuild it
+/// from scratch if the candidate did not match the cached query.
+pub(crate) fn on_admit(replica_index: usize, request_id: u64) {
+    let Some(rt) = SIMULATOR.get() else {
+        return;
+    };
+    let Some(_pctx) = rt.pctxs.get(replica_index) else {
+        return;
+    };
+    let _ = request_id;
 }
 
 /// Reconstruct an approximate `BatchForPredictor` from the just-completed
@@ -258,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn record_step_end_to_end_calibrates() {
+    fn on_sse_end_to_end_calibrates() {
         // End-to-end piggyback verification:
         //   1. Initialise the simulator with a constant inner predictor (1.0ms).
         //   2. Feed a sequence of synthetic SSE steps with actual=4.0ms.
@@ -303,17 +327,19 @@ mod tests {
             }],
         );
         for _ in 0..3000 {
-            record_step(0, &step);
+            on_sse(0, &step);
         }
         // After many calibrations, the per-replica regressor's corrected
         // prediction should be close to 4ms.
+        // Also exercise the on_admit stub for compile-coverage.
+        on_admit(0, 42);
         let rt = SIMULATOR.get().expect("simulator must be initialised");
         let pctx = rt.pctxs[0].clone();
         let batch = batch_from_step(&step, cfg.block_size);
         let final_pred = pctx.predict(&batch);
         assert!(
             (final_pred - 4.0).abs() < 0.1,
-            "linreg did not converge through record_step: final_pred={}",
+            "linreg did not converge through on_sse: final_pred={}",
             final_pred
         );
     }

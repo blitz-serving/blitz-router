@@ -88,8 +88,11 @@ where
                         P::schedule(entry, &all_schedule_context, &mut gctx).await
                     {
                         let entry = uncommit_buffer.pop_front().unwrap();
+                        let request_id = entry.request.request_id;
                         all_commit_req_buffers[replica_idx]
-                            .push_back((entry.request.request_id, entry));
+                            .push_back((request_id, entry));
+                        #[cfg(feature = "simulator")]
+                        crate::simulator::on_admit(replica_idx, request_id);
                     }
                 }
                 PolicyCommand::NextRequest(replica_idx, response_sender) => {
@@ -99,8 +102,11 @@ where
                                 P::schedule(entry, &all_schedule_context, &mut gctx).await
                             {
                                 let entry = uncommit_buffer.pop_front().unwrap();
+                                let request_id = entry.request.request_id;
                                 all_commit_req_buffers[tmp_replica_idx]
-                                    .push_back((entry.request.request_id, entry));
+                                    .push_back((request_id, entry));
+                                #[cfg(feature = "simulator")]
+                                crate::simulator::on_admit(tmp_replica_idx, request_id);
                             } else {
                                 tracing::warn!(
                                     "Replica#{replica_idx} is idle, but scheduler does not assign task to it"
