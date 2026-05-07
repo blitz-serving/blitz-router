@@ -199,35 +199,55 @@ impl PCtx {
     /// Trigger C — SSE event from the engine for this replica.
     ///
     /// 1. L2: piggyback predict + calibrate (returned for metrics).
-    /// 2. L1: absorb the step's evictions / finishes / aborts /
+    /// 2. Sched: `SchedSnapshot::sync(m)` to keep per-request progress
+    ///    (waiting / running, processed_tokens) consistent with the
+    ///    engine's view. Required so the next `query()` rolls forward
+    ///    from a fresh state.
+    /// 3. L1: absorb the step's evictions / finishes / aborts /
     ///    preempts via `IncrementalMirror::apply_sse`.
-    /// 3. L3 invariant: when the engine still has prefill work after
-    ///    this step, the ephemeral buffer must be non-empty; if it
-    ///    isn't, log (Phase-3 T7 will add the F3 cross-check that
-    ///    upgrades anchor-based stale detection to
-    ///    composition-based).
+    /// 4. L3: F3 cross-check (composition-based) when ephemeral has
+    ///    a populated `slots[0]`; falls back to stale-anchor check
+    ///    when the slot has empty composition (typical for Phase-3
+    ///    placeholder buffer before T8 lands).
     ///
-    /// Phase-3 will additionally call `SchedSnapshot::sync(m)` here
-    /// (T6) so the schedule loop in `query` always has fresh state.
+    /// Returns the L2 `(predicted, actual)` pair for Prometheus.
     pub fn on_sse(&self, batch: &BatchForPredictor, m: &EngineStepOutput) -> (f32, f32) {
         // L2 first.
         let (predicted, actual) = self.observe_step(batch, m.latency as f32);
 
-        // L1 absorption — needs sched lock for the evict path's
-        // self-arbitration (`is_in_flight`). Lock order: sched → mirror.
-        let sched_guard = self.sched.lock().expect("PCtx sched poisoned");
+        // Sched + L1 absorption: lock order sched → mirror.
+        // Sched.sync first so mirror.apply_sse sees the post-step
+        // sched state when it self-arbitrates the evict path.
+        let mut sched_guard = self.sched.lock().expect("PCtx sched poisoned");
+        sched_guard.sync(m);
         self.mirror.lock().expect("PCtx mirror poisoned").apply_sse(m, &sched_guard);
         drop(sched_guard);
 
         // Bump anchor before L3 maintenance.
         self.last_sse_step_id.store(m.step_id, Ordering::Release);
 
-        // L3 invariant maintenance.
+        // L3 invariant + F3 cross-check.
         let engine_has_prefill = step_has_prefill(m);
         let mut slot = self.ephemeral.lock().expect("PCtx ephemeral poisoned");
         match (slot.as_mut(), engine_has_prefill) {
             (Some(e), true) => {
-                if e.sse_anchor_step_id < m.step_id.saturating_sub(1) {
+                let drift = if let Some(s0) = e.buffer.slots.first() {
+                    if s0.composition_known() {
+                        // F3: compare predicted slot[0] composition vs
+                        // engine's actual step. Set-equality on
+                        // (prefill_rids, decode_rids).
+                        !rid_sets_match(s0, m)
+                    } else {
+                        // Composition not recorded (T8 hasn't filled
+                        // it yet) — fall back to stale-anchor check.
+                        e.sse_anchor_step_id < m.step_id.saturating_sub(1)
+                    }
+                } else {
+                    // Empty slots: anchor-based stale check is the
+                    // only signal available.
+                    e.sse_anchor_step_id < m.step_id.saturating_sub(1)
+                };
+                if drift {
                     *slot = None;
                 }
             }
@@ -272,6 +292,33 @@ fn step_has_prefill(m: &EngineStepOutput) -> bool {
         return true;
     }
     m.outputs.iter().any(|o| o.state == "PREFILL")
+}
+
+/// F3 cross-check: do the rid sets predicted in `slot` match the rid
+/// sets the engine reports in `m.outputs`? Set-equality on both
+/// PREFILL and DECODE buckets. Caller is expected to have verified
+/// `slot.composition_known()` first.
+fn rid_sets_match(
+    slot: &super::rollout::RolloutSlot,
+    m: &EngineStepOutput,
+) -> bool {
+    use std::collections::HashSet;
+    let pred_pref: HashSet<u64> = slot.prefill_rids.iter().copied().collect();
+    let pred_dec: HashSet<u64> = slot.decode_rids.iter().copied().collect();
+    let mut act_pref: HashSet<u64> = HashSet::new();
+    let mut act_dec: HashSet<u64> = HashSet::new();
+    for o in &m.outputs {
+        match o.state.as_str() {
+            "PREFILL" => {
+                act_pref.insert(o.request_id);
+            }
+            "DECODE" | "RUNNING" => {
+                act_dec.insert(o.request_id);
+            }
+            _ => {}
+        }
+    }
+    pred_pref == act_pref && pred_dec == act_dec
 }
 
 #[cfg(test)]
@@ -448,5 +495,75 @@ mod tests {
         let s = step(42, 0, vec![]);
         let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
         assert_eq!(pctx.last_sse_step_id.load(Ordering::Acquire), 42);
+    }
+
+    #[test]
+    fn on_sse_syncs_sched_promote_and_advance() {
+        let pctx = pctx();
+        // Admit + check it goes to waiting via sched.
+        pctx.on_admit(7, 200, &[10, 20]);
+        assert_eq!(pctx.sched_in_flight_count(), 1);
+        // Send a PREFILL step processing 100 of the 200 prompt tokens.
+        let mut o = out(7, "PREFILL", false);
+        o.prev_computed_tokens = 0;
+        let s = step(1, 100, vec![o]);
+        let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
+        // Sched promoted 7 to running; processed_tokens advanced to 100.
+        let sched = pctx.sched.lock().unwrap();
+        assert!(sched.running.contains_key(&7));
+        assert_eq!(sched.running[&7].processed_tokens, 100);
+    }
+
+    #[test]
+    fn f3_drops_ephemeral_when_predicted_composition_mismatches() {
+        use smallvec::smallvec;
+        let pctx = pctx();
+        let _ = pctx.query(7);
+        // Manually inject a slot[0] predicting decode={1,2}, prefill={}.
+        {
+            let mut slot = pctx.ephemeral.lock().unwrap();
+            if let Some(e) = slot.as_mut() {
+                e.buffer.slots.push(super::super::rollout::RolloutSlot {
+                    batch: BatchForPredictor::default(),
+                    predicted_lat_ms: 1.0,
+                    prefill_rids: smallvec![],
+                    decode_rids: smallvec![1, 2],
+                });
+            }
+        }
+        // Engine actually steps with decode={1,3} — mismatch.
+        let s = step(1, 32, vec![out(1, "DECODE", false), out(3, "DECODE", false)]);
+        let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
+        assert!(!pctx.ephemeral_present());
+    }
+
+    #[test]
+    fn f3_keeps_ephemeral_when_predicted_composition_matches() {
+        use smallvec::smallvec;
+        let pctx = pctx();
+        let _ = pctx.query(7);
+        {
+            let mut slot = pctx.ephemeral.lock().unwrap();
+            if let Some(e) = slot.as_mut() {
+                e.buffer.slots.push(super::super::rollout::RolloutSlot {
+                    batch: BatchForPredictor::default(),
+                    predicted_lat_ms: 1.0,
+                    prefill_rids: smallvec![7],
+                    decode_rids: smallvec![1, 2],
+                });
+            }
+        }
+        let s = step(
+            1,
+            32,
+            vec![
+                out(7, "PREFILL", false),
+                out(1, "DECODE", false),
+                out(2, "DECODE", false),
+            ],
+        );
+        let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
+        // Prediction matched — ephemeral kept.
+        assert!(pctx.ephemeral_present());
     }
 }

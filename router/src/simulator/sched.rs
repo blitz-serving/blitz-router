@@ -110,6 +110,83 @@ impl SchedSnapshot {
     pub fn in_flight_count(&self) -> usize {
         self.waiting.len() + self.running.len()
     }
+
+    /// SSE absorption — keep the snapshot in sync with the engine's
+    /// authoritative state after one forward step. Should be called
+    /// from `PCtx::on_sse` *before* the L3 cross-check (so the
+    /// cross-check sees the post-step state) and *after* the L2
+    /// calibrate (which only reads the batch features).
+    ///
+    /// Order of operations:
+    ///   1. Per-output state transitions:
+    ///      - `PREFILL` — promote from waiting if first-seen; bump
+    ///        `processed_tokens` by this step's chunk for the request.
+    ///      - `DECODE`/`RUNNING` — `running[rid].processed_tokens += 1`.
+    ///      - `is_finished` — drop the request entirely.
+    ///   2. `preempted_ids` — yank from running, reset progress, push
+    ///      to the front of waiting (matches engine's "preempted goes
+    ///      first on next round" behaviour).
+    ///   3. `aborted_requests` — top-level abort signal; drop.
+    ///
+    /// The chunk size for a PREFILL request in this step is approximated
+    /// by even split of `m.prefill_tokens` across PREFILL outputs — same
+    /// shape as `batch_from_step` in `simulator/mod.rs`. For typical
+    /// chunked-prefill configs at most one PREFILL is active per step,
+    /// so this is exact in practice.
+    pub fn sync(&mut self, m: &crate::engine_client::EngineStepOutput) {
+        // Pre-compute per-PREFILL chunk size (even split with remainder
+        // assigned to the leading entries — matches batch_from_step).
+        let prefill_count = m.outputs.iter().filter(|o| o.state == "PREFILL").count();
+        let (per_chunk, remainder) = if prefill_count > 0 {
+            (m.prefill_tokens / prefill_count, m.prefill_tokens % prefill_count)
+        } else {
+            (0, 0)
+        };
+        let mut prefill_seen = 0usize;
+
+        for o in &m.outputs {
+            let rid = o.request_id;
+            match o.state.as_str() {
+                "PREFILL" => {
+                    let chunk = if prefill_seen < remainder { per_chunk + 1 } else { per_chunk };
+                    prefill_seen += 1;
+                    if !self.running.contains_key(&rid) {
+                        self.promote_to_running(rid);
+                    }
+                    if let Some(req) = self.running.get_mut(&rid) {
+                        // prev_computed_tokens is the KV size BEFORE this
+                        // step ran, so the post-step processed count is
+                        // exactly that plus this step's chunk.
+                        req.processed_tokens = (o.prev_computed_tokens + chunk as u32)
+                            .min(req.input_length.max(1));
+                    }
+                }
+                "DECODE" | "RUNNING" => {
+                    if !self.running.contains_key(&rid) {
+                        // Late observation — request finished prefill in a
+                        // step we missed. Promote and assume prefill done.
+                        self.promote_to_running(rid);
+                        if let Some(req) = self.running.get_mut(&rid) {
+                            req.processed_tokens = req.input_length;
+                        }
+                    }
+                    if let Some(req) = self.running.get_mut(&rid) {
+                        req.processed_tokens = req.processed_tokens.saturating_add(1);
+                    }
+                }
+                _ => {}
+            }
+            if o.is_finished {
+                self.drop_request(rid);
+            }
+        }
+        for &rid in &m.preempted_ids {
+            self.preempt(rid);
+        }
+        for &rid in &m.aborted_requests {
+            self.drop_request(rid);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +269,127 @@ mod tests {
         s.drop_request(1);
         s.drop_request(1); // second drop also no panic
         assert_eq!(s.in_flight_count(), 0);
+    }
+
+    use crate::engine_client::{EngineStepOutput, RequestStepOutput};
+    use nohash_hasher::{BuildNoHashHasher, IntMap};
+
+    fn step(
+        prefill_tokens: usize,
+        outputs: Vec<RequestStepOutput>,
+        preempted: Vec<u64>,
+        aborted: Vec<u64>,
+    ) -> EngineStepOutput {
+        EngineStepOutput {
+            prefill_tokens,
+            prefill_token_budget: 1024,
+            latency: 1,
+            outputs,
+            new_block_hashes: Vec::new(),
+            evicted_block_hashes: Vec::new(),
+            evicted_block_ids: Vec::new(),
+            cur_used_block_ids: IntMap::with_hasher(BuildNoHashHasher::default()),
+            new_block_hashes_ids: IntMap::with_hasher(BuildNoHashHasher::default()),
+            op_exec_log: None,
+            preempted_ids: preempted,
+            aborted_requests: aborted,
+            step_id: 0,
+        }
+    }
+
+    fn out(rid: u64, state: &str, prev_computed: u32, finished: bool) -> RequestStepOutput {
+        RequestStepOutput {
+            request_id: rid,
+            new_token_ids: vec![],
+            state: state.to_string(),
+            is_finished: finished,
+            hit_token_cnt: 0,
+            prev_computed_tokens: prev_computed,
+        }
+    }
+
+    #[test]
+    fn sync_promotes_first_prefill_seen() {
+        let mut s = SchedSnapshot::new();
+        s.admit(rp(1, 100));
+        // Single PREFILL request, full chunk (100 tokens this step).
+        let m = step(100, vec![out(1, "PREFILL", 0, false)], vec![], vec![]);
+        s.sync(&m);
+        assert!(s.running.contains_key(&1));
+        assert!(s.waiting.iter().all(|r| r.request_id != 1));
+        // Capped at input_length, since we sent the full prompt.
+        assert_eq!(s.running[&1].processed_tokens, 100);
+    }
+
+    #[test]
+    fn sync_chunked_prefill_advances_processed() {
+        let mut s = SchedSnapshot::new();
+        s.admit(rp(1, 200));
+        // First chunk: 100 of 200 tokens.
+        s.sync(&step(100, vec![out(1, "PREFILL", 0, false)], vec![], vec![]));
+        assert_eq!(s.running[&1].processed_tokens, 100);
+        // Next chunk: another 100 (cumulative 200, prefill done).
+        s.sync(&step(100, vec![out(1, "PREFILL", 100, false)], vec![], vec![]));
+        assert_eq!(s.running[&1].processed_tokens, 200);
+    }
+
+    #[test]
+    fn sync_decode_increments_processed() {
+        let mut s = SchedSnapshot::new();
+        s.admit(rp(1, 100));
+        s.promote_to_running(1).unwrap().processed_tokens = 100;
+        s.sync(&step(0, vec![out(1, "DECODE", 100, false)], vec![], vec![]));
+        assert_eq!(s.running[&1].processed_tokens, 101);
+        s.sync(&step(0, vec![out(1, "DECODE", 100, false)], vec![], vec![]));
+        assert_eq!(s.running[&1].processed_tokens, 102);
+    }
+
+    #[test]
+    fn sync_finished_drops_request() {
+        let mut s = SchedSnapshot::new();
+        s.admit(rp(1, 100));
+        s.promote_to_running(1).unwrap().processed_tokens = 100;
+        s.sync(&step(0, vec![out(1, "DECODE", 100, true)], vec![], vec![]));
+        assert!(!s.is_in_flight(1));
+    }
+
+    #[test]
+    fn sync_preempt_pushes_front_with_reset() {
+        let mut s = SchedSnapshot::new();
+        s.admit(rp(1, 100));
+        s.admit(rp(2, 200));
+        s.promote_to_running(1).unwrap().processed_tokens = 50;
+        s.promote_to_running(2).unwrap().processed_tokens = 100;
+        s.sync(&step(0, vec![], vec![1], vec![]));
+        // 1 is back in waiting at front, progress reset.
+        assert_eq!(s.waiting.front().unwrap().request_id, 1);
+        assert_eq!(s.waiting.front().unwrap().processed_tokens, 0);
+        assert!(!s.running.contains_key(&1));
+        assert!(s.running.contains_key(&2));
+    }
+
+    #[test]
+    fn sync_abort_drops() {
+        let mut s = SchedSnapshot::new();
+        s.admit(rp(1, 100));
+        s.sync(&step(0, vec![], vec![], vec![1]));
+        assert!(!s.is_in_flight(1));
+    }
+
+    #[test]
+    fn sync_chunked_split_two_prefills_distributes_chunk() {
+        let mut s = SchedSnapshot::new();
+        s.admit(rp(1, 200));
+        s.admit(rp(2, 300));
+        // Two PREFILL outputs, total 200 prefill tokens this step.
+        // Even split: 100 each.
+        s.sync(&step(
+            200,
+            vec![out(1, "PREFILL", 0, false), out(2, "PREFILL", 0, false)],
+            vec![],
+            vec![],
+        ));
+        assert_eq!(s.running[&1].processed_tokens, 100);
+        assert_eq!(s.running[&2].processed_tokens, 100);
     }
 }

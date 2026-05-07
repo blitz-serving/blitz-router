@@ -26,6 +26,24 @@
 pub struct RolloutSlot {
     pub batch: super::BatchForPredictor,
     pub predicted_lat_ms: f32,
+    /// Request ids in PREFILL state in this slot. Populated by T8's
+    /// schedule loop; used by F3 cross-check (PCtx::on_sse) to detect
+    /// rollout drift against the engine's actual step composition.
+    /// Empty when the buffer is a default placeholder (T8 not yet
+    /// run); F3 skips comparison in that case.
+    pub prefill_rids: smallvec::SmallVec<[u64; 2]>,
+    /// Request ids in DECODE state in this slot. Same semantics as
+    /// `prefill_rids`.
+    pub decode_rids: smallvec::SmallVec<[u64; 4]>,
+}
+
+impl RolloutSlot {
+    /// True when the slot has no recorded composition (typical for the
+    /// Phase-3 placeholder buffer before T8 fills it). F3 cross-check
+    /// uses this to skip comparison.
+    pub fn composition_known(&self) -> bool {
+        !self.prefill_rids.is_empty() || !self.decode_rids.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -80,7 +98,12 @@ mod tests {
     use crate::simulator::BatchForPredictor;
 
     fn slot(latency: f32) -> RolloutSlot {
-        RolloutSlot { batch: BatchForPredictor::default(), predicted_lat_ms: latency }
+        RolloutSlot {
+            batch: BatchForPredictor::default(),
+            predicted_lat_ms: latency,
+            prefill_rids: Default::default(),
+            decode_rids: Default::default(),
+        }
     }
 
     #[test]
