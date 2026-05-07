@@ -1,9 +1,6 @@
 //! The single trait every codegen-produced policy implements.
 //!
-//! See `docs/dsl-schema.md` §9. This file is the entire post-Phase-4
-//! lowering target; it intentionally has zero dependencies on the
-//! existing `QueuePlusPlus` / `AssignScore` / sampler scaffolding,
-//! which is destined for retirement.
+//! See `docs/dsl/implementation.md` §1.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -19,7 +16,7 @@ use crate::ScheduleContext;
 /// the framework's lossless-admission contract guarantees this happens
 /// only if every replica is in a state that disqualifies it (rare; in
 /// the DSL surface this corresponds to a `Filter` whose fallback is
-/// also empty, which the §10 static check is designed to rule out).
+/// also empty, which the `docs/dsl/schema.md` §8 static check is designed to rule out).
 ///
 /// Implementations are emitted by the `policy-dsl` proc macro from a
 /// DSL expression — hand-implementing this trait is not the intended

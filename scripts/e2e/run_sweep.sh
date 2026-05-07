@@ -15,7 +15,7 @@ CONFIG_STUBS="${ROUTER_DIR}/exps/blitz-run/configs/config-stubs-5gpu.json"
 OUTPUT_BASE="/workspace/tmp/lmetric/sweep-5gpu/$(date +%Y%m%d-%H%M%S)"
 
 declare -A POLICY_BINS=(
-  [vllm]="router_join-shortest-q-weight"
+  [vllm]="router_join-shortest-weight-q"
   [bailian]="router_bailian-impl-q"
   [aibrix]="router_aibrix-q"
   [dynamo-t1]="router_dynamo-q"

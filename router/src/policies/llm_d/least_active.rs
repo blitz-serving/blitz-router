@@ -1,6 +1,6 @@
 //! `least-active-q` — pick the replica with the fewest active tokens.
 //!
-//! Paper-form DSL (`docs/dsl-schema.md` §8):
+//! Spec-form DSL (`docs/dsl/policies.md` §2):
 //!
 //! ```text
 //! Select min by sctx.all_tokens

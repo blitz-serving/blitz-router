@@ -1,7 +1,9 @@
 //! Scheduling-policy DSL — proc-macro crate.
 //!
-//! See `docs/dsl-schema.md` for the full specification, especially §13
-//! (rewrite table + lint).
+//! See `docs/dsl/implementation.md` for the rewrite table (§2.1) and lint
+//! allowlist (§2.2). For the DSL surface and field schema see
+//! `docs/dsl/schema.md`; for canonical per-policy listings see
+//! `docs/dsl/policies.md`.
 //!
 //! Exports a single `policy!` macro:
 //!

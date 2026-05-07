@@ -5,7 +5,7 @@ ROUTER_DIR="${ROUTER_DIR:-/workspace/blitz-router}"
 REQUEST_SIM_DIR="${REQUEST_SIM_DIR:-/workspace/request-sim}"
 
 declare -a POLICIES=(
-  "join-shortest-q-weight"
+  "join-shortest-weight-q"
   "bailian-impl-q"
   "aibrix-q"
   "dynamo-q"

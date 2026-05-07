@@ -1,6 +1,6 @@
 //! `least-waiting-q` — pick the replica with the fewest waiting requests.
 //!
-//! Paper-form DSL (`docs/dsl-schema.md` §8):
+//! Spec-form DSL (`docs/dsl/policies.md` §2):
 //!
 //! ```text
 //! Select min by sctx.waiting
@@ -22,7 +22,7 @@
 //! what it COMPUTES (`least-waiting`) rather than after llm-d's plugin
 //! labels ("load-aware" tells the reader nothing about which signal).
 //!
-//! Distinct from `join-shortest-q` in `simple.rs` which uses
+//! Distinct from `join-shortest-weight-q` in `vllm.rs` which uses
 //! `4·waiting + bs` (combines waiting AND batch size). This one uses
 //! `waiting` only.
 

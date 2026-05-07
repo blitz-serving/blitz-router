@@ -2,7 +2,7 @@
 name = "policy-dsl"
 version.workspace = true
 edition.workspace = true
-description = "Proc-macro crate for the scheduling-policy DSL. See docs/dsl-schema.md."
+description = "Proc-macro crate for the scheduling-policy DSL. See docs/dsl/."
 
 [lib]
 proc-macro = true

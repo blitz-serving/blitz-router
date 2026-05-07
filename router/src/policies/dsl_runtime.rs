@@ -7,7 +7,7 @@
 //!   3. Apply the `after:` clause via `apply_default_after` plus any
 //!      policy-specific gctx mutations.
 //!
-//! See `docs/dsl-schema.md` §4 (schema), §5 (named fns), §10 (after).
+//! See `docs/dsl/schema.md` §4 (schema), §5 (named fns), §8 (after).
 
 use std::sync::Arc;
 
@@ -65,7 +65,7 @@ pub(crate) async fn capture_observations(
 }
 
 // =========================================================================
-// Named pure-fn library (docs/dsl-schema.md §5)
+// Named pure-fn library (docs/dsl/schema.md §5)
 // =========================================================================
 
 /// New (uncached) prefill tokens contributed by `req` if routed to `sctx`.
@@ -269,7 +269,7 @@ pub(crate) fn root_target(observations: &[Observation]) -> Vec<&Observation> {
 }
 
 // =========================================================================
-// Reducers — closed set of six (docs/dsl-schema.md §6)
+// Reducers — closed set of six (docs/dsl/schema.md §6)
 // =========================================================================
 
 #[inline]

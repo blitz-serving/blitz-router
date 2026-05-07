@@ -10,7 +10,7 @@ description: Build blitz-router with correct features and Python environment for
 ### Inner-cluster mode (no Python dependency)
 
 ```bash
-cargo build --release -p router --features vllm-backend,join-shortest-q
+cargo build --release -p router --features lmetric-q
 ```
 
 - Default `--chat-template-mode none` — prompts arrive pre-rendered
@@ -20,7 +20,7 @@ cargo build --release -p router --features vllm-backend,join-shortest-q
 ### Gateway mode (PyO3 embedded Python)
 
 ```bash
-cargo build --release -p router --features vllm-backend,python-chat-template,join-shortest-q
+cargo build --release -p router --features python-chat-template,lmetric-q
 ```
 
 - Enables `--chat-template-mode python` — router renders chat templates via embedded Python jinja2
@@ -64,15 +64,28 @@ sudo apt-get install -y python3.10-dev
 
 ## Feature Flags Reference
 
+`vllm-backend` is implied by `default` and by `colocation`/`zmq-backend` — you do not normally need to pass it explicitly.
+
 | Feature | Purpose | Requires |
 |---------|---------|----------|
 | `vllm-backend` | HTTP+SSE backend (yaullm) | - |
 | `zmq-backend` | ZMQ backend (headless yaullm) | zeromq, rmp-serde |
 | `python-chat-template` | PyO3 chat template rendering | Python dev headers |
-| `join-shortest-q` | Scheduling policy | - |
-| `bounded-most-hit-q` | Cache-aware scheduling | - |
+| `simulator` | Latency-prediction subsystem (orthogonal to policies) | - |
 
 ## Scheduling Policy (pick exactly one)
 
-Must enable exactly one scheduling policy feature:
-`random-q`, `round-robin-q`, `join-shortest-q`, `bounded-most-hit-q`, `least-wait-token-q`, `join-shortest-q-tuple`, `join-shortest-q-weight`, `bailian-impl-q`
+Policies are organized under `router/src/policies/` by upstream baseline system. Pick exactly one of the 18 features below; if none is given, the build defaults to `join-shortest-weight-q`.
+
+| Module | Features |
+|---|---|
+| `simple.rs` | `random-q`, `round-robin-q`, `least-wait-token-q`, `bounded-most-hit-q` |
+| `vllm.rs` | `join-shortest-weight-q` |
+| `bailian.rs` | `bailian-impl-q` |
+| `aibrix.rs` | `aibrix-q` |
+| `dynamo.rs` | `dynamo-q`, `dynamo-po-q` |
+| `lmetric.rs` | `lmetric-q` |
+| `preble/` | `preble-q` |
+| `llm_d/` | `most-hit-q`, `least-waiting-q`, `least-bs-q`, `least-active-q`, `least-token-load-q`, `most-hit-load-q`, `most-hit-load-active-q` |
+
+Stale names previously documented here — `join-shortest-q`, `join-shortest-q-weight`, `join-shortest-q-tuple` — no longer exist; the canonical name is `join-shortest-weight-q`.

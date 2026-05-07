@@ -1,6 +1,6 @@
 //! `least-bs-q` — pick the replica with the smallest active batch size.
 //!
-//! Paper-form DSL (`docs/dsl-schema.md` §8):
+//! Spec-form DSL (`docs/dsl/policies.md` §2):
 //!
 //! ```text
 //! Select min by sctx.bs
@@ -26,8 +26,8 @@
 //! signal versus queue-aware composite signal.
 //!
 //! Distinct from:
-//!   - `join-shortest-q` (`4·waiting + bs`, additionally weights
-//!     `sctx.waiting`)
+//!   - `join-shortest-weight-q` (in `vllm.rs`, `4·waiting + bs`,
+//!     additionally weights `sctx.waiting`)
 //!   - `least-waiting-q` (`sctx.waiting` only — different "queue")
 
 use policy_dsl::policy;

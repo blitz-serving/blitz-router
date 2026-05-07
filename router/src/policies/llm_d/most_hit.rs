@@ -1,6 +1,6 @@
 //! `most-hit-q` — pick the replica with the most cached prefix blocks.
 //!
-//! Paper-form DSL (`docs/dsl-schema.md` §8):
+//! Spec-form DSL (`docs/dsl/policies.md` §2):
 //!
 //! ```text
 //! Select max by hit_blocks(req, sctx)

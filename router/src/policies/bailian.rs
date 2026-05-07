@@ -1,6 +1,6 @@
 //! `bailian-impl-q` — Bailian's three-component normalize-and-sample policy.
 //!
-//! Paper-form DSL (`docs/dsl-schema.md` §8):
+//! Spec-form DSL (`docs/dsl/policies.md` §2):
 //!
 //! ```text
 //! With M_bs  = Max .bs,

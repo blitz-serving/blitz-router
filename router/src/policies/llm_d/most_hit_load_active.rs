@@ -1,7 +1,7 @@
 //! `most-hit-load-active-q` — precise prefix-cache + load-aware +
 //! kv-cache-utilization.
 //!
-//! Paper-form DSL (`docs/dsl-schema.md` §8):
+//! Spec-form DSL (`docs/dsl/policies.md` §2):
 //!
 //! ```text
 //! With M_h = Max hit_blocks(req, ·), m_h = Min hit_blocks(req, ·),

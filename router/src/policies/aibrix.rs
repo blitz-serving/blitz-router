@@ -1,6 +1,6 @@
 //! `aibrix-q` — port of AIBrix's `prefix_cache.go` routing.
 //!
-//! Paper-form DSL (`docs/dsl-schema.md` §8): two-level lossless `Filter`
+//! Spec-form DSL (`docs/dsl/policies.md` §2): two-level lossless `Filter`
 //! over an outer load-imbalance gate and an inner stddev threshold,
 //! with tuple-keyed `Select min` (`(-hit_pct, bs)` to get max hit, ties
 //! broken by smaller bs).

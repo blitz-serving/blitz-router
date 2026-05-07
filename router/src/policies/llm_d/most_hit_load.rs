@@ -1,6 +1,6 @@
 //! `most-hit-load-q` — precise prefix-cache locality + load-aware tiebreak.
 //!
-//! Paper-form DSL (`docs/dsl-schema.md` §8):
+//! Spec-form DSL (`docs/dsl/policies.md` §2):
 //!
 //! ```text
 //! With M_h = Max hit_blocks(req, ·), m_h = Min hit_blocks(req, ·) in

@@ -1,10 +1,24 @@
 // Scheduling policies for replica selection.
 //
 // Every policy is emitted by the `policy!` proc macro from `policy-dsl/`,
-// which lowers a paper-form DSL expression (`docs/dsl-schema.md` §8) into
+// which lowers a spec-form DSL expression (`docs/dsl/policies.md` §2) into
 // an `impl Policy for X` block. The generic `PolicyRunner<P: Policy>` in
 // `policy_runner.rs` drives any such P with the queue management /
 // commit-buffer / batch-dispatch boilerplate.
+//
+// Module layout — one module per upstream baseline system, plus `simple`
+// for trivial policies with no upstream origin:
+//
+//   simple.rs   — random / round-robin / least-wait-token / bounded-most-hit
+//   vllm.rs     — vLLM 4·waiting + bs                                   (1)
+//   bailian.rs  — Bailian                                               (1)
+//   aibrix.rs   — AIBrix                                                (1)
+//   dynamo.rs   — AI-Dynamo Decode-node + Prefill-node logits           (2)
+//   lmetric.rs  — our system                                            (1)
+//   preble/     — Preble + cost-model + sliding-window histogram        (1)
+//   llm_d/      — llm-d single-scorer ablations + multi-scorer combos   (7)
+//
+// Total: 18 policies.
 //
 // Phase 4 cleanup landed: legacy `QueuePlusPlus`, `AssignScore`,
 // `NaiiveLattice`, `Deterministic`/`StochasticPolicy`, `ScheduleStep`,
@@ -18,18 +32,13 @@ pub(crate) mod aibrix;
 pub(crate) mod bailian;
 pub(crate) mod dsl_runtime;
 pub(crate) mod dynamo;
-pub(crate) mod least_active;
-pub(crate) mod least_bs;
-pub(crate) mod least_token_load;
-pub(crate) mod least_waiting;
+pub(crate) mod llm_d;
 pub(crate) mod lmetric;
-pub(crate) mod most_hit;
-pub(crate) mod most_hit_load;
-pub(crate) mod most_hit_load_active;
 pub(crate) mod policy_runner;
 pub(crate) mod policy_trait;
 pub(crate) mod preble;
 pub(crate) mod simple;
+pub(crate) mod vllm;
 
 // Re-export concrete policy structs (each emitted by `policy!`).
 // `#[allow(unused_imports)]` because exactly one is referenced per
@@ -41,27 +50,18 @@ pub(crate) use bailian::BailianImplQ;
 #[allow(unused_imports)]
 pub(crate) use dynamo::{DynamoPoQ, DynamoQ};
 #[allow(unused_imports)]
+pub(crate) use llm_d::{
+    LeastActiveQ, LeastBsQ, LeastTokenLoadQ, LeastWaitingQ, MostHitLoadActiveQ, MostHitLoadQ,
+    MostHitQ,
+};
+#[allow(unused_imports)]
 pub(crate) use lmetric::LmetricQ;
-#[allow(unused_imports)]
-pub(crate) use most_hit::MostHitQ;
-#[allow(unused_imports)]
-pub(crate) use most_hit_load::MostHitLoadQ;
-#[allow(unused_imports)]
-pub(crate) use most_hit_load_active::MostHitLoadActiveQ;
-#[allow(unused_imports)]
-pub(crate) use least_active::LeastActiveQ;
-#[allow(unused_imports)]
-pub(crate) use least_bs::LeastBsQ;
-#[allow(unused_imports)]
-pub(crate) use least_token_load::LeastTokenLoadQ;
-#[allow(unused_imports)]
-pub(crate) use least_waiting::LeastWaitingQ;
 #[allow(unused_imports)]
 pub(crate) use preble::PrebleQ;
 #[allow(unused_imports)]
-pub(crate) use simple::{
-    JBoundMostHitQ2, JLeastWaitTokenQ, JShortestQ, JShortestQWeight, RandomQ, RoundRobinQ,
-};
+pub(crate) use simple::{JBoundMostHitQ2, JLeastWaitTokenQ, RandomQ, RoundRobinQ};
+#[allow(unused_imports)]
+pub(crate) use vllm::JShortestWeightQ;
 
 use crate::kvcache::BlockHashState;
 use crate::infer::{InferError, InferStreamResponse};
@@ -146,6 +146,8 @@ pub(crate) trait QueuePro {
 // ---------------------------------------------------------------------------
 // Feature-gated TaskAssigner alias.
 // Each policy is wired through PolicyRunner<P: Policy>.
+// `join-shortest-weight-q` is the catch-all default when no policy feature
+// is selected.
 // ---------------------------------------------------------------------------
 
 use policy_runner::PolicyRunner;
@@ -180,28 +182,32 @@ pub(crate) type TaskAssigner = PolicyRunner<LeastBsQ>;
 pub(crate) type TaskAssigner = PolicyRunner<LeastActiveQ>;
 #[cfg(feature = "least-token-load-q")]
 pub(crate) type TaskAssigner = PolicyRunner<LeastTokenLoadQ>;
-#[cfg(feature = "join-shortest-q-weight")]
-pub(crate) type TaskAssigner = PolicyRunner<JShortestQWeight>;
 #[cfg(feature = "round-robin-q")]
 pub(crate) type TaskAssigner = PolicyRunner<RoundRobinQ>;
 #[cfg(feature = "random-q")]
 pub(crate) type TaskAssigner = PolicyRunner<RandomQ>;
-// `join-shortest-q` (default catch-all) → JShortestQ (vLLM 4·waiting + bs).
-#[cfg(all(feature = "join-shortest-q", not(any(
-    feature = "bailian-impl-q",
-    feature = "bounded-most-hit-q",
-    feature = "least-wait-token-q",
-    feature = "aibrix-q",
-    feature = "dynamo-q",
-    feature = "join-shortest-q-weight",
-    feature = "round-robin-q",
-    feature = "random-q",
-    feature = "most-hit-q",
-    feature = "most-hit-load-q",
-    feature = "most-hit-load-active-q",
-    feature = "least-waiting-q",
-    feature = "least-bs-q",
-    feature = "least-active-q",
-    feature = "least-token-load-q",
-))))]
-pub(crate) type TaskAssigner = PolicyRunner<JShortestQ>;
+// `join-shortest-weight-q` is also the catch-all default — vLLM's
+// `4·sctx.waiting + sctx.bs` formula.
+#[cfg(any(
+    feature = "join-shortest-weight-q",
+    not(any(
+        feature = "bailian-impl-q",
+        feature = "bounded-most-hit-q",
+        feature = "least-wait-token-q",
+        feature = "aibrix-q",
+        feature = "dynamo-q",
+        feature = "dynamo-po-q",
+        feature = "lmetric-q",
+        feature = "preble-q",
+        feature = "most-hit-q",
+        feature = "most-hit-load-q",
+        feature = "most-hit-load-active-q",
+        feature = "least-waiting-q",
+        feature = "least-bs-q",
+        feature = "least-active-q",
+        feature = "least-token-load-q",
+        feature = "round-robin-q",
+        feature = "random-q",
+    ))
+))]
+pub(crate) type TaskAssigner = PolicyRunner<JShortestWeightQ>;

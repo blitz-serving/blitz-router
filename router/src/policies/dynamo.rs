@@ -1,6 +1,6 @@
 //! `dynamo-q` and `dynamo-po-q` — Dynamo's PD-disaggregated routing logits
 //! ported as ablation baselines in our PD-colocated environment.
-//! See `dsl-schema.md` §8 and `.claude/memory/dynamo_pd_colocated_terms.md`.
+//! See `docs/dsl/policies.md` §2 and `.claude/memory/dynamo_pd_colocated_terms.md`.
 //!
 //! Dynamo upstream is PD-**disaggregated**: separate Prefill nodes and Decode
 //! nodes, each running a different routing logit (`selector.rs:150`). We

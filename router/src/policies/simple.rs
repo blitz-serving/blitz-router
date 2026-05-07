@@ -1,19 +1,19 @@
 //! "Simple" policies — those whose DSL body fits in a single `Select` or
 //! a shallow `Filter`, with no per-policy state beyond what fits in
-//! `RRGCtx`. Per `docs/dsl-schema.md` §9, these live together for review
-//! ergonomics rather than each having their own file.
+//! `RRGCtx`, AND no upstream-system origin (vLLM/llm-d/etc. policies live
+//! in their own per-system modules). Per `docs/dsl/policies.md` §1, these
+//! live together for review ergonomics rather than each having their own
+//! file.
 //!
 //! Policies in this file:
 //!   - `RandomQ`           (`random-q`)
 //!   - `RoundRobinQ`       (`round-robin-q`)  — uses `RRGCtx`
-//!   - `JShortestQ`        (`join-shortest-q`)  — vLLM `4·waiting + bs`
-//!   - `JShortestQWeight`  (`join-shortest-q-weight`) — alias of `JShortestQ`
 //!   - `JLeastWaitTokenQ`  (`least-wait-token-q`)
 //!   - `JBoundMostHitQ2`   (`bounded-most-hit-q`)  — includes the
 //!     attention-black-hole fallback fix (§8 / §13.1)
 //!
-//! Each invocation maps 1:1 to a paper-form DSL listing in
-//! `docs/dsl-schema.md` §8 via the rewrite table in §13.1.
+//! Each invocation maps 1:1 to a spec-form DSL listing in
+//! `docs/dsl/policies.md` §2 via the rewrite table in `docs/dsl/implementation.md` §2.1.
 
 use crate::metrics::WAITINGT_PREFILL_TOKEN_BOUND;
 use policy_dsl::policy;
@@ -51,24 +51,6 @@ policy! {
         let count = observations.len().max(1);
         gctx.next_replica_id = (gctx.next_replica_id + 1) % count;
     }
-}
-
-// =========================================================================
-// join-shortest-q  :=  Select min by 4·sctx.waiting + sctx.bs   (vLLM)
-// join-shortest-q-weight :=  same formula  (kept as separate alias for the
-//                            cargo feature flag — both compile to the same
-//                            code, exactly one is enabled per build)
-// =========================================================================
-policy! {
-    name: JShortestQ,
-    gctx: (),
-    body: { select_min_by(&root_target(&observations), |o| 4 * o.waiting + o.bs) },
-}
-
-policy! {
-    name: JShortestQWeight,
-    gctx: (),
-    body: { select_min_by(&root_target(&observations), |o| 4 * o.waiting + o.bs) },
 }
 
 // =========================================================================

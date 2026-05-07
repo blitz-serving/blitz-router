@@ -43,7 +43,7 @@ This drives cache-aware routing (via `evicted_block_ids`) and scheduling decisio
 | Engine | yaullm (patched vLLM) | Custom | Custom |
 | Router↔Engine protocol | HTTP + SSE | gRPC / custom | gRPC / custom |
 | KV Cache Routing | RadixTree prefix matching | Simplified | Cache-aware |
-| Scheduling Policies | 11 compile-time switchable | Fixed | Fixed |
+| Scheduling Policies | 18 compile-time switchable | Fixed | Fixed |
 | Metrics | Real-time SSE push per engine step | Basic | Limited telemetry |
 | Config Polymorphism | Cargo feature flags (zero-overhead) | Runtime config | Runtime config |
 
@@ -73,22 +73,28 @@ blitz-router/
 │   ├── statistic.rs         # Statistics collection
 │   ├── health.rs            # Health checks
 │   ├── error.rs             # Error types
-│   ├── policies/            # Scheduling policies — DSL-driven
-│   │   ├── mod.rs               # ~160 LOC: Entry, QueuePro, TaskAssigner aliases
+│   ├── policies/            # Scheduling policies — DSL-driven,
+│   │   │                    # one module per upstream baseline system
+│   │   ├── mod.rs               # ~200 LOC: Entry, QueuePro, TaskAssigner aliases
 │   │   ├── policy_trait.rs      # `Policy` trait (5 lines, lowering target)
 │   │   ├── policy_runner.rs     # `PolicyRunner<P: Policy>` queue runner
 │   │   ├── dsl_runtime.rs       # combinators, reducers, named pure fns,
 │   │   │                        # `apply_default_after`, Observation schema
-│   │   ├── simple.rs            # random-q, round-robin-q, join-shortest-q,
-│   │   │                        # join-shortest-q-weight, least-wait-token-q,
-│   │   │                        # bounded-most-hit-q (each is 1–10 line `policy!`)
+│   │   ├── simple.rs            # random-q, round-robin-q, least-wait-token-q,
+│   │   │                        # bounded-most-hit-q (no upstream-system origin)
+│   │   ├── vllm.rs              # join-shortest-weight-q (vLLM 4·waiting + bs)
 │   │   ├── lmetric.rs           # lmetric-q
 │   │   ├── bailian.rs           # bailian-impl-q
 │   │   ├── aibrix.rs            # aibrix-q
-│   │   ├── dynamo.rs            # dynamo-q + dynamo-po-q (T1 + T2 ablation)
-│   │   └── preble/              # preble-q + cost_model/histogram/router utils
+│   │   ├── dynamo.rs            # dynamo-q + dynamo-po-q (Decode-/Prefill-node logits)
+│   │   ├── preble/              # preble-q + cost_model/histogram/router utils
+│   │   └── llm_d/               # llm-d single-scorer ablations + multi-scorer combos
+│   │       ├── mod.rs
+│   │       ├── most_hit.rs / most_hit_load.rs / most_hit_load_active.rs
+│   │       └── least_active.rs / least_bs.rs / least_token_load.rs / least_waiting.rs
 │   └── simulator/           # Latency simulator (feature-gated `simulator`)
-│       ├── mod.rs               # PCtx + observe_admission + calibrate_step entry points
+│       ├── mod.rs               # piggyback observation entry points
+│       ├── pctx.rs              # process-wide PredictorContext (OnceLock)
 │       ├── batch.rs             # BatchForPredictor (inner-regressor input)
 │       ├── predictor.rs         # Predictor + TrainedPredictor traits
 │       ├── rollout.rs           # RolloutBuffer + RolloutSlot (outer-DES output)
@@ -97,7 +103,10 @@ blitz-router/
 │       └── config.rs            # SimulatorConfig (CSV path, model_hash, granularities)
 ├── policy-dsl/              # ~150 LOC proc-macro: parser + lint + lowering
 │   └── src/{lib,ast,parse,check,lower}.rs
-├── docs/dsl-schema.md       # DSL spec (§1–§13)
+├── docs/dsl/                # DSL spec, split for progressive disclosure
+│   ├── schema.md                # surface syntax + field/reducer schema
+│   ├── policies.md              # canonical DSL listings for every policy
+│   └── implementation.md        # `policy!` macro: rewrite table + lint allowlist
 ├── proto/generate.proto     # Protobuf type definitions (used as internal data structures)
 ├── rust-proto/              # Protobuf codegen (internal types only)
 ├── rust-grpc/               # gRPC metadata injection (vestigial)
@@ -116,14 +125,36 @@ The legacy `replica/` subdirectory and the `cybernetics/` planner code described
 
 ### Scheduling Policies (DSL-driven, compile-time via Cargo features)
 
-Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `router/src/policies/` that the `policy-dsl/` proc macro lowers into an `impl Policy for X { fn schedule(...) }` block. The macro enforces an allowlist lint (`docs/dsl-schema.md` §13.2) so the impl always corresponds 1:1 to a paper-form DSL listing (§8) via the rewrite table (§13.1). `PolicyRunner<P: Policy>` is the dispatch shim. Feature names are the source of truth — anything not in this list is stale.
+Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `router/src/policies/` that the `policy-dsl/` proc macro lowers into an `impl Policy for X { fn schedule(...) }` block. The macro enforces an allowlist lint (`docs/dsl/implementation.md` §2.2) so the impl always corresponds 1:1 to a spec-form DSL listing (`docs/dsl/policies.md` §2) via the rewrite table (`docs/dsl/implementation.md` §2.1). `PolicyRunner<P: Policy>` is the dispatch shim. Feature names are the source of truth — anything not in this list is stale.
 
-- `random-q` — `Select rand by 1` (`simple.rs`).
-- `round-robin-q` — LRU-style with `RRGCtx { next_replica_id }` global state (`simple.rs`).
-- `join-shortest-q` — vLLM `4·waiting + bs` (`simple.rs`).
-- `join-shortest-q-weight` — same formula, separate cargo flag (`simple.rs`).
-- `least-wait-token-q` — `Select min by prefill_tokens(req, sctx)` (`simple.rs`).
-- `bounded-most-hit-q` — `Filter (queued_tokens < BOUND) (max hit) (min prefill_tokens)`, with the attention-black-hole fallback fix (`simple.rs`).
+Policies are organized under `router/src/policies/` by their upstream baseline system, plus `simple.rs` for trivial policies that have no upstream-system origin.
+
+**`simple.rs`** — trivial, no upstream-system origin
+- `random-q` — `Select rand by 1`.
+- `round-robin-q` — LRU-style with `RRGCtx { next_replica_id }` global state.
+- `least-wait-token-q` — `Select min by prefill_tokens(req, sctx)`.
+- `bounded-most-hit-q` — `Filter (queued_tokens < BOUND) (max hit) (min prefill_tokens)`, with the attention-black-hole fallback fix.
+
+**`vllm.rs`** — vLLM baseline
+- `join-shortest-weight-q` — `Select min by 4·sctx.waiting + sctx.bs`. The "weight" qualifier names the formula's defining feature (waiting carries weight 4 vs weight 1 on bs); also serves as the catch-all default when no policy feature is selected.
+
+**`bailian.rs`** — Bailian baseline
+- `bailian-impl-q` — Per-component normalize then weighted-sample `(α, β, γ)` over `(hit_pct, 1-bs/M_bs, 1-tok/M_tok)`.
+
+**`aibrix.rs`** — AIBrix baseline
+- `aibrix-q` — Nested `Filter` (load-imbalance gate × stddev threshold) with tuple-keyed `(-hit_pct, bs)` selection.
+
+**`dynamo.rs`** — AI-Dynamo baselines (PD-disaggregated formulas, ported as ablations)
+- `dynamo-q` — Dynamo's **Decode-node** formula: `Select min by w·(new_tokens/block_size) + (new_blocks + decode_blocks)`.
+- `dynamo-po-q` — Dynamo's **Prefill-node** formula ("po" = prefill-only node, NOT "uses new_tokens only"): `Select min by w·(prefill_tokens/block_size) + floor(prefill_blocks)`. (Renamed from legacy `dynamo-decoupled-q`.)
+
+**`lmetric.rs`** — our system
+- `lmetric-q` — `Select min by prefill_tokens · (bs+1)`.
+
+**`preble/`** — Preble baseline
+- `preble-q` — Dual-stage Preble: `Filter (match_pct > 0.5) (max match) (min preble_cost)`; SlidingWindowHistogram updated via `after_extra`.
+
+**`llm_d/`** — llm-d baselines (single-scorer ablations + multi-scorer combos)
 - `most-hit-q` — `Select max by hit_blocks(req, sctx)`. Native name for our port of llm-d's production baseline (`sim-epp-kvcache-config.yaml`: precise-prefix-cache-scorer w=10 + max-score-picker). Single-scorer + constant-weight + min-max-norm reduces to `argmax hit_blocks` (`most_hit.rs`).
 - `least-waiting-q` — `Select min by sctx.waiting`. llm-d's `load-aware-scorer` and `queue-depth-scorer` as single-scorer ablations both collapse to this argmin (`least_waiting.rs`).
 - `least-bs-q` — `Select min by sctx.bs`. Closest single-scorer port of llm-d's `running-requests-scorer`; honest about composite signal (`sctx.bs = running + queued` per §4.2, not pure RunningRequestsSize) (`least_bs.rs`).
@@ -131,14 +162,10 @@ Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `ro
 - `least-token-load-q` — `Select min by queued_tokens(sctx) + sctx.all_tokens`. llm-d's `token-load-scorer` single-scorer ablation (`least_token_load.rs`).
 - `most-hit-load-q` — llm-d's two-scorer combo (precise-prefix-cache w=10 + load-aware w=1): per-component min-max-norm + weighted sum, argmax via `select_max_by`. Tunables in `metrics.rs::MOST_HIT_LOAD_W_*` (`most_hit_load.rs`).
 - `most-hit-load-active-q` — three-scorer combo (above + kv-cache-utilization w=1, cap-free via `1 − norm(all_tokens)`). Tunables `MOST_HIT_LOAD_ACTIVE_W_*` (`most_hit_load_active.rs`).
-- `bailian-impl-q` — Per-component normalize then weighted-sample `(α, β, γ)` over `(hit_pct, 1-bs/M_bs, 1-tok/M_tok)` (`bailian.rs`).
-- `aibrix-q` — Nested `Filter` (load-imbalance gate × stddev threshold) with tuple-keyed `(-hit_pct, bs)` selection (`aibrix.rs`).
-- `dynamo-q` — Dynamo's **Decode-node** formula: `Select min by w·(new_tokens/block_size) + (new_blocks + decode_blocks)` (`dynamo.rs`).
-- `dynamo-po-q` — Dynamo's **Prefill-node** formula ("po" = prefill-only node, NOT "uses new_tokens only"): `Select min by w·(prefill_tokens/block_size) + floor(prefill_blocks)`. (Renamed from legacy `dynamo-decoupled-q`.)
-- `lmetric-q` — `Select min by prefill_tokens · (bs+1)` (`lmetric.rs`).
-- `preble-q` — Dual-stage Preble: `Filter (match_pct > 0.5) (max match) (min preble_cost)`; SlidingWindowHistogram updated via `after_extra` (`preble/`).
 
-Earlier revisions referred to `join-shortest-q-tuple` and `join-shortest-q-weight` — those are not Cargo features and have been superseded by `aibrix-q` and `shortest_q_weight.rs` respectively.
+llm-d policies that cannot be expressed in the DSL (e.g. session-aware) are NOT ported; reference: `workspace/llm-d-scheduler/`.
+
+Earlier revisions referred to `join-shortest-q`, `join-shortest-q-weight`, `join-shortest-q-tuple`, and `dynamo-decoupled-q` as Cargo features. The first two have been merged into the canonical `join-shortest-weight-q`; the latter two never were features (superseded by `aibrix-q` and `dynamo-po-q` respectively).
 
 ### KV Cache Tracking
 - **RadixTree** (`radixtrie.rs`): Patricia trie mapping token sequences to block hashes
@@ -251,13 +278,15 @@ Before every commit that changes code, scan **all related doc surfaces** and fol
 
 Per-change-type checklist (apply when relevant):
 
-- **Policy added / renamed / deleted** → `router/Cargo.toml` features, `router/src/policies/mod.rs` (module decl + re-export + TaskAssigner alias + catch-all exclusion list), `docs/dsl-schema.md` §8 listing + count, `CLAUDE.md` scheduling-policies list, file header doc, `.claude/memory/*.md` if a memory file references it.
-- **Algorithm change inside a policy body** → file header doc, `docs/dsl-schema.md` §8 listing, `CLAUDE.md` one-liner, related `.claude/memory/*.md` if any.
-- **New / renamed / removed named-fn or reducer** → `docs/dsl-schema.md` §5 + §13.1 rewrite table + §13.2 allowlist doc, `policy-dsl/src/check.rs` `ALLOWED_FNS`.
-- **`Observation` field rename or removal from DSL surface** → `docs/dsl-schema.md` §4.2 (or remove the row if no longer DSL-canonical) + §5 Body / Reads columns referring to it + §8 listings using it, file headers using it, `policy-dsl/src/check.rs` if relevant.
-- **New cargo feature** → `router/Cargo.toml`, `mod.rs` catch-all exclusion list, `CLAUDE.md`, `docs/dsl-schema.md` §8 if applicable.
-- **Tunable constant added** → `router/src/metrics.rs` (per dsl-schema.md §12.4 convention), file header pointer, `CLAUDE.md` if user-facing.
+- **Policy added / renamed / deleted** → `router/Cargo.toml` features, `router/src/policies/mod.rs` (module decl + re-export + TaskAssigner alias + catch-all exclusion list), `docs/dsl/policies.md` §2 listing + module-org table in §1, `CLAUDE.md` scheduling-policies list, file header doc, `.claude/memory/*.md` if a memory file references it.
+- **Algorithm change inside a policy body** → file header doc, `docs/dsl/policies.md` §2 listing, `CLAUDE.md` one-liner, related `.claude/memory/*.md` if any.
+- **New / renamed / removed named-fn or reducer** → `docs/dsl/schema.md` §5 + `docs/dsl/implementation.md` §2.1 rewrite table + §2.2 allowlist doc, `policy-dsl/src/check.rs` `ALLOWED_FNS`.
+- **`Observation` field rename or removal from DSL surface** → `docs/dsl/schema.md` §4.2 (or remove the row if no longer DSL-canonical) + §5 Body / Reads columns referring to it + `docs/dsl/policies.md` §2 listings using it, file headers using it, `policy-dsl/src/check.rs` if relevant.
+- **New cargo feature** → `router/Cargo.toml`, `mod.rs` catch-all exclusion list, `CLAUDE.md`, `docs/dsl/policies.md` §2 if applicable.
+- **Tunable constant added** → `router/src/metrics.rs` (per `docs/dsl/schema.md` §10.4 convention), file header pointer, `CLAUDE.md` if user-facing.
 - **Public API / CLI flag change** → `README.md`, `CLAUDE.md` Configuration section, related `.claude/memory/*.md`.
+
+**Skills (load on-demand)**: invoke `/add-policy` when adding / renaming / deleting a policy — it walks the first checklist entry mechanically. Invoke `/verify-policy` when reviewing a `policy!` body for impl ↔ spec drift against its `docs/dsl/policies.md` §2 listing. Both skills reference this checklist as source of truth, so any change to the checklist must also be reflected in `.claude/skills/{add,verify}-policy.md`.
 
 Two failure modes to handle differently:
 

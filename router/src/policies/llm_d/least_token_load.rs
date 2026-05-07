@@ -1,7 +1,7 @@
 //! `least-token-load-q` — pick the replica with the least total token load
 //! (queued prefill + currently active).
 //!
-//! Paper-form DSL (`docs/dsl-schema.md` §8):
+//! Spec-form DSL (`docs/dsl/policies.md` §2):
 //!
 //! ```text
 //! Select min by queued_tokens(sctx) + sctx.all_tokens

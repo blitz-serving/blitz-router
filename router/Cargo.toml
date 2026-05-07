@@ -106,26 +106,43 @@ radixtree-blockhash = []
 # ----------------------- #
 
 # --- Scheduling Policy -- #
+# Organized by baseline system. Exactly one feature should be enabled per
+# build. See docs/dsl/policies.md §2 for the canonical listing and
+# router/src/policies/{vllm,llm_d,...}.rs for implementations.
+
+# simple/ — trivial policies with no upstream-system origin
 random-q = []
 round-robin-q = []
-join-shortest-q = []
-bounded-most-hit-q = []
 least-wait-token-q = []
+bounded-most-hit-q = []
+
+# vllm/ — vLLM-baseline scheduling (4·waiting + bs)
+join-shortest-weight-q = []
+
+# bailian/ — Bailian baseline
 bailian-impl-q = []
+
+# aibrix/ — AIBrix baseline
 aibrix-q = []
+
+# dynamo/ — AI-Dynamo baselines (PD-disaggregated formulas, ported)
 dynamo-q = []
 dynamo-po-q = []
+
+# lmetric/ — our system
 lmetric-q = []
+
+# preble/ — Preble baseline
 preble-q = []
+
+# llm_d/ — llm-d baselines (single-scorer ablations + multi-scorer combos)
 most-hit-q = []
-most-hit-load-q = []
-most-hit-load-active-q = []
 least-waiting-q = []
 least-bs-q = []
 least-active-q = []
 least-token-load-q = []
-# Legacy aliases (prefer system-specific names above)
-join-shortest-q-weight = []
+most-hit-load-q = []
+most-hit-load-active-q = []
 
 stochastic-schedule = []
 determinent-schedule = []

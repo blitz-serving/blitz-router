@@ -1,9 +1,9 @@
 //! Preble scheduling policy — DSL form using `policy!` macro.
 //!
-//! See `docs/dsl-schema.md` §8 (canonical DSL listing) and the §13.1
-//! rewrite table. The cost-model state lives in `PrebleGCtx` (passed
-//! through `Policy::GlobalContext`), promoted from the previous
-//! module-static `OnceLock` per the user's "state is a first-class
+//! See `docs/dsl/policies.md` §2 (canonical DSL listing) and the
+//! `docs/dsl/implementation.md` §2.1 rewrite table. The cost-model state lives
+//! in `PrebleGCtx` (passed through `Policy::GlobalContext`), promoted from the
+//! previous module-static `OnceLock` per the user's "state is a first-class
 //! scope, not a backdoor" framing.
 //!
 //! Submodules `cost_model`, `histogram`, `router` are unchanged
@@ -86,7 +86,7 @@ pub(crate) fn update_histogram_into(
 // PrebleQ — DSL form
 // =========================================================================
 //
-// Paper-form DSL (`docs/dsl-schema.md` §8):
+// Spec-form DSL (`docs/dsl/policies.md` §2):
 //
 //   Filter (match_blocks(req, sctx) / req.input_tokens > 0.5)
 //     (Select max by match_blocks(req, sctx))

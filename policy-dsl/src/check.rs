@@ -1,10 +1,10 @@
 //! Allowlist lint for the `policy!` body and after-extra.
 //!
-//! See `docs/dsl-schema.md` §13.2. The lint enforces that the macro body
-//! is built only from the closed allowlist of helper calls + ordinary
+//! See `docs/dsl/implementation.md` §2.2. The lint enforces that the macro
+//! body is built only from the closed allowlist of helper calls + ordinary
 //! Rust expressions (closures, lets, arith, field access). This is what
 //! makes the impl → DSL reverse direction trustworthy: any legal body
-//! mechanically maps back to a paper-form DSL expression via §13.1.
+//! mechanically maps back to a spec-form DSL expression via §2.1.
 
 use std::collections::HashSet;
 
@@ -31,7 +31,7 @@ const ALLOWED_FNS: &[&str] = &[
     "std_of_f32",
     "min_of_f32",
     "max_of_f32",
-    // Named pure fns (docs/dsl-schema.md §5)
+    // Named pure fns (docs/dsl/schema.md §5)
     "new_tokens",
     "new_blocks",
     "queued_tokens",
@@ -90,7 +90,7 @@ impl<'ast, 'a> Visit<'ast> for Linter<'a> {
                         seg.ident.span(),
                         format!(
                             "function `{name}` is not in the policy DSL allowlist. \
-                             Allowed: {} (see docs/dsl-schema.md §13.2)",
+                             Allowed: {} (see docs/dsl/implementation.md §2.2)",
                             ALLOWED_FNS.join(", ")
                         ),
                     ));
@@ -100,7 +100,7 @@ impl<'ast, 'a> Visit<'ast> for Linter<'a> {
             self.errors.push(syn::Error::new(
                 call.func.span(),
                 "policy bodies may only call named functions from the allowlist; \
-                 indirect calls are not permitted (docs/dsl-schema.md §13.2)",
+                 indirect calls are not permitted (docs/dsl/implementation.md §2.2)",
             ));
         }
         syn::visit::visit_expr_call(self, call);
