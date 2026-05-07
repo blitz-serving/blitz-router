@@ -162,27 +162,36 @@ impl PCtx {
         gist
     }
 
-    /// Trigger B — admission. Called by `policy_runner` after the
-    /// scheduler commits the request to this replica's commit buffer.
+    /// Trigger B — admission. Called by `simulator::on_admit` after
+    /// `policy_runner` commits the request. Takes the three fields
+    /// needed for the three layers; intentionally does NOT depend on
+    /// `Entry` so unit tests can exercise it without constructing a
+    /// full pipeline value.
     ///
     /// L1: insert the request's prefix hashes into the mirror.
     /// Sched: enqueue a fresh `ReqProgress` at the back of `waiting`.
-    /// L3: promote-or-drop branch.
-    ///
-    /// Phase-3 widens the signature from `request_id: u64` to
-    /// `&Entry` so this method can pull both `input_length` and
-    /// `block_hash_state.get_hashes()` without re-borrowing.
-    /// Wired in T5; the current body still takes only `request_id`
-    /// pending that change.
-    pub fn on_admit(&self, request_id: u64) {
-        let mut slot = self.ephemeral.lock().expect("PCtx ephemeral poisoned");
-        match slot.as_mut() {
-            Some(e) if e.candidate_id == Some(request_id) => {
-                e.candidate_id = None;
-                e.buffer.candidate_id = None;
-            }
-            _ => {
-                *slot = None;
+    /// L3: promote-or-drop branch (matching candidate → baseline,
+    ///     mismatch → drop).
+    pub fn on_admit(&self, request_id: u64, input_length: u32, hashes: &[u64]) {
+        // Lock order: sched → mirror → ephemeral.
+        {
+            let mut sched = self.sched.lock().expect("PCtx sched poisoned");
+            sched.admit(super::sched::ReqProgress::new(request_id, input_length));
+        }
+        {
+            let mut mirror = self.mirror.lock().expect("PCtx mirror poisoned");
+            mirror.insert_request(request_id, hashes);
+        }
+        {
+            let mut slot = self.ephemeral.lock().expect("PCtx ephemeral poisoned");
+            match slot.as_mut() {
+                Some(e) if e.candidate_id == Some(request_id) => {
+                    e.candidate_id = None;
+                    e.buffer.candidate_id = None;
+                }
+                _ => {
+                    *slot = None;
+                }
             }
         }
     }
@@ -367,24 +376,33 @@ mod tests {
     fn on_admit_promotes_matching_candidate_to_baseline() {
         let pctx = pctx();
         let _ = pctx.query(7);
-        pctx.on_admit(7);
+        pctx.on_admit(7, 100, &[10, 20]);
         assert!(pctx.ephemeral_present());
         assert_eq!(pctx.ephemeral_candidate(), None);
+        // L1 + sched side-effects.
+        assert_eq!(pctx.in_flight_count(), 1);
+        assert_eq!(pctx.sched_in_flight_count(), 1);
     }
 
     #[test]
     fn on_admit_drops_mismatched_candidate() {
         let pctx = pctx();
         let _ = pctx.query(7);
-        pctx.on_admit(99);
+        pctx.on_admit(99, 100, &[10, 20]);
         assert!(!pctx.ephemeral_present());
+        // L1 + sched side-effects still happen for the admitted req.
+        assert_eq!(pctx.in_flight_count(), 1);
+        assert_eq!(pctx.sched_in_flight_count(), 1);
     }
 
     #[test]
-    fn on_admit_with_empty_ephemeral_is_noop() {
+    fn on_admit_with_empty_ephemeral_is_noop_for_l3() {
         let pctx = pctx();
-        pctx.on_admit(1);
+        pctx.on_admit(1, 100, &[10, 20]);
+        // L3 stays empty; L1 + sched populated.
         assert!(!pctx.ephemeral_present());
+        assert_eq!(pctx.in_flight_count(), 1);
+        assert_eq!(pctx.sched_in_flight_count(), 1);
     }
 
     #[test]

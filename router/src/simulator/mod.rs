@@ -114,19 +114,22 @@ pub(crate) fn on_sse(replica_index: usize, m: &EngineStepOutput) {
 /// a specific replica's commit buffer. No-op when the simulator is
 /// inactive.
 ///
-/// Drives the L3 promote-or-drop branch on `PCtx`: if a prior
-/// `query(request_id)` cached an ephemeral rollout for this exact
-/// request, it gets promoted to a baseline; otherwise the slot is
-/// cleared and a Phase-3 baseline rebuilder will refill it from the
-/// `on_sse` invariant path.
-pub(crate) fn on_admit(replica_index: usize, request_id: u64) {
+/// Drives admission across all three layers in `PCtx`: L1 mirror
+/// gains the request's prefix hashes, sched snapshot gains a fresh
+/// `ReqProgress` in `waiting`, and L3 ephemeral runs the
+/// promote-or-drop branch.
+pub(crate) fn on_admit(replica_index: usize, entry: &crate::policies::Entry) {
     let Some(rt) = SIMULATOR.get() else {
         return;
     };
     let Some(pctx) = rt.pctxs.get(replica_index) else {
         return;
     };
-    pctx.on_admit(request_id);
+    pctx.on_admit(
+        entry.request.request_id,
+        entry.request.input_length,
+        entry.block_hash_state.get_hashes(),
+    );
 }
 
 /// Speculative rollout query for a `(replica_index, candidate_id)`
@@ -348,8 +351,6 @@ mod tests {
         }
         // After many calibrations, the per-replica regressor's corrected
         // prediction should be close to 4ms.
-        // Also exercise the on_admit stub for compile-coverage.
-        on_admit(0, 42);
         let rt = SIMULATOR.get().expect("simulator must be initialised");
         let pctx = rt.pctxs[0].clone();
         let batch = batch_from_step(&step, cfg.block_size);
