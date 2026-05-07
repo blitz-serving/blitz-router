@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 
+use crate::engine_client::EngineStepOutput;
 use crate::kvcache::{BlockHash, PrefixBlockHash};
 
 pub struct IncrementalMirror {
@@ -67,6 +68,41 @@ impl IncrementalMirror {
             !indices.iter().any(|i| evicted.contains(i))
         });
         self.tree.remove(block_indices.to_vec());
+    }
+
+    /// Absorb one engine step's worth of state changes from the SSE
+    /// payload. This is the single canonical entry-point for the SSE
+    /// path (called from `PCtx::on_sse`); piecewise calls to the lower
+    /// `remove_*` helpers remain available for unit-test setup but are
+    /// not called by the hot path.
+    ///
+    /// Order of operations matters:
+    ///   1. Evictions first — the engine has already freed these block
+    ///      indices, so any per-request entry that referenced them is
+    ///      now stale and must be pruned before checking finishes.
+    ///   2. Finishes next — request-level removal cleans up indices
+    ///      that survived eviction (a finished request typically frees
+    ///      its blocks via the engine's standard release path, not via
+    ///      `evicted_block_ids`).
+    ///   3. Aborts last — same shape as finishes but driven by the
+    ///      router rather than the engine. No-op for ids the mirror
+    ///      doesn't know.
+    /// Preempted requests are intentionally NOT removed: the engine
+    /// keeps the prefix tree entries (the request will be rescheduled
+    /// from the same prompt), so the mirror should also retain its
+    /// view of them.
+    pub fn apply_sse(&mut self, m: &EngineStepOutput) {
+        if !m.evicted_block_ids.is_empty() {
+            self.remove_blocks(&m.evicted_block_ids);
+        }
+        for o in &m.outputs {
+            if o.is_finished {
+                self.remove_request(o.request_id);
+            }
+        }
+        for &rid in &m.aborted_requests {
+            self.remove_request(rid);
+        }
     }
 
     /// Returns the matched prefix length over the mirror only. The outer DES
@@ -137,5 +173,94 @@ mod tests {
         assert_eq!(m.in_flight_count(), 1);
         assert_eq!(m.prefix_match(&[40, 50]), 2);
         assert_eq!(m.prefix_match(&[10]), 0);
+    }
+
+    use crate::engine_client::{EngineStepOutput, RequestStepOutput};
+    use nohash_hasher::{BuildNoHashHasher, IntMap};
+
+    fn step(
+        outputs: Vec<RequestStepOutput>,
+        evicted: Vec<u64>,
+        aborted: Vec<u64>,
+    ) -> EngineStepOutput {
+        EngineStepOutput {
+            prefill_tokens: 0,
+            prefill_token_budget: 1024,
+            latency: 1,
+            outputs,
+            new_block_hashes: Vec::new(),
+            evicted_block_hashes: Vec::new(),
+            evicted_block_ids: evicted,
+            cur_used_block_ids: IntMap::with_hasher(BuildNoHashHasher::default()),
+            new_block_hashes_ids: IntMap::with_hasher(BuildNoHashHasher::default()),
+            op_exec_log: None,
+            preempted_ids: Vec::new(),
+            aborted_requests: aborted,
+            step_id: 0,
+        }
+    }
+
+    fn output(rid: u64, finished: bool, state: &str) -> RequestStepOutput {
+        RequestStepOutput {
+            request_id: rid,
+            new_token_ids: vec![],
+            state: state.to_string(),
+            is_finished: finished,
+            hit_token_cnt: 0,
+            prev_computed_tokens: 0,
+        }
+    }
+
+    #[test]
+    fn apply_sse_drops_finished_request() {
+        let mut m = IncrementalMirror::new(1024);
+        m.insert_request(1, &[10, 20], vec![0, 1]);
+        m.insert_request(2, &[30, 40], vec![2, 3]);
+        let s = step(vec![output(1, true, "DECODE"), output(2, false, "DECODE")], vec![], vec![]);
+        m.apply_sse(&s);
+        assert_eq!(m.in_flight_count(), 1);
+        assert_eq!(m.prefix_match(&[10]), 0);
+        assert_eq!(m.prefix_match(&[30]), 1);
+    }
+
+    #[test]
+    fn apply_sse_drops_aborted_request() {
+        let mut m = IncrementalMirror::new(1024);
+        m.insert_request(1, &[10, 20], vec![0, 1]);
+        let s = step(vec![], vec![], vec![1]);
+        m.apply_sse(&s);
+        assert_eq!(m.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn apply_sse_evicts_blocks_before_finishing() {
+        let mut m = IncrementalMirror::new(1024);
+        m.insert_request(1, &[10, 20, 30], vec![0, 1, 2]);
+        // The leaf block (index 2) is evicted in the same step as request
+        // 1 finishes. Eviction-then-finish ordering inside apply_sse
+        // ensures the request bookkeeping is gone after both events.
+        let s = step(vec![output(1, true, "DECODE")], vec![2], vec![]);
+        m.apply_sse(&s);
+        assert_eq!(m.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn apply_sse_keeps_preempted_request() {
+        let mut m = IncrementalMirror::new(1024);
+        m.insert_request(1, &[10, 20], vec![0, 1]);
+        let mut s = step(vec![], vec![], vec![]);
+        s.preempted_ids = vec![1];
+        m.apply_sse(&s);
+        // Preempted requests retain their mirror entry (will be re-prefilled).
+        assert_eq!(m.in_flight_count(), 1);
+    }
+
+    #[test]
+    fn apply_sse_unknown_finish_is_noop() {
+        let mut m = IncrementalMirror::new(1024);
+        m.insert_request(1, &[10, 20], vec![0, 1]);
+        let s = step(vec![output(99, true, "DECODE")], vec![], vec![]);
+        m.apply_sse(&s);
+        assert_eq!(m.in_flight_count(), 1);
     }
 }

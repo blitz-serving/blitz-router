@@ -24,7 +24,7 @@ pub use config::{ModelKind, SimulatorConfig};
 pub use mirror::IncrementalMirror;
 pub use pctx::PCtx;
 pub use predictor::{LinregCorrected, Predictor, TrainedPredictor};
-pub use rollout::{RolloutBuffer, RolloutSlot};
+pub use rollout::{RolloutBuffer, RolloutGist, RolloutSlot};
 pub use vidur_rf::VidurRfPredictor;
 
 use std::sync::{Arc, OnceLock};
@@ -78,12 +78,10 @@ pub fn is_active() -> bool {
 }
 
 /// SSE consumer hook (piggyback). No-op when the simulator is inactive.
-/// Reconstructs `BatchForPredictor` from the just-completed step, predicts
-/// + calibrates via PCtx, and emits Prometheus histograms.
-///
-/// Phase-2 will additionally drive the L1 (mirror) and L3 (ephemeral
-/// rollout) state machines off of this event; for now the body is the
-/// piggyback predict-vs-actual loop only.
+/// Reconstructs `BatchForPredictor` from the just-completed step, then
+/// hands off to `PCtx::on_sse` which drives all three layers (L2
+/// calibrate, L1 absorb, L3 invariant) and returns the (predicted,
+/// actual) latency pair for Prometheus emission.
 pub(crate) fn on_sse(replica_index: usize, m: &EngineStepOutput) {
     let Some(rt) = SIMULATOR.get() else {
         return;
@@ -92,7 +90,7 @@ pub(crate) fn on_sse(replica_index: usize, m: &EngineStepOutput) {
         return;
     };
     let batch = batch_from_step(m, rt.block_size);
-    let (predicted, actual) = pctx.observe_step(&batch, m.latency as f32);
+    let (predicted, actual) = pctx.on_sse(&batch, m);
 
     metrics::histogram!("simulator_predicted_ms", predicted as f64);
     metrics::histogram!("simulator_actual_ms", actual as f64);
@@ -107,23 +105,38 @@ pub(crate) fn on_sse(replica_index: usize, m: &EngineStepOutput) {
     }
 }
 
-/// Admission-time hook (piggyback). Called by `policy_runner` immediately
-/// after the chosen <name>-q policy commits a request to a specific
-/// replica's commit buffer. No-op when the simulator is inactive.
+/// Admission-time hook (piggyback). Called by `policy_runner`
+/// immediately after the chosen <name>-q policy commits a request to
+/// a specific replica's commit buffer. No-op when the simulator is
+/// inactive.
 ///
-/// Phase-1 body is a structural stub: it locates the target PCtx and
-/// returns. Phase-2 will use it to (a) ADD the candidate's blocks to the
-/// L1 mirror's speculative_set and (b) promote the matching L3 ephemeral
-/// rollout buffer from "candidate-bound" to "baseline" — or rebuild it
-/// from scratch if the candidate did not match the cached query.
+/// Drives the L3 promote-or-drop branch on `PCtx`: if a prior
+/// `query(request_id)` cached an ephemeral rollout for this exact
+/// request, it gets promoted to a baseline; otherwise the slot is
+/// cleared and a Phase-3 baseline rebuilder will refill it from the
+/// `on_sse` invariant path.
 pub(crate) fn on_admit(replica_index: usize, request_id: u64) {
     let Some(rt) = SIMULATOR.get() else {
         return;
     };
-    let Some(_pctx) = rt.pctxs.get(replica_index) else {
+    let Some(pctx) = rt.pctxs.get(replica_index) else {
         return;
     };
-    let _ = request_id;
+    pctx.on_admit(request_id);
+}
+
+/// Speculative rollout query for a `(replica_index, candidate_id)`
+/// pair. Returns `None` when the simulator is inactive or the index
+/// is out of range; otherwise returns the projected `RolloutGist` for
+/// the policy scheduler.
+///
+/// Phase-2 status: `PCtx::query` is a structural placeholder — it
+/// returns a default-empty gist while exercising the L3 storage
+/// lifecycle. The real DES algorithm lands in Phase 3.
+pub fn query(replica_index: usize, candidate_id: u64) -> Option<RolloutGist> {
+    let rt = SIMULATOR.get()?;
+    let pctx = rt.pctxs.get(replica_index)?;
+    Some(pctx.query(candidate_id))
 }
 
 /// Reconstruct an approximate `BatchForPredictor` from the just-completed

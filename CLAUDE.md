@@ -93,12 +93,12 @@ blitz-router/
 │   │       ├── most_hit.rs / most_hit_load.rs / most_hit_load_active.rs
 │   │       └── least_active.rs / least_bs.rs / least_token_load.rs / least_waiting.rs
 │   └── simulator/           # Latency simulator (feature-gated `simulator`)
-│       ├── mod.rs               # piggyback observation entry points
+│       ├── mod.rs               # piggyback observation entry points (on_sse, on_admit, query)
 │       ├── pctx.rs              # process-wide PredictorContext (OnceLock)
 │       ├── batch.rs             # BatchForPredictor (inner-regressor input)
 │       ├── predictor.rs         # Predictor + TrainedPredictor traits
-│       ├── rollout.rs           # RolloutBuffer + RolloutSlot (outer-DES output)
-│       ├── mirror.rs            # PCtx incremental mirror around radixtrie
+│       ├── rollout.rs           # RolloutBuffer + RolloutSlot + RolloutGist
+│       ├── mirror.rs            # PCtx L1 incremental mirror around radixtrie
 │       ├── vidur_rf.rs          # VidurRfPredictor (port of everparadise LlamaPredictor)
 │       └── config.rs            # SimulatorConfig (CSV path, model_hash, granularities)
 ├── policy-dsl/              # ~150 LOC proc-macro: parser + lint + lowering
@@ -190,7 +190,9 @@ The scheduling policy is selected at compile time via Cargo features. Each polic
 - **Inner regressor** (`predictor.rs`, `vidur_rf.rs`): offline-trained ML model (port of Vidur RandomForest from `tmp/blitz-infer-pack-sim/`) with online linear-regression correction (`LinregCorrected`). `Predictor::predict(&BatchForPredictor) -> f32` (ms).
 - **Outer discrete-event simulator** (`rollout.rs`): rolls forward engine steps from the current `ScheduleContext`, calls the inner regressor per step, fills a `RolloutBuffer`. Stop condition: `waiting==∅ && chunked_prefill_in_progress==∅`. (RolloutBuffer types defined; full DES `query_sim` driver is a follow-up.)
 
-**Piggyback mode (default and only mode today):** when built with `--features simulator,<name>-q` AND launched with `--enable-simulator`, the simulator observes admissions made by the active `<name>-q` policy via a hook in `colocation.rs::completion_event_loop` (calls `simulator::record_step` per SSE event), and emits Prometheus histograms (`simulator_predicted_ms`, `simulator_actual_ms`, `simulator_signed_error_ms`, `simulator_abs_error_ms`, `simulator_relative_error`). **It does not influence routing.** The `Policy` trait is untouched; PCtx is owned by a process-wide `OnceLock` initialised from `main.rs` at startup.
+**Piggyback mode (default and only mode today):** when built with `--features simulator,<name>-q` AND launched with `--enable-simulator`, the simulator observes the active `<name>-q` policy via two hooks: `simulator::on_sse(replica_index, &EngineStepOutput)` from `colocation.rs::completion_event_loop` (per SSE event) and `simulator::on_admit(replica_index, request_id)` from `policy_runner.rs::queue_task` (per admission, both Append and NextRequest paths). It emits Prometheus histograms (`simulator_predicted_ms`, `simulator_actual_ms`, `simulator_signed_error_ms`, `simulator_abs_error_ms`, `simulator_relative_error`). **It does not influence routing.** The `Policy` trait is untouched; PCtx is owned by a process-wide `OnceLock` initialised from `main.rs` at startup.
+
+PCtx exposes three triggers (the public API): `query(candidate_id) → RolloutGist` (Trigger A, used by future `simulator-q`), `on_admit(request_id)` (Trigger B), `on_sse(batch, &EngineStepOutput) → (predicted_ms, actual_ms)` (Trigger C). They drive a three-layer state model — L1 incremental mirror, L2 online-corrected regressor, L3 ephemeral rollout buffer — with a load-bearing invariant: when the engine has prefill work in progress, the L3 buffer must be non-empty. See `.claude/memory/project_lmetric_predictor_design.md` §"Locked spec" for the full state machine.
 
 **CLI flags** (all behind `simulator` feature; no-op otherwise):
 - `--enable-simulator` — turn the subsystem on at runtime.
