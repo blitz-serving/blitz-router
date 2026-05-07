@@ -1,99 +1,107 @@
-// Incremental mirror — small, per-replica overlay on top of `ScheduleContext.
-// block_hash` (the live engine prefix-cache state). Tracks ONLY the blocks
-// belonging to in-flight requests (admitted by the router but not yet
-// SSE-confirmed as cached/evicted by the engine).
+// L1 incremental mirror — per-replica overlay of the in-flight prefix
+// cache. Sits next to the engine's own cache (mirrored router-side as
+// `ScheduleContext.block_hash`) and contributes the **speculative** part:
+// hashes the router has dispatched but the engine may not have surfaced
+// yet via SSE. The composite cache-hit estimate the simulator uses is
+// `max(SCtx.block_hash.get(h), Mirror.prefix_match(h))` — locked as A2.
 //
-// Lifecycle:
-//   admission   → `insert_request(req_id, hashes, indices)`  (speculative)
-//   SSE step    → blocks in `m.new_block_hashes_ids` are now confirmed in
-//                 SCtx.block_hash; the mirror entry can be considered
-//                 redundant. We simply leave it; the next eviction or finish
-//                 prunes it. A periodic compaction is overkill for the small
-//                 cardinalities expected here.
-//   SSE finish  → `remove_request(req_id)` clears the mirror entry.
-//   SSE evict   → `remove_blocks(block_ids)` removes by index.
+// Lifecycle (Group A + B locked):
 //
-// During rollout the outer DES queries `prefix_match(hashes)` to decide how
-// many of the candidate's blocks are already cached — combining the live
-// SCtx tree (via the caller) with the mirror.
+//   admit time          → `insert_request(rid, hashes)`
+//                         (hashes from `entry.block_hash_state`).
+//   SSE per-step        → `apply_sse(m, sched)`:
+//                            * for each finished output  → remove_request(rid)
+//                            * for each aborted_request  → remove_request(rid)
+//                            * for each preempted_id     → remove_request(rid)
+//                            * for each evicted_block_hash:
+//                                 - if any owner still in_flight → flag (rare,
+//                                   per Group B Point 1 should not happen with
+//                                   vLLM); v1 swallows, v1.5 will redo
+//                                 - else → drop subtree (orphan cleanup)
+//                         The evict path is **self-arbitrating** thanks to
+//                         V=ReqId (Group B Point 2): the mirror itself can
+//                         decide whether to drop or preserve without an
+//                         out-of-band signal.
 //
-// Reuses `PrefixBlockHash` from `kvcache.rs` (radix-tree or hash-table impl
-// chosen by Cargo feature). Per-request bookkeeping is a separate `HashMap`.
+// What the mirror does NOT do (deliberately):
+//
+//   * Track block indices. The engine's index assignment happens
+//     post-admit; mirror exists precisely so the router doesn't need
+//     to wait for that. Eviction is processed via `evicted_block_hashes`
+//     not `evicted_block_ids` (both are present on the SSE payload).
+//   * Maintain its own preempt/abort state machine — that lives in
+//     `SchedSnapshot`. Mirror only reacts.
+//   * Try to stay perfectly in sync under exotic eviction patterns —
+//     A2's redo path absorbs residual drift.
 
 use std::collections::HashMap;
 
 use crate::engine_client::EngineStepOutput;
-use crate::kvcache::{BlockHash, PrefixBlockHash};
+
+use super::req_id_tree::RadixTreeReqIdHash;
+use super::sched::SchedSnapshot;
 
 pub struct IncrementalMirror {
-    tree: PrefixBlockHash,
-    /// request_id -> (block_hashes inserted speculatively, block_indices used)
-    by_request: HashMap<u64, (Vec<u64>, Vec<u64>)>,
+    tree: RadixTreeReqIdHash,
+    /// rid → cached copy of the hash sequence inserted at admit time.
+    /// Needed because `remove_by_hashes` works against the original
+    /// sequence, and we don't want to rederive it from `BlockHashState`
+    /// at finish time.
+    by_request: HashMap<u64, Vec<u64>>,
 }
 
 impl IncrementalMirror {
-    pub fn new(num_blocks: usize) -> Self {
-        Self { tree: PrefixBlockHash::new(num_blocks), by_request: HashMap::new() }
+    pub fn new() -> Self {
+        Self { tree: RadixTreeReqIdHash::new(), by_request: HashMap::new() }
     }
 
-    /// Speculatively insert a request's prefix blocks. Idempotent per
-    /// `request_id`: a duplicate call replaces the previous entry.
-    pub fn insert_request(&mut self, request_id: u64, hashes: &[u64], indices: Vec<u64>) {
+    /// Register that `rid` claims this prefix sequence. Idempotent
+    /// per rid: a duplicate call replaces the previous sequence
+    /// (guards against re-admission edge cases).
+    pub fn insert_request(&mut self, rid: u64, hashes: &[u64]) {
         if hashes.is_empty() {
             return;
         }
-        if let Some((_, prev_indices)) = self.by_request.remove(&request_id) {
-            self.tree.remove(prev_indices);
+        if let Some(prev) = self.by_request.remove(&rid) {
+            self.tree.remove_by_hashes(&prev, rid);
         }
-        self.tree.insert(hashes, indices.clone());
-        self.by_request.insert(request_id, (hashes.to_vec(), indices));
+        self.tree.insert_hashes(hashes, rid);
+        self.by_request.insert(rid, hashes.to_vec());
     }
 
-    /// Drop a request from the mirror, removing its blocks. Used on
-    /// SSE-reported finish or abort. No-op for unknown ids.
-    pub fn remove_request(&mut self, request_id: u64) {
-        if let Some((_, indices)) = self.by_request.remove(&request_id) {
-            self.tree.remove(indices);
+    /// Drop `rid`'s claim entirely. Used by `apply_sse` for finish /
+    /// abort / preempt branches. No-op for unknown ids.
+    pub fn remove_request(&mut self, rid: u64) {
+        if let Some(prev) = self.by_request.remove(&rid) {
+            self.tree.remove_by_hashes(&prev, rid);
         }
     }
 
-    /// Remove specific block indices (e.g. on SSE-reported eviction). Cleans
-    /// the per-request bookkeeping entries that referenced any of them.
-    pub fn remove_blocks(&mut self, block_indices: &[u64]) {
-        if block_indices.is_empty() {
-            return;
-        }
-        let evicted: std::collections::HashSet<u64> = block_indices.iter().copied().collect();
-        self.by_request.retain(|_req_id, (_hashes, indices)| {
-            !indices.iter().any(|i| evicted.contains(i))
-        });
-        self.tree.remove(block_indices.to_vec());
-    }
-
-    /// Absorb one engine step's worth of state changes from the SSE
-    /// payload. This is the single canonical entry-point for the SSE
-    /// path (called from `PCtx::on_sse`); piecewise calls to the lower
-    /// `remove_*` helpers remain available for unit-test setup but are
-    /// not called by the hot path.
-    ///
-    /// Order of operations matters:
-    ///   1. Evictions first — the engine has already freed these block
-    ///      indices, so any per-request entry that referenced them is
-    ///      now stale and must be pruned before checking finishes.
-    ///   2. Finishes next — request-level removal cleans up indices
-    ///      that survived eviction (a finished request typically frees
-    ///      its blocks via the engine's standard release path, not via
-    ///      `evicted_block_ids`).
-    ///   3. Aborts last — same shape as finishes but driven by the
-    ///      router rather than the engine. No-op for ids the mirror
-    ///      doesn't know.
-    /// Preempted requests are intentionally NOT removed: the engine
-    /// keeps the prefix tree entries (the request will be rescheduled
-    /// from the same prompt), so the mirror should also retain its
-    /// view of them.
-    pub fn apply_sse(&mut self, m: &EngineStepOutput) {
-        if !m.evicted_block_ids.is_empty() {
-            self.remove_blocks(&m.evicted_block_ids);
+    /// SSE absorption — single canonical entry from `PCtx::on_sse`.
+    /// Order:
+    ///   1. evict (so subsequent finish/abort sees a clean tree)
+    ///   2. finish (per-output is_finished)
+    ///   3. abort (top-level aborted_requests)
+    ///   4. preempt (top-level preempted_ids — full-request drop;
+    ///      sched will push the request back to its waiting queue
+    ///      in parallel)
+    pub fn apply_sse(&mut self, m: &EngineStepOutput, sched: &SchedSnapshot) {
+        for evicted_hash in &m.evicted_block_hashes {
+            // BackendBlockHash is `[u64; N]` (sha256) or `u64`
+            // (default-hash). The simulator hash key is the same
+            // 64-bit hash that BlockHashState uses; under the
+            // default-hash-algo feature this is the first u64 of the
+            // BackendBlockHash array.
+            let key = backend_hash_to_key(evicted_hash);
+            let still_in_flight = self
+                .tree
+                .owners_of(key)
+                .any(|rid| sched.is_in_flight(rid));
+            if !still_in_flight {
+                self.tree.evict_orphan_hash(key);
+            }
+            // else: rare per Group B Point 1; v1 leaves the entry as-is
+            // (the cross-check / redo path absorbs any resulting drift).
         }
         for o in &m.outputs {
             if o.is_finished {
@@ -103,85 +111,55 @@ impl IncrementalMirror {
         for &rid in &m.aborted_requests {
             self.remove_request(rid);
         }
+        for &rid in &m.preempted_ids {
+            self.remove_request(rid);
+        }
     }
 
-    /// Returns the matched prefix length over the mirror only. The outer DES
-    /// composes this with the live SCtx tree's match (taking the max, or
-    /// summing, depending on whether they overlap — typically the mirror is a
-    /// strict superset of yet-to-be-SSE-confirmed blocks, so a max is
-    /// appropriate).
+    /// Longest matched prefix length over the mirror only. The DES
+    /// composes this with `SCtx.block_hash.get(hashes)` via A2's
+    /// `max` rule.
     pub fn prefix_match(&self, hashes: &[u64]) -> usize {
         self.tree.get(hashes)
     }
 
-    /// Number of distinct in-flight requests currently mirrored.
+    /// Number of distinct in-flight rids currently mirrored.
     pub fn in_flight_count(&self) -> usize {
         self.by_request.len()
     }
 
-    /// Mirror's underlying epoch counter; useful for cache-key invalidation.
+    /// Mirror epoch — bumped on every tree mutation. Useful as a
+    /// cache-invalidation key for downstream memoisation.
     pub fn epoch(&self) -> u64 {
         self.tree.epoch()
     }
 }
 
+impl Default for IncrementalMirror {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Reduce a backend block hash (sha256 = `[u64;4]`, default = `[u64;1]`)
+/// down to the 64-bit key the mirror's trie operates on. `BlockHashState`
+/// uses the same first-u64 reduction internally so the keys agree
+/// across the mirror, the SCtx tree, and per-request `block_hashes`.
+fn backend_hash_to_key(h: &crate::kvcache::BackendBlockHash) -> u64 {
+    h[0]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn insert_and_match() {
-        let mut m = IncrementalMirror::new(1024);
-        m.insert_request(1, &[10, 20, 30], vec![0, 1, 2]);
-        assert_eq!(m.prefix_match(&[10, 20, 30]), 3);
-        assert_eq!(m.prefix_match(&[10, 20]), 2);
-        assert_eq!(m.prefix_match(&[40]), 0);
-        assert_eq!(m.in_flight_count(), 1);
-    }
-
-    #[test]
-    fn remove_request_clears() {
-        let mut m = IncrementalMirror::new(1024);
-        m.insert_request(1, &[10, 20], vec![0, 1]);
-        m.insert_request(2, &[10, 30], vec![2, 3]);
-        assert_eq!(m.in_flight_count(), 2);
-        m.remove_request(1);
-        assert_eq!(m.in_flight_count(), 1);
-        // The shared prefix (block hash 10) is still cached because request 2
-        // also referenced it via index 2.
-        assert_eq!(m.prefix_match(&[10]), 1);
-    }
-
-    #[test]
-    fn remove_blocks_drops_request_bookkeeping() {
-        let mut m = IncrementalMirror::new(1024);
-        m.insert_request(1, &[10, 20, 30], vec![0, 1, 2]);
-        // Evict only the leaf (index 2). The radix tree cascades parent→child
-        // eviction, so removing a non-leaf would also drop descendants and
-        // trip a debug assertion. In practice the engine reports the full
-        // eviction set in one batch, so cascade semantics work out.
-        m.remove_blocks(&[2]);
-        // request 1's bookkeeping is gone (we removed one of its blocks).
-        assert_eq!(m.in_flight_count(), 0);
-    }
-
-    #[test]
-    fn duplicate_insert_replaces() {
-        let mut m = IncrementalMirror::new(1024);
-        m.insert_request(1, &[10, 20], vec![0, 1]);
-        m.insert_request(1, &[40, 50], vec![2, 3]);
-        assert_eq!(m.in_flight_count(), 1);
-        assert_eq!(m.prefix_match(&[40, 50]), 2);
-        assert_eq!(m.prefix_match(&[10]), 0);
-    }
-
     use crate::engine_client::{EngineStepOutput, RequestStepOutput};
     use nohash_hasher::{BuildNoHashHasher, IntMap};
 
     fn step(
         outputs: Vec<RequestStepOutput>,
-        evicted: Vec<u64>,
+        evicted_hashes: Vec<crate::kvcache::BackendBlockHash>,
         aborted: Vec<u64>,
+        preempted: Vec<u64>,
     ) -> EngineStepOutput {
         EngineStepOutput {
             prefill_tokens: 0,
@@ -189,18 +167,18 @@ mod tests {
             latency: 1,
             outputs,
             new_block_hashes: Vec::new(),
-            evicted_block_hashes: Vec::new(),
-            evicted_block_ids: evicted,
+            evicted_block_hashes: evicted_hashes,
+            evicted_block_ids: Vec::new(), // unused in v1
             cur_used_block_ids: IntMap::with_hasher(BuildNoHashHasher::default()),
             new_block_hashes_ids: IntMap::with_hasher(BuildNoHashHasher::default()),
             op_exec_log: None,
-            preempted_ids: Vec::new(),
+            preempted_ids: preempted,
             aborted_requests: aborted,
             step_id: 0,
         }
     }
 
-    fn output(rid: u64, finished: bool, state: &str) -> RequestStepOutput {
+    fn out(rid: u64, finished: bool, state: &str) -> RequestStepOutput {
         RequestStepOutput {
             request_id: rid,
             new_token_ids: vec![],
@@ -211,56 +189,114 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "sha256-hash-algo"))]
+    fn bh(h: u64) -> crate::kvcache::BackendBlockHash {
+        [h]
+    }
+    #[cfg(feature = "sha256-hash-algo")]
+    fn bh(h: u64) -> crate::kvcache::BackendBlockHash {
+        [h, 0, 0, 0]
+    }
+
+    fn sched_with(rids: &[u64]) -> SchedSnapshot {
+        let mut s = SchedSnapshot::new();
+        for &rid in rids {
+            s.admit(super::super::sched::ReqProgress::new(rid, 100));
+        }
+        s
+    }
+
     #[test]
-    fn apply_sse_drops_finished_request() {
-        let mut m = IncrementalMirror::new(1024);
-        m.insert_request(1, &[10, 20], vec![0, 1]);
-        m.insert_request(2, &[30, 40], vec![2, 3]);
-        let s = step(vec![output(1, true, "DECODE"), output(2, false, "DECODE")], vec![], vec![]);
-        m.apply_sse(&s);
+    fn insert_and_prefix_match() {
+        let mut m = IncrementalMirror::new();
+        m.insert_request(1, &[10, 20, 30]);
+        assert_eq!(m.prefix_match(&[10, 20, 30]), 3);
+        assert_eq!(m.prefix_match(&[10, 20]), 2);
+        assert_eq!(m.prefix_match(&[40]), 0);
         assert_eq!(m.in_flight_count(), 1);
+    }
+
+    #[test]
+    fn finish_removes_request() {
+        let mut m = IncrementalMirror::new();
+        m.insert_request(1, &[10, 20]);
+        m.insert_request(2, &[10, 30]);
+        let s = sched_with(&[2]); // 1 already finished, sched dropped it
+        let step = step(vec![out(1, true, "DECODE")], vec![], vec![], vec![]);
+        m.apply_sse(&step, &s);
+        assert_eq!(m.in_flight_count(), 1);
+        // 1's branch (10→20) is gone, but [10] itself is still cached by
+        // rid 2's prefix → longest match for [10,20] is the leading [10].
+        assert_eq!(m.prefix_match(&[10, 20]), 1);
+        assert_eq!(m.prefix_match(&[10, 30]), 2); // 2 still there
+    }
+
+    #[test]
+    fn abort_removes_request() {
+        let mut m = IncrementalMirror::new();
+        m.insert_request(1, &[10, 20]);
+        let s = sched_with(&[]); // sched dropped 1 in parallel
+        let step = step(vec![], vec![], vec![1], vec![]);
+        m.apply_sse(&step, &s);
+        assert_eq!(m.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn preempt_removes_request() {
+        let mut m = IncrementalMirror::new();
+        m.insert_request(1, &[10, 20]);
+        // sched will push 1 back to waiting (with reset progress) in
+        // parallel; from mirror's POV the request needs re-admission
+        // so its hashes are dropped.
+        let s = sched_with(&[1]);
+        let step = step(vec![], vec![], vec![], vec![1]);
+        m.apply_sse(&step, &s);
+        assert_eq!(m.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn evict_orphan_hash_drops_when_owner_not_in_flight() {
+        let mut m = IncrementalMirror::new();
+        m.insert_request(1, &[10, 20]);
+        // sched no longer has rid 1 (e.g. an old finish we never saw);
+        // mirror still does. Engine evicts hash 10. Self-arbitration
+        // should drop it.
+        let s = sched_with(&[]);
+        let step = step(vec![], vec![bh(10)], vec![], vec![]);
+        m.apply_sse(&step, &s);
         assert_eq!(m.prefix_match(&[10]), 0);
-        assert_eq!(m.prefix_match(&[30]), 1);
     }
 
     #[test]
-    fn apply_sse_drops_aborted_request() {
-        let mut m = IncrementalMirror::new(1024);
-        m.insert_request(1, &[10, 20], vec![0, 1]);
-        let s = step(vec![], vec![], vec![1]);
-        m.apply_sse(&s);
-        assert_eq!(m.in_flight_count(), 0);
+    fn evict_keeps_in_flight_owner_intact() {
+        let mut m = IncrementalMirror::new();
+        m.insert_request(1, &[10, 20]);
+        let s = sched_with(&[1]); // 1 still in flight
+        // Rare per Group B Point 1, but if the SSE claims to evict
+        // hash 10 of an in-flight request, v1 swallows.
+        let step = step(vec![], vec![bh(10)], vec![], vec![]);
+        m.apply_sse(&step, &s);
+        // Mirror untouched.
+        assert_eq!(m.prefix_match(&[10, 20]), 2);
     }
 
     #[test]
-    fn apply_sse_evicts_blocks_before_finishing() {
-        let mut m = IncrementalMirror::new(1024);
-        m.insert_request(1, &[10, 20, 30], vec![0, 1, 2]);
-        // The leaf block (index 2) is evicted in the same step as request
-        // 1 finishes. Eviction-then-finish ordering inside apply_sse
-        // ensures the request bookkeeping is gone after both events.
-        let s = step(vec![output(1, true, "DECODE")], vec![2], vec![]);
-        m.apply_sse(&s);
-        assert_eq!(m.in_flight_count(), 0);
+    fn evict_unknown_hash_is_noop() {
+        let mut m = IncrementalMirror::new();
+        m.insert_request(1, &[10, 20]);
+        let s = sched_with(&[1]);
+        let step = step(vec![], vec![bh(99)], vec![], vec![]);
+        m.apply_sse(&step, &s);
+        assert_eq!(m.prefix_match(&[10, 20]), 2);
     }
 
     #[test]
-    fn apply_sse_keeps_preempted_request() {
-        let mut m = IncrementalMirror::new(1024);
-        m.insert_request(1, &[10, 20], vec![0, 1]);
-        let mut s = step(vec![], vec![], vec![]);
-        s.preempted_ids = vec![1];
-        m.apply_sse(&s);
-        // Preempted requests retain their mirror entry (will be re-prefilled).
-        assert_eq!(m.in_flight_count(), 1);
-    }
-
-    #[test]
-    fn apply_sse_unknown_finish_is_noop() {
-        let mut m = IncrementalMirror::new(1024);
-        m.insert_request(1, &[10, 20], vec![0, 1]);
-        let s = step(vec![output(99, true, "DECODE")], vec![], vec![]);
-        m.apply_sse(&s);
+    fn duplicate_insert_replaces() {
+        let mut m = IncrementalMirror::new();
+        m.insert_request(1, &[10, 20]);
+        m.insert_request(1, &[40, 50]);
+        assert_eq!(m.prefix_match(&[10]), 0);
+        assert_eq!(m.prefix_match(&[40, 50]), 2);
         assert_eq!(m.in_flight_count(), 1);
     }
 }

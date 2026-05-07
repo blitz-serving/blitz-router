@@ -1,42 +1,50 @@
 // PCtx — per-replica predictor context owned by the colocation controller.
 //
-// Three-layer state model:
+// Three-layer state model (Phase 3 lock):
 //
-//   * L1 — `IncrementalMirror`. Per-replica overlay of the in-flight
-//     prefix-cache state. Updated by `on_admit` (speculative ADD) and
-//     `on_sse` (eviction / finish absorption via `apply_sse`).
+//   * L1 — `IncrementalMirror`. Per-replica overlay of in-flight prefix
+//     hashes (V=ReqId trie). Updated by `on_admit` (insert) and
+//     `on_sse` (apply_sse: finish/abort/preempt + self-arbitrating
+//     evict). See `mirror.rs` and `req_id_tree.rs`.
 //   * L2 — `LinregCorrected` regressor (offline-trained inner model
 //     wrapped by an online linear correction). Updated by `on_sse`'s
-//     piggyback `observe_step` call. Has no notion of admission and is
-//     unaffected by `on_admit`. There is no L2 "drop" — calibration is
+//     piggyback `observe_step` call. No "drop" — calibration is
 //     monotonically incremental over the process lifetime.
 //   * L3 — `EphemeralRollout`. A single-slot Option<…> holding the
-//     most recent `query()`'s `RolloutBuffer` plus the candidate id and
-//     SSE step id at which it was anchored. Drop / rebuild semantics
-//     live entirely on this field; see field doc on `ephemeral`.
+//     most recent `query()`'s `RolloutBuffer` plus the candidate id
+//     and SSE step id at which it was anchored. Drop / rebuild
+//     semantics live entirely on this field.
 //
-// Public API (the three triggers):
+// Plus an auxiliary state used by the L1/L2 paths and consumed by
+// `query`'s schedule loop:
 //
-//   * `query(candidate_id) -> RolloutGist` — speculative rollout for a
-//     candidate request. Stores the rollout buffer in L3 keyed by the
-//     candidate id and the current SSE step id; returns the gist for
-//     the caller (the policy scheduler).
-//   * `on_admit(request_id)` — invoked by `policy_runner` immediately
-//     after the chosen <name>-q policy commits a request to this
-//     replica's commit buffer. Promotes a matching L3 buffer from
-//     "candidate-bound" to "baseline" (`candidate_id := None`), or
-//     marks L3 stale if the admitted request did not match.
-//   * `on_sse(step)` — SSE consumer hook (piggyback). Drives L2
-//     calibration, absorbs the step into L1 via `apply_sse`, and
-//     enforces the L3 invariant: when the engine still has prefill
-//     work in progress (`prefill_token_budget < token_budget`) the
-//     ephemeral buffer must be non-empty; if it isn't, schedule a
-//     rebuild.
+//   * **`SchedSnapshot`** — per-request progress (waiting / running)
+//     for every request the router has dispatched to this replica.
+//     Mirrors the engine's own scheduling lifecycle without trying
+//     to be a KV-cache manager (mirror handles cache state). Cloned
+//     and rolled forward inside `query_sim` (Phase 3 algorithm).
 //
-// Phase-2 status: L1 + L2 paths are fully wired. L3 lifecycle bits
-// (storage, anchor, promote-or-rebuild markers) are in place but the
-// rollout algorithm itself (`query_sim`) and the rebuild routine are
-// stubbed and tracked by Phase-3.
+// Lock discipline (NEVER take in a different order):
+//
+//   `sched → mirror → ephemeral`
+//
+// Every mutating method documents which locks it touches; tests in
+// the same module rely on this order being respected.
+//
+// Public API — three triggers, locked in Phase 2 / refined in Phase 3:
+//
+//   * `query(candidate_id) -> RolloutGist` — speculative rollout for
+//     a candidate. Phase-3 work fills in the schedule loop; the
+//     current Phase-2 placeholder still lives here pending T8.
+//   * `on_admit(entry: &Entry)` — admission. Inserts into both
+//     `sched.waiting` and `mirror`; runs the L3 promote-or-drop
+//     branch. Signature widened in Phase 3 (T5) so the simulator can
+//     pull `input_length` and `block_hash_state.get_hashes()` from
+//     the entry.
+//   * `on_sse(batch, m)` — SSE event from the engine: drives L2
+//     calibration, syncs `sched`, runs `mirror.apply_sse`, enforces
+//     the L3 invariant. Phase-3 (T6/T7) adds the SchedSnapshot sync
+//     and the F3 cross-check.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -47,11 +55,11 @@ use super::batch::BatchForPredictor;
 use super::mirror::IncrementalMirror;
 use super::predictor::TrainedPredictor;
 use super::rollout::{RolloutBuffer, RolloutGist};
+use super::sched::SchedSnapshot;
 
 /// L3 — single-slot ephemeral rollout. Identified by the candidate id
 /// at the time of `query`, anchored to the SSE step id observed when
-/// the rollout was constructed (used by `on_sse` to detect stale L3
-/// state across an SSE event boundary).
+/// the rollout was constructed.
 #[derive(Debug)]
 struct EphemeralRollout {
     /// Candidate id this rollout was generated for. `None` after a
@@ -63,42 +71,35 @@ struct EphemeralRollout {
 }
 
 pub struct PCtx {
-    /// L2 — online-corrected predictor (linreg wrapper around an inner
-    /// ML model). `Mutex` because `TrainedPredictor::calibrate` takes
-    /// `&mut self`. The critical section is microseconds; std `Mutex`
-    /// is fine.
+    /// L2.
     regressor: Mutex<Box<dyn TrainedPredictor>>,
-    /// L1 — per-replica incremental KV-cache mirror. Updated by
-    /// admission / eviction. Read by the outer DES rollout.
+    /// L1.
     mirror: Mutex<IncrementalMirror>,
-    /// L3 — at most one rollout buffer at a time. `None` is a legal
-    /// state when (a) no `query` has run yet, or (b) the engine has
-    /// transitioned into a decode-only steady-state (no prefill work
-    /// pending), in which case the buffer's only legal content would
-    /// be empty anyway.
+    /// L3.
     ephemeral: Mutex<Option<EphemeralRollout>>,
+    /// Per-request progress. Cloned by `query` for rollout simulation.
+    /// Distinct from L1 mirror in that it carries lifecycle progress
+    /// (PREFILL / DECODE token counts) but **not** prefix hashes.
+    sched: Mutex<SchedSnapshot>,
     /// Monotonic engine step id observed by the most recent `on_sse`
     /// call. Used as the anchor for newly created `EphemeralRollout`s
     /// and as the freshness check in `on_sse`'s invariant maintenance.
-    /// Atomic because `query()` reads it without locking the regressor
-    /// or mirror Mutexes.
     last_sse_step_id: AtomicU64,
 }
 
 impl PCtx {
-    pub fn new(regressor: Box<dyn TrainedPredictor>, num_blocks: usize) -> Self {
+    pub fn new(regressor: Box<dyn TrainedPredictor>) -> Self {
         Self {
             regressor: Mutex::new(regressor),
-            mirror: Mutex::new(IncrementalMirror::new(num_blocks)),
+            mirror: Mutex::new(IncrementalMirror::new()),
             ephemeral: Mutex::new(None),
+            sched: Mutex::new(SchedSnapshot::new()),
             last_sse_step_id: AtomicU64::new(0),
         }
     }
 
-    /// L2 predict + calibrate in one critical section. Returns the
-    /// `(predicted_ms, actual_ms)` pair so the caller can emit
-    /// per-step Prometheus histograms. This method is the only L2
-    /// mutation point.
+    /// L2 predict + calibrate in one critical section. Returns
+    /// `(predicted_ms, actual_ms)` for metric emission.
     pub fn observe_step(&self, batch: &BatchForPredictor, actual_ms: f32) -> (f32, f32) {
         let mut g = self.regressor.lock().expect("PCtx regressor poisoned");
         let predicted = g.predict(batch);
@@ -106,20 +107,18 @@ impl PCtx {
         (predicted, actual_ms)
     }
 
-    /// L2 predict-only (no calibration). Available for forward-looking
-    /// scoring; not used by the SSE hot path.
+    /// L2 predict-only (no calibration).
     pub fn predict(&self, batch: &BatchForPredictor) -> f32 {
         self.regressor.lock().expect("PCtx regressor poisoned").predict(batch)
     }
 
-    /// L1 ADD (low-level). Used both by `on_admit` (speculative
-    /// admission ADD with placeholder indices once the index story is
-    /// finalised) and by unit tests. Idempotent per request_id.
-    pub fn insert_in_flight(&self, request_id: u64, hashes: &[u64], indices: Vec<u64>) {
+    /// L1 INSERT (low-level, public for unit tests). Production call
+    /// site is `on_admit`.
+    pub fn insert_in_flight(&self, request_id: u64, hashes: &[u64]) {
         self.mirror
             .lock()
             .expect("PCtx mirror poisoned")
-            .insert_request(request_id, hashes, indices);
+            .insert_request(request_id, hashes);
     }
 
     /// L1 REMOVE (low-level). Used by `on_sse` via `apply_sse`; kept
@@ -129,27 +128,28 @@ impl PCtx {
         self.mirror.lock().expect("PCtx mirror poisoned").remove_request(request_id);
     }
 
-    /// L1 EVICT (low-level). Same scope as `remove_in_flight`.
-    pub fn evict_blocks(&self, block_indices: &[u64]) {
-        self.mirror.lock().expect("PCtx mirror poisoned").remove_blocks(block_indices);
-    }
-
-    /// In-flight request count, observability only.
+    /// In-flight request count (mirror's view). Observability only.
     pub fn in_flight_count(&self) -> usize {
         self.mirror.lock().expect("PCtx mirror poisoned").in_flight_count()
     }
 
+    /// In-flight request count (sched's view — both queues).
+    /// Observability only; in steady state should equal `in_flight_count`.
+    pub fn sched_in_flight_count(&self) -> usize {
+        self.sched.lock().expect("PCtx sched poisoned").in_flight_count()
+    }
+
     // ---------- L3 trigger surface ----------
 
-    /// Trigger A — speculative rollout for `candidate_id`. Caches the
-    /// resulting buffer in L3 anchored to the latest SSE step id and
-    /// returns the projected gist for the policy scheduler.
+    /// Trigger A — speculative rollout for `candidate_id`. Caches
+    /// the resulting buffer in L3 anchored to the latest SSE step id
+    /// and returns the projected gist for the policy scheduler.
     ///
-    /// Phase-2 placeholder: the rollout algorithm itself (`query_sim`)
-    /// is not yet implemented. This method returns the default gist
-    /// (all-None) and stores an empty buffer at the L3 slot so that
-    /// the lifecycle (`on_admit` promotion, `on_sse` invariant) can
-    /// be exercised end-to-end ahead of the Phase-3 algorithm work.
+    /// Phase-3 status: the schedule loop itself (T8) is not yet
+    /// implemented. This method returns the default gist (all-None)
+    /// and stores an empty buffer at the L3 slot so that the
+    /// lifecycle (`on_admit` promotion, `on_sse` invariant) can be
+    /// exercised end-to-end ahead of T8.
     pub fn query(&self, candidate_id: u64) -> RolloutGist {
         let anchor = self.last_sse_step_id.load(Ordering::Acquire);
         let buffer = RolloutBuffer { candidate_id: Some(candidate_id), ..Default::default() };
@@ -162,34 +162,26 @@ impl PCtx {
         gist
     }
 
-    /// Trigger B — admission. Called by `policy_runner` once the
-    /// scheduler commits `request_id` to this replica's commit buffer.
+    /// Trigger B — admission. Called by `policy_runner` after the
+    /// scheduler commits the request to this replica's commit buffer.
     ///
-    /// L3 effect: if the cached ephemeral was generated by a `query`
-    /// for the same candidate, promote it (`candidate_id := None`) so
-    /// it becomes the baseline trajectory observed from now on. If
-    /// the cached ephemeral targeted a different candidate (or there
-    /// is no cached ephemeral), drop L3; the next `on_sse` invariant
-    /// check will trigger a baseline rebuild.
+    /// L1: insert the request's prefix hashes into the mirror.
+    /// Sched: enqueue a fresh `ReqProgress` at the back of `waiting`.
+    /// L3: promote-or-drop branch.
     ///
-    /// L1 effect: the speculative ADD is intentionally a no-op in
-    /// Phase 2. At admission time the engine has not yet allocated
-    /// block indices for the new request, so insertion into the
-    /// mirror's index-keyed tree is deferred to the first SSE event
-    /// that surfaces the request via `cur_used_block_ids`. Phase 3
-    /// will move this earlier once the placeholder-index design is
-    /// settled.
+    /// Phase-3 widens the signature from `request_id: u64` to
+    /// `&Entry` so this method can pull both `input_length` and
+    /// `block_hash_state.get_hashes()` without re-borrowing.
+    /// Wired in T5; the current body still takes only `request_id`
+    /// pending that change.
     pub fn on_admit(&self, request_id: u64) {
         let mut slot = self.ephemeral.lock().expect("PCtx ephemeral poisoned");
         match slot.as_mut() {
             Some(e) if e.candidate_id == Some(request_id) => {
-                // Promote: rollout was for this exact request, so its
-                // contents now describe the actual baseline trajectory.
                 e.candidate_id = None;
                 e.buffer.candidate_id = None;
             }
             _ => {
-                // Stale or absent. Drop and let `on_sse` rebuild.
                 *slot = None;
             }
         }
@@ -198,27 +190,27 @@ impl PCtx {
     /// Trigger C — SSE event from the engine for this replica.
     ///
     /// 1. L2: piggyback predict + calibrate (returned for metrics).
-    /// 2. L1: absorb the step's evictions / finishes / aborts via
-    ///    `IncrementalMirror::apply_sse`.
-    /// 3. L3 invariant: if the engine has prefill work in progress
-    ///    after this step (heuristic: `prefill_tokens > 0` OR there
-    ///    is at least one PREFILL output) AND the ephemeral slot is
-    ///    empty, mark a rebuild request so the next `query()` (or a
-    ///    Phase-3 background rebuilder) regenerates a baseline. The
-    ///    actual rebuild routine is Phase-3.
+    /// 2. L1: absorb the step's evictions / finishes / aborts /
+    ///    preempts via `IncrementalMirror::apply_sse`.
+    /// 3. L3 invariant: when the engine still has prefill work after
+    ///    this step, the ephemeral buffer must be non-empty; if it
+    ///    isn't, log (Phase-3 T7 will add the F3 cross-check that
+    ///    upgrades anchor-based stale detection to
+    ///    composition-based).
     ///
-    /// Returns the L2 `(predicted, actual)` pair so the caller can
-    /// emit Prometheus histograms; mirrors the previous
-    /// `observe_step` return shape.
+    /// Phase-3 will additionally call `SchedSnapshot::sync(m)` here
+    /// (T6) so the schedule loop in `query` always has fresh state.
     pub fn on_sse(&self, batch: &BatchForPredictor, m: &EngineStepOutput) -> (f32, f32) {
-        // L2 first — keeps the regressor critical section short.
+        // L2 first.
         let (predicted, actual) = self.observe_step(batch, m.latency as f32);
 
-        // L1 absorption.
-        self.mirror.lock().expect("PCtx mirror poisoned").apply_sse(m);
+        // L1 absorption — needs sched lock for the evict path's
+        // self-arbitration (`is_in_flight`). Lock order: sched → mirror.
+        let sched_guard = self.sched.lock().expect("PCtx sched poisoned");
+        self.mirror.lock().expect("PCtx mirror poisoned").apply_sse(m, &sched_guard);
+        drop(sched_guard);
 
-        // Bump the SSE anchor *before* the invariant check so any new
-        // ephemeral built downstream is anchored to this step.
+        // Bump anchor before L3 maintenance.
         self.last_sse_step_id.store(m.step_id, Ordering::Release);
 
         // L3 invariant maintenance.
@@ -226,34 +218,21 @@ impl PCtx {
         let mut slot = self.ephemeral.lock().expect("PCtx ephemeral poisoned");
         match (slot.as_mut(), engine_has_prefill) {
             (Some(e), true) => {
-                // Stale-buffer detection: if the buffer is anchored to
-                // an older SSE step the predicted slots no longer line
-                // up with reality. Phase-3 will validate-or-rebuild
-                // in-place; for now we conservatively drop, prompting
-                // the next `query`/rebuild to start fresh.
                 if e.sse_anchor_step_id < m.step_id.saturating_sub(1) {
                     *slot = None;
                 }
             }
             (None, true) => {
-                // Invariant violated: engine has prefill work but L3
-                // is empty. Phase-3 will trigger a baseline rebuild
-                // here. For now leave None and trace.
                 tracing::trace!(
                     target: "simulator",
                     step = m.step_id,
-                    "L3 invariant: engine has prefill but ephemeral is empty (rebuild deferred to Phase 3)"
+                    "L3 invariant: engine has prefill but ephemeral is empty (rebuild deferred to T8)"
                 );
             }
             (Some(_), false) => {
-                // Engine is decode-only — empty buffer is legal here,
-                // and a non-empty buffer should be discarded since its
-                // remaining-prefill predictions are vacuously stale.
                 *slot = None;
             }
-            (None, false) => {
-                // Both legal: nothing to do.
-            }
+            (None, false) => {}
         }
 
         (predicted, actual)
@@ -279,9 +258,6 @@ impl PCtx {
 /// Heuristic for "engine has prefill work in progress". A step is
 /// counted as having prefill work if it processed any prefill tokens
 /// (`prefill_tokens > 0`) or if any output is in the PREFILL state.
-/// The `prefill_token_budget < total_token_budget` test would be more
-/// precise but the totals aren't carried on the SSE payload, so the
-/// per-step view is what we have.
 fn step_has_prefill(m: &EngineStepOutput) -> bool {
     if m.prefill_tokens > 0 {
         return true;
@@ -299,8 +275,6 @@ mod tests {
     use crate::simulator::predictor::{LinregCorrected, Predictor};
     use nohash_hasher::{BuildNoHashHasher, IntMap};
 
-    /// A predictor that returns `value`, useful for closed-form testing of
-    /// the linreg correction loop without any CSV/file dependency.
     struct ConstPredictor(f32);
     impl Predictor for ConstPredictor {
         fn predict(&self, _b: &BatchForPredictor) -> f32 {
@@ -311,14 +285,13 @@ mod tests {
     fn pctx() -> PCtx {
         let inner = Arc::new(ConstPredictor(1.0));
         let trained = Box::new(LinregCorrected::new(inner, &SimulatorConfig::default()));
-        PCtx::new(trained, 1024)
+        PCtx::new(trained)
     }
 
     fn step(
         step_id: u64,
         prefill_tokens: usize,
         outputs: Vec<RequestStepOutput>,
-        evicted: Vec<u64>,
     ) -> EngineStepOutput {
         EngineStepOutput {
             prefill_tokens,
@@ -327,7 +300,7 @@ mod tests {
             outputs,
             new_block_hashes: Vec::new(),
             evicted_block_hashes: Vec::new(),
-            evicted_block_ids: evicted,
+            evicted_block_ids: Vec::new(),
             cur_used_block_ids: IntMap::with_hasher(BuildNoHashHasher::default()),
             new_block_hashes_ids: IntMap::with_hasher(BuildNoHashHasher::default()),
             op_exec_log: None,
@@ -357,7 +330,7 @@ mod tests {
 
         let inner = Arc::new(ConstPredictor(2.0));
         let trained = Box::new(LinregCorrected::new(inner, &cfg));
-        let pctx = PCtx::new(trained, 1024);
+        let pctx = PCtx::new(trained);
 
         let batch = BatchForPredictor::default();
         let mut last_pred = 0.0f32;
@@ -376,13 +349,11 @@ mod tests {
     #[test]
     fn mirror_lifecycle() {
         let pctx = pctx();
-        pctx.insert_in_flight(1, &[10, 20], vec![0, 1]);
-        pctx.insert_in_flight(2, &[10, 30], vec![2, 3]);
+        pctx.insert_in_flight(1, &[10, 20]);
+        pctx.insert_in_flight(2, &[10, 30]);
         assert_eq!(pctx.in_flight_count(), 2);
         pctx.remove_in_flight(1);
         assert_eq!(pctx.in_flight_count(), 1);
-        pctx.evict_blocks(&[3]);
-        assert_eq!(pctx.in_flight_count(), 0);
     }
 
     #[test]
@@ -398,14 +369,14 @@ mod tests {
         let _ = pctx.query(7);
         pctx.on_admit(7);
         assert!(pctx.ephemeral_present());
-        assert_eq!(pctx.ephemeral_candidate(), None); // promoted = baseline
+        assert_eq!(pctx.ephemeral_candidate(), None);
     }
 
     #[test]
     fn on_admit_drops_mismatched_candidate() {
         let pctx = pctx();
         let _ = pctx.query(7);
-        pctx.on_admit(99); // different request admitted
+        pctx.on_admit(99);
         assert!(!pctx.ephemeral_present());
     }
 
@@ -420,19 +391,16 @@ mod tests {
     fn on_sse_decode_only_step_drops_ephemeral() {
         let pctx = pctx();
         let _ = pctx.query(7);
-        // decode-only step: prefill_tokens=0, no PREFILL outputs.
-        let s = step(1, 0, vec![out(7, "DECODE", false)], vec![]);
+        let s = step(1, 0, vec![out(7, "DECODE", false)]);
         let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
-        // Decode-only path drops the ephemeral entirely.
         assert!(!pctx.ephemeral_present());
     }
 
     #[test]
     fn on_sse_keeps_fresh_ephemeral_when_engine_has_prefill() {
         let pctx = pctx();
-        let _ = pctx.query(7); // anchored at step_id=0
-        // Fresh: anchor (0) >= step_id - 1 (= 0).
-        let s = step(1, 32, vec![out(7, "PREFILL", false)], vec![]);
+        let _ = pctx.query(7);
+        let s = step(1, 32, vec![out(7, "PREFILL", false)]);
         let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
         assert!(pctx.ephemeral_present());
     }
@@ -440,9 +408,8 @@ mod tests {
     #[test]
     fn on_sse_drops_stale_ephemeral_when_engine_has_prefill() {
         let pctx = pctx();
-        let _ = pctx.query(7); // anchored at step_id=0
-        // Stale: anchor (0) < step_id - 1 (= 4).
-        let s = step(5, 32, vec![out(7, "PREFILL", false)], vec![]);
+        let _ = pctx.query(7);
+        let s = step(5, 32, vec![out(7, "PREFILL", false)]);
         let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
         assert!(!pctx.ephemeral_present());
     }
@@ -450,18 +417,17 @@ mod tests {
     #[test]
     fn on_sse_drives_l1_apply_sse() {
         let pctx = pctx();
-        pctx.insert_in_flight(1, &[10, 20], vec![0, 1]);
-        pctx.insert_in_flight(2, &[10, 30], vec![2, 3]);
-        let s = step(1, 0, vec![out(1, "DECODE", true), out(2, "DECODE", false)], vec![]);
+        pctx.insert_in_flight(1, &[10, 20]);
+        pctx.insert_in_flight(2, &[10, 30]);
+        let s = step(1, 0, vec![out(1, "DECODE", true), out(2, "DECODE", false)]);
         let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
-        // Request 1 finished → mirror should drop it.
         assert_eq!(pctx.in_flight_count(), 1);
     }
 
     #[test]
     fn on_sse_advances_anchor() {
         let pctx = pctx();
-        let s = step(42, 0, vec![], vec![]);
+        let s = step(42, 0, vec![]);
         let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
         assert_eq!(pctx.last_sse_step_id.load(Ordering::Acquire), 42);
     }

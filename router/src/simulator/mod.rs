@@ -16,7 +16,9 @@ mod config;
 mod mirror;
 mod pctx;
 mod predictor;
+mod req_id_tree;
 mod rollout;
+mod sched;
 mod vidur_rf;
 
 pub use batch::BatchForPredictor;
@@ -24,7 +26,9 @@ pub use config::{ModelKind, SimulatorConfig};
 pub use mirror::IncrementalMirror;
 pub use pctx::PCtx;
 pub use predictor::{LinregCorrected, Predictor, TrainedPredictor};
+pub use req_id_tree::RadixTreeReqIdHash;
 pub use rollout::{RolloutBuffer, RolloutGist, RolloutSlot};
+pub use sched::{ReqProgress, SchedSnapshot};
 pub use vidur_rf::VidurRfPredictor;
 
 use std::sync::{Arc, OnceLock};
@@ -53,7 +57,7 @@ pub fn init_with_predictor(
     for _ in 0..num_replicas {
         let trained: Box<dyn TrainedPredictor> =
             Box::new(LinregCorrected::new(inner.clone(), config));
-        pctxs.push(Arc::new(PCtx::new(trained, config.num_blocks)));
+        pctxs.push(Arc::new(PCtx::new(trained)));
     }
     SIMULATOR
         .set(SimulatorRuntime { pctxs, block_size: config.block_size })
