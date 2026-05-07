@@ -57,7 +57,11 @@ pub fn init_with_predictor(
     for _ in 0..num_replicas {
         let trained: Box<dyn TrainedPredictor> =
             Box::new(LinregCorrected::new(inner.clone(), config));
-        pctxs.push(Arc::new(PCtx::new(trained)));
+        pctxs.push(Arc::new(PCtx::new(
+            trained,
+            config.block_size as u32,
+            config.token_budget,
+        )));
     }
     SIMULATOR
         .set(SimulatorRuntime { pctxs, block_size: config.block_size })
@@ -132,18 +136,23 @@ pub(crate) fn on_admit(replica_index: usize, entry: &crate::policies::Entry) {
     );
 }
 
-/// Speculative rollout query for a `(replica_index, candidate_id)`
+/// Speculative rollout query for a `(replica_index, candidate)`
 /// pair. Returns `None` when the simulator is inactive or the index
-/// is out of range; otherwise returns the projected `RolloutGist` for
-/// the policy scheduler.
+/// is out of range.
 ///
-/// Phase-2 status: `PCtx::query` is a structural placeholder — it
-/// returns a default-empty gist while exercising the L3 storage
-/// lifecycle. The real DES algorithm lands in Phase 3.
-pub fn query(replica_index: usize, candidate_id: u64) -> Option<RolloutGist> {
+/// The caller (eventual `simulator-q` policy) supplies all candidate
+/// fields plus the SCtx prefix-hit count; the simulator combines
+/// the latter with its own L1 mirror lookup via A2's max-merge rule.
+pub fn query(
+    replica_index: usize,
+    candidate_id: u64,
+    input_length: u32,
+    candidate_hashes: &[u64],
+    sctx_prefix_hits: usize,
+) -> Option<RolloutGist> {
     let rt = SIMULATOR.get()?;
     let pctx = rt.pctxs.get(replica_index)?;
-    Some(pctx.query(candidate_id))
+    Some(pctx.query(candidate_id, input_length, candidate_hashes, sctx_prefix_hits))
 }
 
 /// Reconstruct an approximate `BatchForPredictor` from the just-completed
