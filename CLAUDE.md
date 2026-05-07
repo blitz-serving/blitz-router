@@ -12,7 +12,7 @@ This repo was extracted from `blitz-infer-pack`, retaining only the Rust router.
 The legacy `blitzllm-backend` mode (with C++ BlitzTransformer engine over gRPC) has been removed. Only `vllm-backend` remains; it is the default and effectively non-optional. Entry point: `vllmlet.rs` → `VllmClient` (HTTP) plus `/v1/metrics` SSE consumption.
 
 ### Why proto/ and rust-proto/ still exist
-The protobuf-generated types (`Tokens`, `GeneratedText`, `Batch`, `Request`, `CachedBatch`, etc.) are used as **internal data structures** throughout the router (queue, infer, validation, colocation) regardless of backend. They are NOT used as a wire protocol — the actual transport is HTTP/SSE via `VllmClient` in `vllmlet.rs`. `rust-grpc` is similarly vestigial.
+The protobuf-generated types (`Tokens`, `GeneratedText`, `Batch`, `Request`, `CachedBatch`, etc.) are used as **internal data structures** throughout the router (queue, infer, validation, colocation) regardless of backend. They are NOT used as a wire protocol — the actual transport is HTTP/SSE via `VllmClient` in `vllmlet.rs`.
 
 ### lmetric Data Flow
 ```
@@ -109,9 +109,7 @@ blitz-router/
 │   └── implementation.md        # `policy!` macro: rewrite table + lint allowlist
 ├── proto/generate.proto     # Protobuf type definitions (used as internal data structures)
 ├── rust-proto/              # Protobuf codegen (internal types only)
-├── rust-grpc/               # gRPC metadata injection (vestigial)
 ├── request-sim/             # Request simulator (git submodule, main branch)
-├── tokenizer/               # Tokenizer library
 ├── formal/tlaplus/          # TLA+ spec — colocation/CompletionLoop entry lifecycle (NOT a policy spec)
 ├── config/                  # 39+ TOML configs (lmetric*, metrics_*, dense_*, eval_*)
 ├── exps/                    # Experiment harness & generated configs
@@ -219,7 +217,7 @@ cargo build -p router --features aibrix-q
 
 `vllm-backend` is the only backend and is enabled implicitly by other features that depend on it; you do not normally need to pass it explicitly. The legacy `blitzllm-backend`, `impl_blitz`, `impl_fast_pro`, `impl_live_pro` features no longer exist.
 
-**Cargo workspace members**: `tokenizer`, `router`, `request-sim`, `rust-grpc`, `rust-proto`
+**Cargo workspace members**: `router`, `request-sim`, `rust-proto`, `policy-dsl`
 
 ## Configuration
 

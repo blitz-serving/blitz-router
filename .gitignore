@@ -11,6 +11,10 @@ compile_commands.json
 .vscode/
 .idea/
 
+# OS
+.DS_Store
+**/.DS_Store
+
 # Logs
 log/
 log_home

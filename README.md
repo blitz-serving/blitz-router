@@ -29,9 +29,7 @@ Full docs: <https://blitz-serving.github.io/blitzscale-doc/>
 ```
 blitz-router/
 ├── router_v2/          # Rust router (~8,400 LOC)
-├── rust-grpc/          # gRPC metadata injection
 ├── rust-proto/         # Protobuf generated Rust code
-├── tokenizer/          # Tokenizer library
 ├── request-sim/        # Request simulator (git submodule)
 ├── proto/              # gRPC proto definitions
 ├── config/             # TOML deployment configs
