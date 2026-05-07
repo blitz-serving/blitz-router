@@ -191,6 +191,13 @@ pub(crate) struct VllmRequestStatus {
     pub is_finished: bool,
     #[serde(default)]
     pub hit_token_cnt: u64,
+    /// Per-request KV cache size (in tokens) at the START of this step —
+    /// i.e. tokens already prefill-computed before the engine ran this step.
+    /// Source: `output.num_computed_tokens` in
+    /// `vllm/v1/engine/__init__.py::simplified_engine_core_outputs_to_dict`.
+    /// Used by the latency simulator to reconstruct `BatchForPredictor`.
+    #[serde(default)]
+    pub prev_computed_tokens: u32,
 }
 
 fn default_state() -> String {

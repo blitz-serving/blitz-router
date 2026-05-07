@@ -130,3 +130,7 @@ join-shortest-q-weight = []
 stochastic-schedule = []
 determinent-schedule = []
 # ----------------------- #
+
+# --- Latency Simulator (orthogonal to policies; piggyback observability) --- #
+simulator = []
+# ----------------------- #

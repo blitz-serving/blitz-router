@@ -13,6 +13,8 @@ mod radixtrie;
 mod policies;
 mod colocation;
 mod metrics;
+#[cfg(feature = "simulator")]
+pub mod simulator;
 mod statistic;
 mod vllmlet;
 #[cfg(feature = "zmq-backend")]

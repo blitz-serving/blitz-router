@@ -65,6 +65,12 @@ pub struct RequestStepOutput {
     pub is_finished: bool,
     /// Number of prompt tokens that hit the KV cache (prefix cache hit).
     pub hit_token_cnt: u64,
+    /// KV-cache size (in tokens) for this request at the START of this step.
+    /// Equivalently: tokens already prefill-computed before the engine ran
+    /// this step. Used by the latency simulator to reconstruct
+    /// `BatchForPredictor` accurately.
+    #[serde(default)]
+    pub prev_computed_tokens: u32,
 }
 
 /// Aggregated output from a single engine step.
@@ -279,6 +285,7 @@ mod vllm_impl {
                 state: s.state,
                 is_finished: s.is_finished,
                 hit_token_cnt: s.hit_token_cnt,
+                prev_computed_tokens: s.prev_computed_tokens,
             })
             .collect();
 

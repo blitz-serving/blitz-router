@@ -457,6 +457,8 @@ mod task_assignment {
 
             // fast path: update metrics
             let tbt = Duration::from_millis(m.latency);
+            #[cfg(feature = "simulator")]
+            crate::simulator::record_step(replica_index, &m);
             let mut metric_delta = LMetricDec::new(&tbt);
             // NOTE: `prefill_tokens` doesn't count hit tokens, while
             //       `all_tokens` does count hit tokens
@@ -468,6 +470,7 @@ mod task_assignment {
                     ref state,
                     is_finished,
                     hit_token_cnt,
+                    prev_computed_tokens: _,
                 } = *request_status;
                 match state.as_str() {
                     "PREFILL" => {
@@ -688,6 +691,7 @@ mod task_assignment {
                     state,
                     is_finished,
                     hit_token_cnt,
+                    prev_computed_tokens: _,
                 } = request_status;
 
                 // Update request lifecycle phase tracking

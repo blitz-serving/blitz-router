@@ -95,6 +95,36 @@ struct Args {
     /// or "python" (embed Python jinja2 via PyO3, requires feature python-chat-template).
     #[clap(long, env, default_value = "none")]
     chat_template_mode: String,
+
+    // ---- Latency simulator (feature `simulator`, piggyback observer) ---- //
+    /// Enable the latency simulator subsystem (requires --features simulator).
+    /// When enabled, observes admissions made by the active <name>-q policy
+    /// and emits predicted-vs-actual histograms via the metrics endpoint.
+    /// Does not influence routing.
+    #[clap(long, env, default_value_t = false)]
+    enable_simulator: bool,
+    /// Directory containing precomputed Vidur prediction grids
+    /// ({op}_{model_hash}_predictions.csv).
+    #[clap(long, env, default_value = "/nvme/zkx/Modified_vidur/cache")]
+    simulator_cache_dir: String,
+    /// Vidur model hash. Qwen2.5: 9f4b3b9a, Llama3: d29f0375.
+    #[clap(long, env, default_value = "9f4b3b9a")]
+    simulator_model_hash: String,
+    /// Number of transformer layers in the served model.
+    #[clap(long, env, default_value_t = 28)]
+    simulator_num_layers: usize,
+    /// Treat the served model as Mixture-of-Experts (uses moe_linear grid
+    /// instead of the dense MLP grids).
+    #[clap(long, env, default_value_t = false)]
+    simulator_moe: bool,
+    /// Online linreg correction learning rate.
+    #[clap(long, env, default_value_t = 1e-6)]
+    simulator_learning_rate: f32,
+    /// Reject calibration samples whose |actual - corrected| exceeds this
+    /// many milliseconds. Set high (e.g. 10000) when starting from a stopgap
+    /// grid that's way off, low (e.g. 5) when the grid is well-calibrated.
+    #[clap(long, env, default_value_t = 10000.0)]
+    simulator_outlier_threshold_ms: f32,
 }
 
 fn main() -> Result<(), RouterError> {
@@ -128,6 +158,13 @@ fn main() -> Result<(), RouterError> {
         statistic_path,
         model_name,
         chat_template_mode,
+        enable_simulator,
+        simulator_cache_dir,
+        simulator_model_hash,
+        simulator_num_layers,
+        simulator_moe,
+        simulator_learning_rate,
+        simulator_outlier_threshold_ms,
     } = args;
 
     // Validate args
@@ -264,6 +301,42 @@ fn main() -> Result<(), RouterError> {
                 })
                 .collect()
         };
+
+        // Latency simulator initialisation (piggyback observer).
+        // No-op unless built with --features simulator AND --enable-simulator.
+        #[cfg(feature = "simulator")]
+        if enable_simulator {
+            use router::simulator::{init_vidur_rf, ModelKind, SimulatorConfig};
+            let mut sim_cfg = SimulatorConfig::default();
+            sim_cfg.cache_dir = std::path::PathBuf::from(&simulator_cache_dir);
+            sim_cfg.model_hash = simulator_model_hash.clone();
+            sim_cfg.num_layers = simulator_num_layers;
+            sim_cfg.model_kind = if simulator_moe { ModelKind::Moe } else { ModelKind::Llama };
+            sim_cfg.learning_rate = simulator_learning_rate;
+            sim_cfg.linreg_outlier_threshold_ms = simulator_outlier_threshold_ms;
+            sim_cfg.block_size = kvcache_block_size;
+            let n = engine_clients.len();
+            tracing::info!(
+                target: "simulator",
+                replicas = n,
+                cache_dir = %simulator_cache_dir,
+                model_hash = %simulator_model_hash,
+                "INITIALISING_SIMULATOR"
+            );
+            if let Err(e) = init_vidur_rf(n, sim_cfg) {
+                tracing::error!(target: "simulator", error = %e, "SIMULATOR_INIT_FAILED");
+                return Err(RouterError::ArgumentValidation(format!(
+                    "simulator init failed: {e}"
+                )));
+            }
+            tracing::info!(target: "simulator", "SIMULATOR_READY");
+        }
+        #[cfg(not(feature = "simulator"))]
+        if enable_simulator {
+            return Err(RouterError::ArgumentValidation(
+                "--enable-simulator requires --features simulator at build time".to_string(),
+            ));
+        }
 
         // ZMQ backend: create engine clients from IPC/TCP socket addresses.
         #[cfg(feature = "zmq-backend")]

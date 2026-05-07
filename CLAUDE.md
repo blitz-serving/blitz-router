@@ -73,20 +73,28 @@ blitz-router/
 │   ├── statistic.rs         # Statistics collection
 │   ├── health.rs            # Health checks
 │   ├── error.rs             # Error types
-│   └── policies/            # Scheduling policies — DSL-driven
-│       ├── mod.rs               # ~160 LOC: Entry, QueuePro, TaskAssigner aliases
-│       ├── policy_trait.rs      # `Policy` trait (5 lines, lowering target)
-│       ├── policy_runner.rs     # `PolicyRunner<P: Policy>` queue runner
-│       ├── dsl_runtime.rs       # combinators, reducers, named pure fns,
-│       │                        # `apply_default_after`, Observation schema
-│       ├── simple.rs            # random-q, round-robin-q, join-shortest-q,
-│       │                        # join-shortest-q-weight, least-wait-token-q,
-│       │                        # bounded-most-hit-q (each is 1–10 line `policy!`)
-│       ├── lmetric.rs           # lmetric-q
-│       ├── bailian.rs           # bailian-impl-q
-│       ├── aibrix.rs            # aibrix-q
-│       ├── dynamo.rs            # dynamo-q + dynamo-po-q (T1 + T2 ablation)
-│       └── preble/              # preble-q + cost_model/histogram/router utils
+│   ├── policies/            # Scheduling policies — DSL-driven
+│   │   ├── mod.rs               # ~160 LOC: Entry, QueuePro, TaskAssigner aliases
+│   │   ├── policy_trait.rs      # `Policy` trait (5 lines, lowering target)
+│   │   ├── policy_runner.rs     # `PolicyRunner<P: Policy>` queue runner
+│   │   ├── dsl_runtime.rs       # combinators, reducers, named pure fns,
+│   │   │                        # `apply_default_after`, Observation schema
+│   │   ├── simple.rs            # random-q, round-robin-q, join-shortest-q,
+│   │   │                        # join-shortest-q-weight, least-wait-token-q,
+│   │   │                        # bounded-most-hit-q (each is 1–10 line `policy!`)
+│   │   ├── lmetric.rs           # lmetric-q
+│   │   ├── bailian.rs           # bailian-impl-q
+│   │   ├── aibrix.rs            # aibrix-q
+│   │   ├── dynamo.rs            # dynamo-q + dynamo-po-q (T1 + T2 ablation)
+│   │   └── preble/              # preble-q + cost_model/histogram/router utils
+│   └── simulator/           # Latency simulator (feature-gated `simulator`)
+│       ├── mod.rs               # PCtx + observe_admission + calibrate_step entry points
+│       ├── batch.rs             # BatchForPredictor (inner-regressor input)
+│       ├── predictor.rs         # Predictor + TrainedPredictor traits
+│       ├── rollout.rs           # RolloutBuffer + RolloutSlot (outer-DES output)
+│       ├── mirror.rs            # PCtx incremental mirror around radixtrie
+│       ├── vidur_rf.rs          # VidurRfPredictor (port of everparadise LlamaPredictor)
+│       └── config.rs            # SimulatorConfig (CSV path, model_hash, granularities)
 ├── policy-dsl/              # ~150 LOC proc-macro: parser + lint + lowering
 │   └── src/{lib,ast,parse,check,lower}.rs
 ├── docs/dsl-schema.md       # DSL spec (§1–§13)
@@ -150,6 +158,26 @@ Broadcasting: NvlCasting, RdmaCasting, TanzCasting, RdmaSending, RdmaLoading
 
 ### Conditional Compilation (policy selection)
 The scheduling policy is selected at compile time via Cargo features. Each policy file under `policies/` is gated by `#[cfg(feature = "<name>-q")]`. Exactly one policy feature should be enabled per build.
+
+### Latency Simulator (feature-gated `simulator`, ORTHOGONAL to `<name>-q`)
+
+`router/src/simulator/` is a per-replica latency-prediction subsystem. Two layers:
+- **Inner regressor** (`predictor.rs`, `vidur_rf.rs`): offline-trained ML model (port of Vidur RandomForest from `tmp/blitz-infer-pack-sim/`) with online linear-regression correction (`LinregCorrected`). `Predictor::predict(&BatchForPredictor) -> f32` (ms).
+- **Outer discrete-event simulator** (`rollout.rs`): rolls forward engine steps from the current `ScheduleContext`, calls the inner regressor per step, fills a `RolloutBuffer`. Stop condition: `waiting==∅ && chunked_prefill_in_progress==∅`. (RolloutBuffer types defined; full DES `query_sim` driver is a follow-up.)
+
+**Piggyback mode (default and only mode today):** when built with `--features simulator,<name>-q` AND launched with `--enable-simulator`, the simulator observes admissions made by the active `<name>-q` policy via a hook in `colocation.rs::completion_event_loop` (calls `simulator::record_step` per SSE event), and emits Prometheus histograms (`simulator_predicted_ms`, `simulator_actual_ms`, `simulator_signed_error_ms`, `simulator_abs_error_ms`, `simulator_relative_error`). **It does not influence routing.** The `Policy` trait is untouched; PCtx is owned by a process-wide `OnceLock` initialised from `main.rs` at startup.
+
+**CLI flags** (all behind `simulator` feature; no-op otherwise):
+- `--enable-simulator` — turn the subsystem on at runtime.
+- `--simulator-cache-dir <PATH>` — directory containing `{op}_{hash}_predictions.csv` files. Default `/nvme/zkx/Modified_vidur/cache`.
+- `--simulator-model-hash <HASH>` — Vidur model hash. Qwen2.5: `9f4b3b9a`, Llama3: `d29f0375`.
+- `--simulator-num-layers <N>` — transformer block count (default 28).
+- `--simulator-moe` — use MoE op set (`moe_linear` instead of dense MLP grids).
+- `--simulator-learning-rate <LR>` — online linreg SGD step size (default 1e-4).
+
+A future `simulator-q` policy that consumes `RolloutBuffer` for dispatch decisions will be added once piggyback validates the simulator's accuracy.
+
+See `.claude/memory/project_lmetric_predictor_design.md` for the full design rationale and decision log.
 
 ## Build
 
