@@ -114,7 +114,3 @@ def instantiate_template(template_path: str, archive_home: str) -> dict[str, lis
     return instance_map
 
 
-if __name__ == "__main__":
-    template_path = "config/test_distserve.toml"
-    archive_home = os.path.join("./log_home", timestamp())
-    instantiate_template(template_path, archive_home)
