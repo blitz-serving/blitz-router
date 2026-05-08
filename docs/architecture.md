@@ -28,24 +28,29 @@ part of the system this document describes:
 graph LR
     Cli["External HTTP clients"]
     subgraph Router_System["blitz-router (the system)"]
-        Server["server.rs<br/>(Axum HTTP)"]
-        Infer["infer.rs<br/>+ queue + policy"]
-        Coloc["colocation.rs<br/>(per-replica event loops)"]
-        Server --> Infer --> Coloc
+        direction TB
+        Front["FRONT<br/>Gateway"]
+        Middle["MIDDLE<br/>Scheduler"]
+        Back["BACK<br/>Engine driver"]
+        Front --> Middle --> Back
     end
     Eng["External inference engines<br/>(N replicas, HTTP + SSE)"]
 
-    Cli -- HTTP --> Server
-    Coloc -- HTTP /generate --> Eng
-    Eng -. SSE /v1/metrics .-> Coloc
+    Cli -- HTTP --> Front
+    Back -- HTTP /generate --> Eng
+    Eng -. SSE /v1/metrics .-> Back
 ```
 
-- **HTTP request path** (solid lines): a client request enters at
-  `server.rs`, is admitted by the scheduler, and is dispatched to one
-  external engine; the streamed response flows back the same way.
+- **HTTP request path** (solid lines): a client request enters at the
+  gateway, is admitted by the scheduler, and is dispatched by the
+  engine driver to one external engine; the streamed response flows
+  back the same way.
 - **SSE metrics path** (dotted line): every engine pushes one event per
-  forward step on its `/v1/metrics` endpoint. `colocation.rs` consumes
-  all engines' streams concurrently. **No gRPC anywhere.**
+  forward step on its `/v1/metrics` endpoint. The engine driver
+  consumes all engines' streams concurrently and forwards the unified
+  `EngineStepOutput` to the scheduler. **No gRPC anywhere.**
+
+The three layers and their internals are detailed in §2 onward.
 
 For concreteness: in lmetric the inbound clients are typically
 `request-sim` (a Rust load generator) and the outbound engines are
