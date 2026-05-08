@@ -117,7 +117,7 @@ blitz-router/
 ├── rust-proto/              # Protobuf codegen (internal types only)
 ├── request-sim/             # Request simulator (git submodule, main branch)
 ├── formal/tlaplus/          # TLA+ spec — colocation/CompletionLoop entry lifecycle (NOT a policy spec)
-└── docs/                    # architecture.md, refactor-plan.md, reproduce.md
+└── docs/                    # architecture/ (split into per-topic files; start at architecture/README.md), refactor-plan.md, reproduce.md
 ```
 
 ## Key Components

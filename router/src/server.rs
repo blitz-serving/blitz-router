@@ -55,7 +55,7 @@ async fn tgi_deprecated() -> (StatusCode, Json<ErrorResponse>) {
             error: concat!(
                 "This endpoint is deprecated and no longer served. ",
                 "Use `POST /v1/chat/completions` (OpenAI-compatible) instead. ",
-                "See `docs/architecture.md` §1 for the supported API surface."
+                "See `docs/architecture/README.md` §1 for the supported API surface."
             )
             .to_string(),
             error_type: "deprecated_endpoint".to_string(),
