@@ -63,7 +63,33 @@ the live traffic actually originates and terminates.
 ## 2. Three-layer architecture
 
 The system decomposes into three layers, each with a single
-responsibility and a thin contract to the next:
+responsibility and a thin contract to the next.
+
+### Reading the diagrams
+
+Every diagram in this document follows two visual conventions, used
+together to keep **containment** ("A is part of B") and **wiring**
+("data flows between A and B") readable on the same picture:
+
+- **Containment** is shown by **subgraph nesting**. If module `M` lives
+  visually inside subgraph `L`, it is part of layer `L`. If state
+  block `S` lives inside `Infer`, then `Infer` owns it. Nested
+  subgraphs are nested ownership.
+- **Wiring** is shown by **arrows**, with the kind of relationship
+  encoded in the arrow style:
+
+  | Style                | Meaning                                   |
+  |----------------------|-------------------------------------------|
+  | `==>` (solid thick)  | hot-path data flow (the request lifecycle / reply stream) |
+  | `-->` (solid thin)   | call / control transfer                   |
+  | `-.->` (dashed)      | shared `Arc` reference, read-only access, or out-of-band observation (simulator piggyback) |
+  | label on the arrow   | the type that crosses, or the operation invoked |
+
+Arrows always go between specific module nodes — never between layer
+subgraphs in the abstract — so you can read off WHICH module on the
+source side talks to WHICH module on the destination side.
+
+### Layer overview
 
 ```mermaid
 flowchart TB
@@ -77,36 +103,48 @@ flowchart TB
 
     subgraph FRONT["FRONT — Gateway"]
         direction LR
-        f_server["server<br/>(axum routes)"]:::front
-        f_validation["validation<br/>(tokenize + check)"]:::front
-        f_chat["chat_template"]:::front
-        f_model["model_config"]:::front
-        f_health["health"]:::front
+        f_server["server.rs<br/>(axum routes)"]:::front
+        f_validation["validation.rs<br/>(tokenize)"]:::front
+        f_chat["chat_template.rs"]:::front
+        f_model["model_config.rs"]:::front
+        f_health["health.rs"]:::front
     end
 
     subgraph MIDDLE["MIDDLE — Scheduler"]
         direction LR
-        m_infer["infer<br/>(orchestrator)"]:::middle
-        m_queue["queue +<br/>PolicyRunner&lt;P&gt;"]:::middle
-        m_policies["policies<br/>(DSL-driven)"]:::middle
-        m_coloc["colocation<br/>(per-replica loops)"]:::middle
-        m_state["ScheduleContext<br/>+ LMetric + KVCache"]:::middle
-        m_sim["simulator<br/>(piggyback, optional)"]:::middle
+        m_infer["infer::Infer<br/>(orchestrator)"]:::middle
+        m_runner["policies::PolicyRunner&lt;P&gt;<br/>(decision pipeline +<br/>SPMC commit buffers)"]:::middle
+        m_coloc["colocation::<br/>{work,completion}_event_loop[i]"]:::middle
+        m_state["Vec&lt;Arc&lt;Mutex&lt;ScheduleContext&gt;&gt;&gt;<br/>(LMetric + kvcache, shared)"]:::middle
+        m_sim["simulator<br/>(optional piggyback)"]:::middle
     end
 
     subgraph BACK["BACK — Engine driver"]
         direction LR
-        b_trait["EngineClient +<br/>EngineStepReceiver<br/>(traits)"]:::back
-        b_vllm["VllmClient<br/>(HTTP + SSE)"]:::back
-        b_zmq["ZmqEngineClient<br/>(ZMQ, alt)"]:::back
+        b_trait["engine_client::<br/>EngineClient + EngineStepReceiver<br/>(trait surface)"]:::back
+        b_vllm["vllmlet::VllmClient<br/>(HTTP+SSE adapter)"]:::back
+        b_zmq["zmq_engine::ZmqEngineClient<br/>(ZMQ, alt)"]:::back
     end
 
-    InCli -- HTTP --> FRONT
-    FRONT -- "ValidGenerateRequest +<br/>response_tx (mpsc)" --> MIDDLE
-    MIDDLE -- "EngineClient::add_request" --> BACK
-    BACK -- "HTTP /generate" --> OutEng
-    OutEng -. "SSE /v1/metrics<br/>→ EngineStepOutput" .-> BACK
-    BACK -. "EngineStepReceiver::recv_step" .-> MIDDLE
+    %% Hot-path request flow (module-to-module, not layer-to-layer)
+    InCli == "POST /generate" ==> f_server
+    f_server == "validate" ==> f_validation
+    f_validation == "ValidGenerateRequest +<br/>response_tx" ==> m_infer
+    m_infer == "queue.append(Entry)" ==> m_runner
+    m_runner == "next_request reply" ==> m_coloc
+    m_coloc == "EngineClient::add_request" ==> b_trait
+    b_trait -- impl --> b_vllm
+    b_vllm == "HTTP /generate" ==> OutEng
+
+    %% SSE return path (dashed = out-of-band relative to request lifecycle)
+    OutEng -. "SSE /v1/metrics" .-> b_vllm
+    b_vllm -. "recv_step → EngineStepOutput" .-> m_coloc
+    m_coloc -. "WRITE: insert/evict<br/>block hashes, lmetric" .-> m_state
+
+    %% Shared-state reads
+    m_runner -. "READ for policy decision" .-> m_state
+    m_coloc -. on_sse / on_admit .-> m_sim
+    m_runner -. on_admit .-> m_sim
 ```
 
 **Layer responsibilities**:
@@ -183,27 +221,93 @@ This is by far the biggest layer.
 | `policies/`           | DSL-driven scheduling policies (18 of them, one per upstream baseline). One Cargo feature flag selects the active policy at compile time | dir  |
 | `simulator/`          | Latency simulator (feature `simulator`). Piggyback observer over the active policy. Uses `radixtree::RadixTreeReqIdHash` for its L1 mirror | dir  |
 
-Scheduler-internal dependency arrows:
+Scheduler-internal containment + wiring:
 
 ```mermaid
-graph TD
-    infer["infer (Infer)"] --> validation_in["⇡ from gateway"]
-    infer --> queue["queue<br/>= TaskAssigner = PolicyRunner&lt;P&gt;"]
-    infer --> coloc["colocation<br/>(ColocationController)"]
-    queue --> policies["policies/<br/>(P : Policy)"]
-    coloc --> ec["⇣ to engine layer<br/>(EngineClient trait)"]
-    coloc --> sctx["metrics.rs<br/>(ScheduleContext)"]
-    policies --> sctx
-    policies --> kv["kvcache<br/>(BlockHashState, PrefixBlockHash)"]
-    kv --> rt["radixtree::<br/>RadixTreeBlockHash"]
-    sim["simulator/<br/>(feature 'simulator')"] -. piggyback .-> coloc
-    sim -. piggyback .-> policies
-    sim --> rt2["radixtree::<br/>RadixTreeReqIdHash"]
+flowchart TB
+    classDef middle fill:#f3e5f5,stroke:#7b1fa2,color:#4a148c
+    classDef state fill:#fff9c4,stroke:#f57c00,color:#bf360c
+    classDef seam fill:#fafafa,stroke:#bbb,stroke-dasharray:4 4,color:#666
+
+    fromFront["⇡ from FRONT (Gateway)<br/>queue.append(Entry)"]:::seam
+    toBack["⇣ to BACK (Engine driver)<br/>EngineClient::add_request"]:::seam
+    fromBack["⇡ from BACK<br/>recv_step → EngineStepOutput"]:::seam
+
+    %% Containment: Infer owns the two big subsystems below it
+    subgraph infer["infer::Infer (orchestrator) — owns everything below"]
+        direction TB
+
+        %% PolicyRunner with its three explicit roles as nested nodes
+        subgraph pr["policies::PolicyRunner&lt;P&gt;"]
+            direction TB
+            pr_in["queue_task<br/>(single async task,<br/>command-driven inbox)"]:::middle
+            pr_dec["P::schedule(...)<br/>★ ROLE: replica decision<br/>(reads ScheduleContext)"]:::middle
+            pr_buf["per-replica commit buffers<br/>Vec&lt;VecDeque&lt;(u64, Entry)&gt;&gt;<br/>★ ROLE: SPMC queue<br/>(1 producer task → N consumer work loops)"]:::middle
+            pr_in --> pr_dec --> pr_buf
+        end
+
+        %% ColocationController spawns the per-replica loop pair
+        subgraph cc["colocation::ColocationController — N replica pairs"]
+            direction LR
+            cc_work["work_event_loop[i]<br/>(N tasks)"]:::middle
+            cc_done["completion_event_loop[i]<br/>(N tasks)"]:::middle
+        end
+    end
+
+    %% Per-replica state lives OUTSIDE Infer's owned subgraph (it is shared,
+    %% not owned by any single subsystem). Both PolicyRunner and the loops
+    %% hold cloned Arc handles to it.
+    subgraph state["Vec&lt;Arc&lt;Mutex&lt;ScheduleContext&gt;&gt;&gt; — shared per-replica state"]
+        direction LR
+        sx_lm["LMetric<br/>(load counters)"]:::state
+        sx_kv["PrefixBlockHash<br/>(kvcache RadixTree)"]:::state
+    end
+
+    sim["simulator (feature-gated)<br/>piggyback observer<br/>uses radixtree::RadixTreeReqIdHash"]:::middle
+
+    %% Sharing: same Arc cloned into the decision side and the SSE-consumer side
+    pr -. "Arc clone" .-> state
+    cc -. "Arc clone" .-> state
+
+    %% Hot-path data flow (request lifecycle)
+    fromFront ==> pr_in
+    pr_buf == "next_request(replica_i)" ==> cc_work
+    cc_work ==> toBack
+    fromBack ==> cc_done
+
+    %% State accesses — make the read/write asymmetry explicit
+    pr_dec -. "READ: pick min by<br/>cache hit / load metric" .-> state
+    cc_done == "WRITE: insert/evict<br/>block hashes, lmetric.tbt" ==> state
+
+    %% Simulator piggyback
+    pr_in -. on_admit .-> sim
+    cc_done -. on_sse .-> sim
 ```
 
-Two scheduler-internal invariants worth knowing:
-- **`completion_event_loop` is the only writer to a replica's
-  `ScheduleContext.block_hash`.** Every reader takes the same `Mutex`.
+How to read PolicyRunner's three roles off this picture:
+
+1. **It is an SPMC queue.** Read it as: one `queue_task` producer
+   feeds `pr_buf`, which fans out to N `work_event_loop[i]` consumers
+   via `next_request(replica_i)`. The `pr_buf` node carries the
+   `★ ROLE: SPMC queue` annotation precisely so this fan-out is
+   readable.
+2. **It owns the kvcache (via shared `Arc`).** The `PolicyRunner` and
+   the `ColocationController` both hold `Arc` clones into the same
+   `state` block (`Vec<Arc<Mutex<ScheduleContext>>>`). The
+   `ScheduleContext` contains both `LMetric` and `PrefixBlockHash`
+   (the kvcache trie). Visible via the two dashed `Arc clone` arrows.
+3. **It is wired to engine SSE — through the shared state.** Trace the
+   SSE chain on the diagram: external engine → `b_vllm.recv_step` →
+   `cc_done` → `WRITE` into `state` → `pr_dec` `READ` from `state`.
+   The wiring is *indirect*: PolicyRunner does not subscribe to SSE
+   itself; it sees the engine's effects by reading state that the
+   completion loop is the SOLE writer of.
+
+Two scheduler-internal invariants that fall out of the picture:
+- **`completion_event_loop` is the only writer to
+  `ScheduleContext.block_hash`** — only `cc_done` has a thick `WRITE`
+  arrow into `state`. Every other access is dashed (`READ` or
+  `Arc clone`).
 - **Policies are picked at compile time.** Exactly one `<name>-q`
   Cargo feature is enabled per build → exactly one
   `TaskAssigner = PolicyRunner<XQ>` alias is monomorphised into the
@@ -258,16 +362,35 @@ scheduler's abstract `add_request` / `recv_step` calls into HTTP+SSE
 | `vllmlet.rs`           | `VllmClient` — reqwest-based HTTP client to a single engine; `/v1/metrics` SSE consumer that yields `VllmMetric` | 309  |
 | `zmq_engine.rs`        | Alternate ZMQ transport (feature-gated `zmq-backend`)                          | 595  |
 
-Two adapters, one trait:
+Two adapters, one trait — the trait is the layer's only contract
+surface and the impls are containment-equal siblings under it:
 
 ```mermaid
-graph TD
-    coloc["⇡ from scheduler<br/>(colocation.rs)"] --> trait["EngineClient<br/>+ EngineStepReceiver<br/>(engine_client.rs)"]
-    trait --> v["VllmClient<br/>(vllmlet.rs)"]
-    trait --> z["ZmqEngineClient<br/>(zmq_engine.rs)"]
-    v -- HTTP /generate --> ext["⇣ external engine"]
-    ext -. SSE .-> v
-    z -- ZMQ pub/sub --> ext
+flowchart TB
+    classDef back fill:#fff3e0,stroke:#e65100,color:#bf360c
+    classDef ext fill:#f5f5f5,stroke:#999,stroke-dasharray:4 4,color:#666
+    classDef seam fill:#fafafa,stroke:#bbb,stroke-dasharray:4 4,color:#666
+
+    fromMid["⇡ from MIDDLE<br/>EngineClient::add_request /<br/>EngineStepReceiver::recv_step"]:::seam
+    extEng["⇣ External engine"]:::ext
+
+    subgraph BACK["BACK — Engine driver"]
+        direction TB
+        b_trait["engine_client::EngineClient<br/>+ engine_client::EngineStepReceiver<br/>(trait surface,<br/>EngineStepOutput unified type)"]:::back
+        subgraph adapters["impls (one selected by feature flag)"]
+            direction LR
+            b_vllm["vllmlet::VllmClient<br/>(reqwest HTTP +<br/>eventsource-client SSE)"]:::back
+            b_zmq["zmq_engine::ZmqEngineClient<br/>(ZMQ, feature 'zmq-backend')"]:::back
+        end
+        b_trait -- impl --> b_vllm
+        b_trait -- impl --> b_zmq
+    end
+
+    fromMid ==> b_trait
+    b_vllm == "HTTP POST /generate" ==> extEng
+    extEng -. "SSE /v1/metrics" .-> b_vllm
+    b_zmq == "ZMQ pub/sub" ==> extEng
+    extEng -. "ZMQ messages" .-> b_zmq
 ```
 
 The trait surface is small enough to quote in full:
