@@ -925,23 +925,32 @@ mod tests {
 
     // ==================== BUG-targeting property tests ====================
 
-    // --- [BUG] Prop 10: insert() returns wrong count for duplicate hashes ---
-    // RadixTreeBlockHash.insert([6,6], [0,1]) returns 2, but HashTableBlockHash returns 1.
-    // This is a semantic mismatch: RT counts path nodes, HT counts unique hashes.
+    // --- Prop 10: insert() returns the same count from both implementations
+    //              for duplicate hashes with distinct bids ---
+    //
+    // Originally written as a `bug_*` test to *document* a semantic gap:
+    // RadixTreeBlockHash treated each (hash, bid) pair as a new path node
+    // (so `[6, 6]` with bids `[0, 1]` returned 2), while
+    // HashTableBlockHash only counted the unique hash and returned 1.
+    //
+    // The HashTableBlockHash implementation has since been updated to
+    // also track duplicate-hash-with-distinct-bid as a fresh insertion
+    // (the `bids.push(bid); n += 1;` arm in its `and_modify` branch),
+    // so the two implementations now agree. This test is the regression
+    // guard for that agreement — flip it back to a `bug_*` documenting
+    // a divergence if the impls ever disagree again.
     #[test]
-    fn bug_insert_count_duplicate_hashes() {
+    fn insert_count_duplicate_hashes_agrees() {
         let mut rt = RadixTreeBlockHash::new(3);
         let mut ht = HashTableBlockHash::new(3);
 
         let n_rt = rt.insert(&[6, 6], vec![0, 1]);
         let n_ht = ht.insert(&[6, 6], vec![0, 1]);
 
-        // Document the semantic difference
+        // Both impls now count each (hash, bid) pair as a new insertion.
         assert_eq!(n_rt, 2, "RT: both positions are new path nodes");
-        assert_eq!(n_ht, 1, "HT: hash 6 is only counted once as new");
-        // NOTE: This means BlockHash::insert() return value is NOT consistent
-        // between implementations. If the router relies on this value being
-        // the same, this is a bug.
+        assert_eq!(n_ht, 2, "HT: each (hash, bid) pair counts as new");
+        assert_eq!(n_rt, n_ht, "RT and HT must agree on insert() count");
     }
 
     // --- [BUG] Prop 11: get() semantic mismatch for non-prefix query ---
