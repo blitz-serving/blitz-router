@@ -17,7 +17,7 @@ See `router/Cargo.toml` for the full list of policy feature flags.
 
 ## Run
 
-Modify the scripts in `scripts/e2e/` with your own PATH, logging directory and `address:port`. The e2e scripts launch backend, router, and client sequentially.
+End-to-end tests (router + yaullm + request-sim orchestration) live in the [MetricsTestRunner](https://github.com/blitz-serving/MetricsTestRunner) repo, not here.
 
 ## Docs
 
@@ -31,7 +31,6 @@ blitz-router/
 ├── rust-proto/         # Protobuf generated Rust code (internal types)
 ├── request-sim/        # Request simulator (git submodule)
 ├── proto/              # Protobuf type definitions (internal data structures)
-├── scripts/            # e2e tests, batch utils
 └── docs/               # Documentation
 ```
 

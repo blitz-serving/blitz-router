@@ -109,8 +109,6 @@ blitz-router/
 ├── rust-proto/              # Protobuf codegen (internal types only)
 ├── request-sim/             # Request simulator (git submodule, main branch)
 ├── formal/tlaplus/          # TLA+ spec — colocation/CompletionLoop entry lifecycle (NOT a policy spec)
-├── exps/                    # Experiment harness & generated configs
-├── scripts/                 # e2e tests, batch utils, debug tools
 └── docs/                    # reproduce.md
 ```
 

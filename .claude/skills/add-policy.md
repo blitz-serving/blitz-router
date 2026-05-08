@@ -142,4 +142,4 @@ rg new-policy-q --glob '!target/**'
 
 Expected hits: `Cargo.toml` (1), `mod.rs` (TaskAssigner cfg + catch-all exclusion = 2), policy source file (1), file header doc (1), `docs/dsl/policies.md` (1), `CLAUDE.md` (1). Anything else is either a sibling-policy mention (fine) or a stale reference you missed (fix).
 
-If the policy is camera-ready-relevant, also update `scripts/e2e/{build_all_policies,run_sweep,run_camera_ready}.sh` (`POLICY_BINS` map + binary list).
+If the policy is camera-ready-relevant, also update the corresponding sweep config in [MetricsTestRunner](https://github.com/blitz-serving/MetricsTestRunner) (`sweeps/lmetric_camera_ready_*.toml`).
