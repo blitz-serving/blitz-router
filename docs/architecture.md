@@ -127,6 +127,14 @@ flowchart TB
     end
 
     %% Hot-path request flow (module-to-module, not layer-to-layer)
+    %% Force vertical layer order (FRONT on top, BACK at bottom).
+    %% These are invisible edges — they pin the layout but render nothing.
+    %% Needed because the SSE return path b_vllm -.-> m_coloc creates a
+    %% back-edge that the auto-layout otherwise tries to "fix" by placing
+    %% BACK alongside FRONT instead of below MIDDLE.
+    FRONT ~~~ MIDDLE
+    MIDDLE ~~~ BACK
+
     InCli == "POST /generate" ==> f_server
     f_server == "validate" ==> f_validation
     f_validation == "ValidGenerateRequest +<br/>response_tx" ==> m_infer
