@@ -20,9 +20,15 @@ you have never read this codebase before, start here.
 classes of external counterparts — neither lives in this repo, neither is
 part of the system this document describes:
 
-- **Inbound**: HTTP clients (OpenAI-style chat-completions or `/generate`).
-- **Outbound**: inference engines, addressed over HTTP for `/generate` and
-  subscribed over Server-Sent Events on `/v1/metrics`.
+- **Inbound**: HTTP clients using the OpenAI-compatible chat-completions
+  API (`POST /v1/chat/completions`). The router also still serves
+  TGI-style endpoints (`/generate`, `/generate_stream`, `/invocations`)
+  inherited from upstream text-generation-inference for backward
+  compatibility, but new clients use the OpenAI surface.
+- **Outbound**: inference engines, addressed over HTTP for
+  `POST /v1/completions` (pre-tokenized token IDs over vLLM's
+  OpenAI-compatible completions endpoint) and subscribed over
+  Server-Sent Events on `/v1/metrics`.
 
 ```mermaid
 graph LR
@@ -37,7 +43,7 @@ graph LR
     Eng["External inference engines<br/>(N replicas, HTTP + SSE)"]
 
     Cli -- HTTP --> Front
-    Back -- HTTP /generate --> Eng
+    Back -- HTTP POST /v1/completions --> Eng
     Eng -. SSE /v1/metrics .-> Back
 ```
 
@@ -135,14 +141,14 @@ flowchart TB
     FRONT ~~~ MIDDLE
     MIDDLE ~~~ BACK
 
-    InCli == "POST /generate" ==> f_server
+    InCli == "POST /v1/chat/completions" ==> f_server
     f_server == "validate" ==> f_validation
     f_validation == "ValidGenerateRequest +<br/>response_tx" ==> m_infer
     m_infer == "queue.append(Entry)" ==> m_runner
     m_runner == "next_request reply" ==> m_coloc
     m_coloc == "EngineClient::add_request" ==> b_trait
     b_trait -- impl --> b_vllm
-    b_vllm == "HTTP /generate" ==> OutEng
+    b_vllm == "POST /v1/completions" ==> OutEng
 
     %% SSE return path (dashed = out-of-band relative to request lifecycle)
     OutEng -. "SSE /v1/metrics" .-> b_vllm
@@ -202,7 +208,7 @@ a `ValidGenerateRequest` plus a response channel to the scheduler.
 
 | Module (current path) | Role                                                                          | LOC  |
 |-----------------------|-------------------------------------------------------------------------------|------|
-| `server.rs`           | Axum router. Endpoints: `/generate`, `/generate_stream`, `/v1/chat/completions`, `/info`, `/health`, `/metrics`, `/invocations` | 1143 |
+| `server.rs`           | Axum router. Canonical endpoint: `POST /v1/chat/completions` (OpenAI-compatible). Also serves TGI-legacy endpoints (`/generate`, `/generate_stream`, `/invocations`) for backward compatibility, plus `/info`, `/health`, `/metrics` | 1143 |
 | `validation.rs`       | `Validation` — fan-out of CPU-bound tokenization to a thread pool via `spawn_blocking`; round-robin task; produces `ValidGenerateRequest` | 467  |
 | `chat_template.rs`    | Chat template rendering (Jinja-style or PyO3-backed when feature `python-chat-template` is on) | 340  |
 | `model_config.rs`     | Auto-discovery of `config.json` / `tokenizer_config.json` at startup          | 81   |
@@ -395,7 +401,7 @@ flowchart TB
     end
 
     fromMid ==> b_trait
-    b_vllm == "HTTP POST /generate" ==> extEng
+    b_vllm == "POST /v1/completions" ==> extEng
     extEng -. "SSE /v1/metrics" .-> b_vllm
     b_zmq == "ZMQ pub/sub" ==> extEng
     extEng -. "ZMQ messages" .-> b_zmq
@@ -450,7 +456,7 @@ sequenceDiagram
     Pr->>Wq: commit_buffer[i].push_back(entry)
     Note right of Wq: Middle→Back handoff
     Wq->>Ec: add_request(req)
-    Ec->>En: HTTP POST /generate
+    Ec->>En: HTTP POST /v1/completions
     loop streaming
         En-->>Ec: token chunk (HTTP body)
         Ec-->>If: InferStreamResponse
