@@ -276,14 +276,9 @@ fn main() -> Result<(), RouterError> {
                 }),
         };
 
-        // if pipeline-tag == text-generation we default to return_full_text = true
-        let compat_return_full_text = match &model_info.pipeline_tag {
-            None => {
-                tracing::warn!("no pipeline tag found for model {tokenizer_name}");
-                false
-            }
-            Some(pipeline_tag) => pipeline_tag.as_str() == "text-generation",
-        };
+        // (TGI-era `compat_return_full_text` calculation removed along with
+        // the deprecated /generate handlers — see server::tgi_deprecated.)
+
 
         // Read uris from client_config
         let mut buf = String::new();
@@ -424,7 +419,6 @@ fn main() -> Result<(), RouterError> {
         server::run(
             model_info,
             shard_info,
-            compat_return_full_text,
             max_concurrent_requests,
             max_best_of,
             max_stop_sequences,

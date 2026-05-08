@@ -21,10 +21,11 @@ classes of external counterparts — neither lives in this repo, neither is
 part of the system this document describes:
 
 - **Inbound**: HTTP clients using the OpenAI-compatible chat-completions
-  API (`POST /v1/chat/completions`). The router also still serves
-  TGI-style endpoints (`/generate`, `/generate_stream`, `/invocations`)
-  inherited from upstream text-generation-inference for backward
-  compatibility, but new clients use the OpenAI surface.
+  API (`POST /v1/chat/completions`). The TGI-style URLs (`/`,
+  `/generate`, `/generate_stream`, `/invocations`) are still bound but
+  are **tombstoned** — they return `HTTP 410 Gone` with a JSON body
+  pointing callers at the canonical OpenAI endpoint, so misdirected
+  clients fail loudly instead of silently 404-ing.
 - **Outbound**: inference engines, addressed over HTTP for
   `POST /v1/completions` (pre-tokenized token IDs over vLLM's
   OpenAI-compatible completions endpoint) and subscribed over
@@ -203,12 +204,12 @@ graph TD
 ## 4. Front layer — Gateway
 
 **Responsibility**: be the HTTP face of the system. Accept OpenAI-style
-and TGI-style requests, validate them, render chat templates, hand off
+chat-completions requests, validate them, render chat templates, hand off
 a `ValidGenerateRequest` plus a response channel to the scheduler.
 
 | Module (current path) | Role                                                                          | LOC  |
 |-----------------------|-------------------------------------------------------------------------------|------|
-| `server.rs`           | Axum router. Canonical endpoint: `POST /v1/chat/completions` (OpenAI-compatible). Also serves TGI-legacy endpoints (`/generate`, `/generate_stream`, `/invocations`) for backward compatibility, plus `/info`, `/health`, `/metrics` | 1143 |
+| `server.rs`           | Axum router. Canonical endpoint: `POST /v1/chat/completions` (OpenAI-compatible). Legacy TGI URLs (`/`, `/generate`, `/generate_stream`, `/invocations`) are tombstoned to a single `tgi_deprecated` handler that returns `HTTP 410 Gone`. Plus `/info`, `/health`, `/metrics` | ~755 |
 | `validation.rs`       | `Validation` — fan-out of CPU-bound tokenization to a thread pool via `spawn_blocking`; round-robin task; produces `ValidGenerateRequest` | 467  |
 | `chat_template.rs`    | Chat template rendering (Jinja-style or PyO3-backed when feature `python-chat-template` is on) | 340  |
 | `model_config.rs`     | Auto-discovery of `config.json` / `tokenizer_config.json` at startup          | 81   |

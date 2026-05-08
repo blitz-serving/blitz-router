@@ -52,7 +52,7 @@ blitz-router/
 ├── router/src/              # Rust router (~14,000 LOC)
 │   ├── main.rs              # CLI args & entry point
 │   ├── lib.rs               # Crate root
-│   ├── server.rs            # HTTP server (Axum): /generate, /info, /health, /metrics (~1,140 LOC)
+│   ├── server.rs            # HTTP server (Axum): /v1/chat/completions, /info, /health, /metrics (~755 LOC); TGI URLs tombstoned to HTTP 410
 │   ├── infer.rs             # Inference orchestration (~530 LOC)
 │   ├── queue.rs             # Request queue scaffolding (~380 LOC; policy logic now in policies/)
 │   ├── kvcache.rs           # BlockHashState + HashTableBlockHash (~1,165 LOC)

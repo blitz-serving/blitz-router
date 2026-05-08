@@ -18,7 +18,7 @@ use crate::{
     ScheduleContext, Token,
 };
 
-use crate::{GenerateRequest, PrefillToken};
+use crate::GenerateRequest;
 
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Duration;
@@ -157,7 +157,6 @@ impl Infer {
         let (request_id, _permit, mut stream) = self.generate_stream(request).await?;
 
         // Return values
-        let mut result_prefill = Vec::new();
         let mut result_tokens = Vec::new();
         let mut result_top_tokens = Vec::new();
         let mut result_generated_text = None;
@@ -249,7 +248,6 @@ impl Infer {
 
             Ok(InferResponse {
                 request_id,
-                prefill: result_prefill,
                 tokens: result_tokens,
                 generated_text,
                 queued,
@@ -488,7 +486,6 @@ pub(crate) enum InferStreamResponse {
 #[derive(Debug)]
 pub(crate) struct InferResponse {
     pub(crate) request_id: u64,
-    pub(crate) prefill: Vec<PrefillToken>,
     pub(crate) tokens: Vec<Token>,
     pub(crate) generated_text: GeneratedText,
     pub(crate) queued: Instant,

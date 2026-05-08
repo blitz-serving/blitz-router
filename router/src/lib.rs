@@ -133,9 +133,6 @@ pub(crate) struct GenerateParameters {
     #[schema(nullable = true, default = "100", example = "20")]
     pub max_new_tokens: Option<u32>,
     #[serde(default)]
-    #[schema(nullable = true, default = "null", example = false)]
-    pub return_full_text: Option<bool>,
-    #[serde(default)]
     #[schema(inline, max_items = 4, example = json ! (["photographer"]))]
     pub stop: Vec<String>,
     #[serde(default)]
@@ -144,9 +141,6 @@ pub(crate) struct GenerateParameters {
     #[serde(default)]
     #[schema(default = "false", example = true)]
     pub watermark: bool,
-    #[serde(default)]
-    #[schema(default = "true")]
-    pub details: bool,
     #[serde(default)]
     #[schema(default = "true")]
     pub decoder_input_details: bool,
@@ -172,11 +166,9 @@ pub(crate) fn default_parameters() -> GenerateParameters {
         typical_p: None,
         do_sample: false,
         max_new_tokens: default_max_new_tokens(),
-        return_full_text: None,
         stop: Vec::new(),
         truncate: None,
         watermark: false,
-        details: false,
         decoder_input_details: false,
         seed: None,
         top_n_tokens: None,
@@ -196,32 +188,7 @@ pub(crate) struct GenerateRequest {
     pub(crate) chat_messages: Option<Vec<ChatMessage>>,
 }
 
-#[derive(Clone, Debug, Deserialize, ToSchema)]
-pub(crate) struct CompatGenerateRequest {
-    #[schema(example = "My name is Olivier and I")]
-    pub inputs: String,
-    #[serde(default = "default_parameters")]
-    pub parameters: GenerateParameters,
-    #[serde(default)]
-    #[schema(default = "false")]
-    pub stream: bool,
-}
 
-impl From<CompatGenerateRequest> for GenerateRequest {
-    fn from(req: CompatGenerateRequest) -> Self {
-        Self { inputs: req.inputs, parameters: req.parameters, chat_messages: None }
-    }
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct PrefillToken {
-    #[schema(example = 0)]
-    id: u32,
-    #[schema(example = "test")]
-    text: String,
-    #[schema(nullable = true, example = "-0.34")]
-    logprob: f32,
-}
 
 #[derive(Debug, Serialize, ToSchema, Default)]
 pub struct Token {
@@ -247,66 +214,6 @@ pub(crate) enum FinishReason {
     StopSequence,
 }
 
-#[derive(Serialize, ToSchema)]
-pub(crate) struct BestOfSequence {
-    #[schema(example = "test")]
-    pub generated_text: String,
-    #[schema(example = "length")]
-    pub finish_reason: FinishReason,
-    #[schema(example = 1)]
-    pub generated_tokens: u32,
-    #[schema(nullable = true, example = 42)]
-    pub seed: Option<u64>,
-    pub prefill: Vec<PrefillToken>,
-    pub tokens: Vec<Token>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub top_tokens: Vec<Vec<Token>>,
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct Details {
-    #[schema(example = "length")]
-    pub finish_reason: FinishReason,
-    #[schema(example = 1)]
-    pub generated_tokens: u32,
-    #[schema(nullable = true, example = 42)]
-    pub seed: Option<u64>,
-    pub prefill: Vec<PrefillToken>,
-    pub tokens: Vec<Token>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub best_of_sequences: Option<Vec<BestOfSequence>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub top_tokens: Vec<Vec<Token>>,
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct GenerateResponse {
-    #[schema(example = "test")]
-    pub generated_text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<Details>,
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct StreamDetails {
-    #[schema(example = "length")]
-    pub finish_reason: FinishReason,
-    #[schema(example = 1)]
-    pub generated_tokens: u32,
-    #[schema(nullable = true, example = 42)]
-    pub seed: Option<u64>,
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct StreamResponse {
-    pub token: Token,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub top_tokens: Vec<Token>,
-    #[schema(nullable = true, default = "null", example = "test")]
-    pub generated_text: Option<String>,
-    #[schema(nullable = true, default = "null")]
-    pub details: Option<StreamDetails>,
-}
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ErrorResponse {

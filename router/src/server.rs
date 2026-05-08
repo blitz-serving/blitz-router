@@ -10,15 +10,14 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::health::Health;
-use crate::infer::{InferError, InferResponse, InferStreamResponse};
-use crate::validation::ValidationError;
+use crate::infer::{InferError, InferStreamResponse};
 use crate::engine_client::EngineClient;
 use crate::{
-    BestOfSequence, ChatRenderer, ChatMessage, ChatCompletionRequest, ChatCompletionResponse,
+    ChatRenderer, ChatMessage, ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionChoice, ChatCompletionUsage, ChatCompletionChunk, ChatCompletionChunkChoice,
-    ChatCompletionDelta, CompatGenerateRequest, Details, ErrorResponse,
-    FinishReason, GenerateParameters, GenerateRequest, GenerateResponse, HubModelInfo, Infer, Info,
-    PrefillToken, StreamDetails, StreamResponse, Token, TokenizerRender, Validation,
+    ChatCompletionDelta, ErrorResponse,
+    FinishReason, GenerateParameters, GenerateRequest, HubModelInfo, Infer, Info,
+    Token, TokenizerRender, Validation,
     default_parameters,
 };
 
@@ -36,52 +35,36 @@ use pb::generate::v2::InfoResponse;
 use tokio::signal;
 use tokio::time::Instant;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::{info_span, instrument, Instrument};
+use tracing::instrument;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-/// Generate tokens if `stream == false` or a stream of token if `stream == true`
-#[utoipa::path(
-post,
-tag = "Blitz",
-path = "/",
-request_body = CompatGenerateRequest,
-responses(
-(status = 200, description = "Generated Text",
-content(
-("application/json" = GenerateResponse),
-("text/event-stream" = StreamResponse),
-)),
-(status = 424, description = "Generation Error", body = ErrorResponse,
-example = json ! ({"error": "Request failed during generation"})),
-(status = 429, description = "Model is overloaded", body = ErrorResponse,
-example = json ! ({"error": "Model is overloaded"})),
-(status = 422, description = "Input validation error", body = ErrorResponse,
-example = json ! ({"error": "Input validation error"})),
-(status = 500, description = "Incomplete generation", body = ErrorResponse,
-example = json ! ({"error": "Incomplete generation"})),
-)
-)]
-#[instrument(skip_all)]
-async fn compat_generate(
-    Extension(default_return_full_text): Extension<bool>,
-    infer: Extension<Infer>,
-    Json(mut req): Json<CompatGenerateRequest>,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    // default return_full_text given the pipeline_tag
-    if req.parameters.return_full_text.is_none() {
-        req.parameters.return_full_text = Some(default_return_full_text)
-    }
-
-    // switch on stream
-    if req.stream {
-        Ok(generate_stream(infer, Json(req.into())).await.into_response())
-    } else {
-        let (headers, Json(generation)) = generate(infer, Json(req.into())).await?;
-        // wrap generation inside a Vec to match api-inference
-        Ok((headers, Json(vec![generation])).into_response())
-    }
+/// Tombstone for the TGI-style legacy endpoints (`/`, `/generate`,
+/// `/generate_stream`, `/invocations`). Returns HTTP 410 Gone with a JSON
+/// body that points callers at the canonical OpenAI-compatible endpoint.
+///
+/// Rationale: these endpoints were inherited from upstream
+/// text-generation-inference. The router now exclusively serves the
+/// OpenAI chat-completions surface (`POST /v1/chat/completions`); the
+/// legacy URLs are kept only so misdirected clients get a loud,
+/// actionable error instead of a generic 404.
+async fn tgi_deprecated() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::GONE,
+        Json(ErrorResponse {
+            error: concat!(
+                "This endpoint is deprecated and no longer served. ",
+                "Use `POST /v1/chat/completions` (OpenAI-compatible) instead. ",
+                "See `docs/architecture.md` §1 for the supported API surface."
+            )
+            .to_string(),
+            error_type: "deprecated_endpoint".to_string(),
+        }),
+    )
 }
+
+
+
 
 /// Blitz endpoint info
 #[utoipa::path(
@@ -120,379 +103,7 @@ async fn health(mut health: Extension<Health>) -> Result<(), (StatusCode, Json<E
     }
 }
 
-/// Generate tokens
-#[utoipa::path(
-post,
-tag = "Blitz",
-path = "/generate",
-request_body = GenerateRequest,
-responses(
-(status = 200, description = "Generated Text", body = GenerateResponse),
-(status = 424, description = "Generation Error", body = ErrorResponse,
-example = json ! ({"error": "Request failed during generation"})),
-(status = 429, description = "Model is overloaded", body = ErrorResponse,
-example = json ! ({"error": "Model is overloaded"})),
-(status = 422, description = "Input validation error", body = ErrorResponse,
-example = json ! ({"error": "Input validation error"})),
-(status = 500, description = "Incomplete generation", body = ErrorResponse,
-example = json ! ({"error": "Incomplete generation"})),
-)
-)]
-#[instrument(skip_all)]
-async fn generate(
-    infer: Extension<Infer>,
-    Json(req): Json<GenerateRequest>,
-) -> Result<(HeaderMap, Json<GenerateResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let span = tracing::Span::current();
-    let start_time = Instant::now();
-    metrics::increment_counter!("blitz_request_count");
 
-    tracing::debug!("Input: {}", req.inputs);
-
-    let compute_characters = req.inputs.chars().count();
-    let mut add_prompt = None;
-    if req.parameters.return_full_text.unwrap_or(false) {
-        add_prompt = Some(req.inputs.clone());
-    }
-
-    let details: bool = req.parameters.details || req.parameters.decoder_input_details;
-
-    // Inference
-    let (response, best_of_responses) = match req.parameters.best_of {
-        Some(best_of) if best_of > 1 => {
-            let (response, best_of_responses) = infer.generate_best_of(req, best_of).await?;
-            (response, Some(best_of_responses))
-        }
-        _ => (infer.generate(req).await?, None),
-    };
-
-    let request_id = response.request_id;
-    let first_token_time = response.first_token_time;
-    let max_time_between_tokens = response.max_time_between_tokens;
-    let avg_time_between_tokens = response.avg_time_between_tokens;
-    let p90_time_between_tokens = response.p90_time_between_tokens;
-    let p95_time_between_tokens = response.p95_time_between_tokens;
-    let p99_time_between_tokens = response.p99_time_between_tokens;
-    let input_length = response.input_length;
-    let output_length = response.output_length;
-
-    // Token details
-    let details = match details {
-        true => {
-            // convert best_of_responses
-            let best_of_sequences = best_of_responses.map(|responses: Vec<InferResponse>| {
-                responses
-                    .into_iter()
-                    .map(|response: InferResponse| {
-                        // Add prompt if return_full_text
-                        let mut output_text = response.generated_text.text;
-                        if let Some(prompt) = &add_prompt {
-                            output_text = prompt.clone() + &output_text;
-                        }
-
-                        BestOfSequence {
-                            generated_text: output_text,
-                            finish_reason: FinishReason::from(
-                                response.generated_text.finish_reason,
-                            ),
-                            generated_tokens: response.generated_text.generated_tokens,
-                            prefill: response.prefill,
-                            tokens: response.tokens,
-                            top_tokens: response.top_tokens,
-                            seed: response.generated_text.seed,
-                        }
-                    })
-                    .collect()
-            });
-
-            Some(Details {
-                finish_reason: FinishReason::from(response.generated_text.finish_reason),
-                generated_tokens: response.generated_text.generated_tokens,
-                prefill: response.prefill,
-                tokens: response.tokens,
-                seed: response.generated_text.seed,
-                best_of_sequences,
-                top_tokens: response.top_tokens,
-            })
-        }
-        false => None,
-    };
-
-    // Timings
-    let total_time = start_time.elapsed();
-    let validation_time = response.queued - start_time;
-    let queue_time = response.start - response.queued;
-    let inference_time = Instant::now() - response.start;
-    let time_per_token = if output_length > 0 {
-        inference_time / (output_length as u32)
-    } else {
-        inference_time
-    };
-    // Tracing metadata
-    span.record("total_time", format!("{total_time:?}"));
-    span.record("validation_time", format!("{validation_time:?}"));
-    span.record("queue_time", format!("{queue_time:?}"));
-    span.record("inference_time", format!("{inference_time:?}"));
-    span.record("time_per_token", format!("{time_per_token:?}"));
-    span.record("seed", format!("{:?}", response.generated_text.seed));
-
-    // Headers
-    let mut headers = HeaderMap::new();
-    headers.insert("x-request-id", request_id.to_string().parse().unwrap());
-    headers.insert("x-first-token-time", first_token_time.as_millis().to_string().parse().unwrap());
-    headers.insert("x-compute-type", "gpu+optimized".parse().unwrap());
-    headers.insert("x-compute-time", total_time.as_millis().to_string().parse().unwrap());
-    headers.insert("x-compute-characters", compute_characters.to_string().parse().unwrap());
-    headers.insert("x-total-time", total_time.as_millis().to_string().parse().unwrap());
-    headers.insert("x-validation-time", validation_time.as_millis().to_string().parse().unwrap());
-    headers.insert("x-queue-time", queue_time.as_millis().to_string().parse().unwrap());
-    headers.insert("x-inference-time", inference_time.as_millis().to_string().parse().unwrap());
-    headers.insert("x-time-per-token", time_per_token.as_millis().to_string().parse().unwrap());
-    headers.insert(
-        "x-first-decode-token-time",
-        response.first_decode_token_time.as_millis().to_string().parse().unwrap(),
-    );
-
-    headers.insert(
-        "x-max-time-between-tokens",
-        max_time_between_tokens.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-avg-time-between-tokens",
-        avg_time_between_tokens.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-p90-time-between-tokens",
-        p90_time_between_tokens.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-p95-time-between-tokens",
-        p95_time_between_tokens.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-p99-time-between-tokens",
-        p99_time_between_tokens.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert("x-input-length", input_length.to_string().parse().unwrap());
-    headers.insert("x-output-length", output_length.to_string().parse().unwrap());
-
-    // Metrics
-    metrics::increment_counter!("blitz_request_success");
-    metrics::histogram!("blitz_request_duration", total_time.as_secs_f64());
-    metrics::histogram!("blitz_request_validation_duration", validation_time.as_secs_f64());
-    metrics::histogram!("blitz_request_queue_duration", queue_time.as_secs_f64());
-    metrics::histogram!("blitz_request_inference_duration", inference_time.as_secs_f64());
-    metrics::histogram!("blitz_request_mean_time_per_token_duration", time_per_token.as_secs_f64());
-    metrics::histogram!(
-        "blitz_request_generated_tokens",
-        response.generated_text.generated_tokens as f64
-    );
-
-    // Send response
-    let mut output_text = response.generated_text.text;
-    if let Some(prompt) = add_prompt {
-        output_text = prompt + &output_text;
-    }
-
-    tracing::debug!("Output: {}", output_text);
-
-    let response = GenerateResponse { generated_text: output_text, details };
-    tracing::debug!("Headers: {:?}", headers);
-    Ok((headers, Json(response)))
-}
-
-/// Generate a stream of token using Server-Sent Events
-#[utoipa::path(
-post,
-tag = "Blitz",
-path = "/generate_stream",
-request_body = GenerateRequest,
-responses(
-(status = 200, description = "Generated Text", body = StreamResponse,
-content_type = "text/event-stream"),
-(status = 424, description = "Generation Error", body = ErrorResponse,
-example = json ! ({"error": "Request failed during generation"}),
-content_type = "text/event-stream"),
-(status = 429, description = "Model is overloaded", body = ErrorResponse,
-example = json ! ({"error": "Model is overloaded"}),
-content_type = "text/event-stream"),
-(status = 422, description = "Input validation error", body = ErrorResponse,
-example = json ! ({"error": "Input validation error"}),
-content_type = "text/event-stream"),
-(status = 500, description = "Incomplete generation", body = ErrorResponse,
-example = json ! ({"error": "Incomplete generation"}),
-content_type = "text/event-stream"),
-)
-)]
-#[instrument(skip_all)]
-async fn generate_stream(
-    Extension(infer): Extension<Infer>,
-    Json(req): Json<GenerateRequest>,
-) -> (HeaderMap, Sse<impl Stream<Item = Result<Event, Infallible>>>) {
-    let span = tracing::Span::current();
-    let start_time = Instant::now();
-    metrics::increment_counter!("blitz_request_count");
-
-    tracing::debug!("Input: {}", req.inputs);
-
-    let compute_characters = req.inputs.chars().count();
-
-    let mut headers = HeaderMap::new();
-    headers.insert("x-compute-type", "gpu+optimized".parse().unwrap());
-    headers.insert("x-compute-characters", compute_characters.to_string().parse().unwrap());
-    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
-
-    let stream = async_stream::stream! {
-        // Inference
-        let mut end_reached = false;
-        let mut error = false;
-
-        let mut add_prompt = None;
-        if req.parameters.return_full_text.unwrap_or(false) {
-            add_prompt = Some(req.inputs.clone());
-        }
-        let details = req.parameters.details;
-
-        let best_of = req.parameters.best_of.unwrap_or(1);
-        if best_of != 1 {
-            let err = InferError::from(ValidationError::BestOfStream);
-            metrics::increment_counter!("blitz_request_failure", "err" => "validation");
-            tracing::error!("{err}");
-            yield Ok(Event::from(err));
-        } else if req.parameters.decoder_input_details {
-            let err = InferError::from(ValidationError::PrefillDetailsStream);
-            metrics::increment_counter!("blitz_request_failure", "err" => "validation");
-            tracing::error!("{err}");
-            yield Ok(Event::from(err));
-        } else {
-            match infer.generate_stream(req).instrument(info_span!(parent: &span, "async_stream")).await {
-                // Keep permit as long as generate_stream lives
-                Ok((_request_id, _permit, mut response_stream)) => {
-                    // Server-Sent Event stream
-                    while let Some(response) = response_stream.next().await {
-                        match response {
-                            Ok(response) => {
-                                match response {
-                                    // DIY prefill_done is ignored
-                                    InferStreamResponse::PrefillDone => {}
-                                    // Prefill is ignored
-                                    InferStreamResponse::Prefill(_) => {}
-                                    // Yield event for every new token
-                                    InferStreamResponse::Intermediate{
-                                        token,
-                                        top_tokens,
-                                    } => {
-                                        tracing::debug!(parent: &span, "Token: {:?}", token);
-
-                                        // StreamResponse
-                                        let stream_token = StreamResponse {
-                                            token,
-                                            top_tokens,
-                                            generated_text: None,
-                                            details: None,
-                                        };
-
-                                        yield Ok(Event::default().json_data(stream_token).unwrap())
-                                    }
-                                    // Yield event for last token and compute timings
-                                    InferStreamResponse::End {
-                                        token,
-                                        generated_text,
-                                        start,
-                                        queued,
-                                        top_tokens,
-                                        max_time_between_tokens: _,
-                                    } => {
-                                        tracing::info!("Request send finished info to client!");
-                                        // Token details
-                                        let details = match details {
-                                            true => Some(StreamDetails {
-                                                finish_reason: FinishReason::from(generated_text.finish_reason),
-                                                generated_tokens: generated_text.generated_tokens,
-                                                seed: generated_text.seed,
-                                            }),
-                                            false => None,
-                                        };
-
-                                        // Timings
-                                        let total_time = start_time.elapsed();
-                                        let validation_time = queued - start_time;
-                                        let queue_time = start - queued;
-                                        let inference_time = Instant::now() - start;
-                                        let time_per_token = if generated_text.generated_tokens > 0 {
-                                            inference_time / generated_text.generated_tokens
-                                        } else {
-                                            inference_time
-                                        };
-
-                                        // Tracing metadata
-                                        span.record("total_time", format!("{total_time:?}"));
-                                        span.record("validation_time", format!("{validation_time:?}"));
-                                        span.record("queue_time", format!("{queue_time:?}"));
-                                        span.record("inference_time", format!("{inference_time:?}"));
-                                        span.record("time_per_token", format!("{time_per_token:?}"));
-                                        span.record("seed", format!("{:?}", generated_text.seed));
-
-                                        // Metrics
-                                        metrics::increment_counter!("blitz_request_success");
-                                        metrics::histogram!("blitz_request_duration", total_time.as_secs_f64());
-                                        metrics::histogram!("blitz_request_validation_duration", validation_time.as_secs_f64());
-                                        metrics::histogram!("blitz_request_queue_duration", queue_time.as_secs_f64());
-                                        metrics::histogram!("blitz_request_inference_duration", inference_time.as_secs_f64());
-                                        metrics::histogram!("blitz_request_mean_time_per_token_duration", time_per_token.as_secs_f64());
-                                        metrics::histogram!("blitz_request_generated_tokens", generated_text.generated_tokens as f64);
-
-                                        // StreamResponse
-                                        end_reached = true;
-
-                                        let mut output_text = generated_text.text;
-                                        if let Some(prompt) = add_prompt {
-                                            output_text = prompt + &output_text;
-                                        }
-
-                                        tracing::debug!(parent: &span, "Output: {}", output_text);
-                                        tracing::info!(parent: &span, "Success");
-
-                                        let stream_token = StreamResponse {
-                                            token,
-                                            top_tokens,
-                                            generated_text: Some(output_text),
-                                            details
-                                        };
-
-                                        yield Ok(Event::default().json_data(stream_token).unwrap());
-                                        break;
-                                    }
-                                }
-                            }
-                            // yield error
-                            Err(err) => {
-                                error = true;
-                                yield Ok(Event::from(err));
-                                break;
-                            }
-                        }
-                    }
-                },
-                // yield error
-                Err(err) => {
-                    error = true;
-                    yield Ok(Event::from(err));
-                }
-            }
-            // Check if generation reached the end
-            // Skip if we already sent an error
-            if !end_reached && !error {
-                let err = InferError::IncompleteGeneration;
-                metrics::increment_counter!("blitz_request_failure", "err" => "incomplete");
-                tracing::error!("{err}");
-                yield Ok(Event::from(err));
-            }
-        }
-    };
-
-    (headers, Sse::new(stream).keep_alive(KeepAlive::default()))
-}
 
 /// Prometheus metrics scrape endpoint
 #[utoipa::path(
@@ -775,7 +386,6 @@ async fn chat_completions_stream(
 pub async fn run(
     model_info: HubModelInfo,
     shard_info: InfoResponse,
-    compat_return_full_text: bool,
     max_concurrent_requests: usize,
     max_best_of: usize,
     max_stop_sequences: usize,
@@ -803,25 +413,15 @@ pub async fn run(
     paths(
     health,
     get_model_info,
-    compat_generate,
-    generate,
-    generate_stream,
     metrics,
     ),
     components(
     schemas(
     Info,
-    CompatGenerateRequest,
     GenerateRequest,
     GenerateParameters,
-    PrefillToken,
     Token,
-    GenerateResponse,
-    BestOfSequence,
-    Details,
     FinishReason,
-    StreamResponse,
-    StreamDetails,
     ErrorResponse,
     )
     ),
@@ -942,14 +542,14 @@ pub async fn run(
     let app = Router::new()
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
         // Base routes
-        .route("/", post(compat_generate))
+        .route("/", post(tgi_deprecated))
         .route("/info", get(get_model_info))
-        .route("/generate", post(generate))
-        .route("/generate_stream", post(generate_stream))
+        .route("/generate", post(tgi_deprecated))
+        .route("/generate_stream", post(tgi_deprecated))
         // OpenAI-compatible chat completions
         .route("/v1/chat/completions", post(chat_completions))
         // AWS Sagemaker route
-        .route("/invocations", post(compat_generate))
+        .route("/invocations", post(tgi_deprecated))
         // Base Health route
         .route("/health", get(health))
         // Inference API health route
@@ -960,7 +560,6 @@ pub async fn run(
         .route("/metrics", get(metrics))
         .layer(Extension(info))
         .layer(Extension(health_ext.clone()))
-        .layer(Extension(compat_return_full_text))
         .layer(Extension(infer))
         .layer(Extension(prom_handle.clone()))
         .layer(OtelAxumLayer::default())
