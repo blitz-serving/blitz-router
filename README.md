@@ -32,9 +32,8 @@ blitz-router/
 ├── rust-proto/         # Protobuf generated Rust code
 ├── request-sim/        # Request simulator (git submodule)
 ├── proto/              # gRPC proto definitions
-├── scripts/            # e2e tests, batch utils, debug tools
-├── docs/               # Documentation
-└── *.py                # Analysis & visualization scripts
+├── scripts/            # e2e tests, batch utils
+└── docs/               # Documentation
 ```
 
 ## Related Projects

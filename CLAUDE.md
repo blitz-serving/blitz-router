@@ -255,15 +255,6 @@ extra_args = ["vllm serve /model --port 50180"]
 envs = { CUDA_VISIBLE_DEVICES = "0" }
 ```
 
-## Helper Scripts
-- `align_timestamp.py` — Synchronize log timestamps
-- `cache_miss_rate.py` — KV cache hit/miss rate analysis
-- `process_client_log.py` — Client trace parsing
-- `extract_scale_events.py` — Extract scaling decisions from logs
-- `plot_cache_miss.py` — Cache miss visualization
-- `calculate_hyper_params.py` — Parameter tuning
-- `scripts/e2e/eval_azure.sh` — E2E evaluation orchestrator
-
 ## Related Projects
 - **[yaullm](https://github.com/blitz-serving/yaullm)** (branch `lmetric/step-reporter-v2`) — Patched vLLM engine; provides HTTP inference API + SSE metrics push at `/v1/metrics`
 - **[blitz-infer-pack](https://github.com/blitz-serving/blitz-infer-pack)** — Original monorepo (router + C++ BlitzTransformer engine, gRPC-based)
