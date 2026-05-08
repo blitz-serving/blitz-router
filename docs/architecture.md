@@ -301,7 +301,7 @@ sequenceDiagram
     participant Sv as FRONT: server.rs
     participant Vl as FRONT: Validation
     participant If as MIDDLE: Infer
-    participant Pr as MIDDLE: PolicyRunner&lt;P&gt;
+    participant Pr as MIDDLE: PolicyRunner[P]
     participant Po as MIDDLE: Policy::schedule
     participant Wq as MIDDLE: work_event_loop<br/>(replica i)
     participant Ec as BACK: EngineClient<br/>(VllmClient)
