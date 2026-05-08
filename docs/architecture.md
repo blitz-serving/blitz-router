@@ -8,50 +8,46 @@ you have never read this codebase before, start here.
 > and Obsidian. Plain `cmark` will show them as fenced code; that is
 > acceptable but you lose the diagrams.
 
-## 1. Where blitz-router fits in lmetric
+## 1. System boundary
 
-`blitz-router` is **only the routing layer**. It cannot run standalone.
-A working lmetric deployment needs three independent repos cooperating:
+`blitz-router` is **only the routing layer**. It exchanges traffic with two
+classes of external counterparts — neither lives in this repo, neither is
+part of the system this document describes:
+
+- **Inbound**: HTTP clients (OpenAI-style chat-completions or `/generate`).
+- **Outbound**: inference engines, addressed over HTTP for `/generate` and
+  subscribed over Server-Sent Events on `/v1/metrics`.
 
 ```mermaid
 graph LR
-    Client["Client<br/>(HTTP / OpenAI<br/>chat-completions)"]
-    Sim["request-sim<br/>(Rust load gen)"]
-    subgraph Router_Process["blitz-router (Rust)"]
-        Server["server.rs<br/>(Axum)"]
+    Cli["External HTTP clients"]
+    subgraph Router_System["blitz-router (the system)"]
+        Server["server.rs<br/>(Axum HTTP)"]
         Infer["infer.rs<br/>+ queue + policy"]
         Coloc["colocation.rs<br/>(per-replica event loops)"]
         Server --> Infer --> Coloc
     end
-    subgraph Engines["yaullm replicas (patched vLLM)"]
-        E0["engine 0"]
-        E1["engine 1"]
-        En["engine n…"]
-    end
-    Mtr["MetricsTestRunner<br/>(test harness, separate repo)"]
+    Eng["External inference engines<br/>(N replicas, HTTP + SSE)"]
 
-    Client -- HTTP --> Server
-    Sim   -- HTTP --> Server
-    Coloc -- HTTP /generate --> E0
-    Coloc -- HTTP /generate --> E1
-    Coloc -- HTTP /generate --> En
-    E0 -. SSE /v1/metrics .-> Coloc
-    E1 -. SSE /v1/metrics .-> Coloc
-    En -. SSE /v1/metrics .-> Coloc
-    Mtr -. orchestrates .-> Sim
-    Mtr -. orchestrates .-> Server
-    Mtr -. orchestrates .-> Engines
+    Cli -- HTTP --> Server
+    Coloc -- HTTP /generate --> Eng
+    Eng -. SSE /v1/metrics .-> Coloc
 ```
 
-- **HTTP request path** (solid lines): client → router → engine, response
-  streams back the same way.
-- **SSE metrics path** (dotted lines): each engine pushes one event per
-  forward step on its `/v1/metrics` endpoint; the router consumes all of
-  them concurrently. **No gRPC anywhere.**
-- **`MetricsTestRunner`** is a separate repo
-  ([github.com/blitz-serving/MetricsTestRunner](https://github.com/blitz-serving/MetricsTestRunner))
-  that orchestrates `yaullm + blitz-router + request-sim` for paper
-  experiments. It is not a runtime component.
+- **HTTP request path** (solid lines): a client request enters at
+  `server.rs`, is admitted by the scheduler, and is dispatched to one
+  external engine; the streamed response flows back the same way.
+- **SSE metrics path** (dotted line): every engine pushes one event per
+  forward step on its `/v1/metrics` endpoint. `colocation.rs` consumes
+  all engines' streams concurrently. **No gRPC anywhere.**
+
+For concreteness: in lmetric the inbound clients are typically
+`request-sim` (a Rust load generator) and the outbound engines are
+`yaullm` (a patched vLLM). End-to-end paper experiments are orchestrated
+by [MetricsTestRunner](https://github.com/blitz-serving/MetricsTestRunner).
+None of these are part of `blitz-router` and none appear elsewhere in
+this document's diagrams — they are listed here only so you know where
+the live traffic actually originates and terminates.
 
 ## 2. Workspace layout
 
@@ -74,8 +70,6 @@ graph TD
     rust_proto["rust-proto"] --> router
     radixtree -. used directly by .-> sim["router/src/simulator/<br/>(feature-gated)"]
     router --- sim
-    classDef ext fill:#eee,stroke:#999,stroke-dasharray: 3 3
-    request_sim["request-sim<br/>(submodule, standalone)"]:::ext
 ```
 
 ## 3. Inside `router/src/`
@@ -141,7 +135,7 @@ response:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Cl as Client
+    participant Cl as External client
     participant Sv as server.rs
     participant Vl as Validation
     participant If as Infer
@@ -149,7 +143,7 @@ sequenceDiagram
     participant Po as Policy::schedule
     participant Wq as work_event_loop<br/>(replica i)
     participant Ec as EngineClient<br/>(VllmClient)
-    participant En as yaullm i
+    participant En as External engine i
 
     Cl->>Sv: POST /v1/chat/completions
     Sv->>Vl: validate(request)
@@ -187,7 +181,7 @@ task pulling SSE events from yaullm:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant En as yaullm i
+    participant En as External engine i
     participant Vc as VllmClient<br/>(SSE consumer)
     participant Cl as completion_event_loop<br/>(replica i)
     participant Sx as ScheduleContext[i]<br/>(Mutex)
