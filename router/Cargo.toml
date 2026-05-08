@@ -41,6 +41,7 @@ tokio = { version = "1.32.0", features = [
 tokio-stream = "0.1.14"
 pb = { path = "../rust-proto" }
 policy-dsl = { path = "../policy-dsl" }
+radixtree = { path = "../radixtree" }
 prost = "^0.12"
 tonic = "^0.10"
 tower = "^0.4"
@@ -71,10 +72,6 @@ pyo3 = { version = "0.23", features = ["auto-initialize", "py-clone"], optional 
 proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
-
-[[bench]]
-name = "radix_bench"
-harness = false
 
 [build-dependencies]
 vergen = { version = "8.2.5", features = ["build", "git", "gitcl"] }

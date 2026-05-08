@@ -1,0 +1,26 @@
+[package]
+name = "radixtree"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nohash-hasher = "0.2.0"
+smallvec = { version = "1.15.1" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[features]
+default = []
+# `verify` gates the Verus-verified L0 spec (`src/verified.rs`). Compiling it
+# requires the `vstd` crate, which is supplied by the `verus` toolchain when
+# you run `verus --crate-type=lib radixtree/src/verified.rs`. Keep the feature
+# off in normal `cargo build`.
+verify = []
+
+[[bench]]
+name = "workloads"
+harness = false

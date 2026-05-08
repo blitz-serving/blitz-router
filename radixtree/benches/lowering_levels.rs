@@ -1,6 +1,6 @@
 // Progressive lowering: Verified RadixTree → Optimized Rust
 //
-// L0: Safe Rust baseline (direct translation of verified_radix.rs)
+// L0: Safe Rust baseline (direct translation of radixtree/src/verified.rs)
 //     Vec<Box<Node>>, linear child scan, remove+modify+insert
 //
 // L1: Sorted children + binary search
@@ -31,6 +31,7 @@ pub trait RadixTree {
 
 pub mod l0 {
     use super::RadixTree;
+    use std::mem;
 
     struct Node {
         value: Vec<u64>,

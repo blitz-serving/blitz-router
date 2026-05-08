@@ -55,9 +55,8 @@ blitz-router/
 │   ├── server.rs            # HTTP server (Axum): /generate, /info, /health, /metrics (~1,140 LOC)
 │   ├── infer.rs             # Inference orchestration (~530 LOC)
 │   ├── queue.rs             # Request queue scaffolding (~380 LOC; policy logic now in policies/)
-│   ├── kvcache.rs           # KV cache tracking with BlockHashState (~2,020 LOC)
-│   ├── radixtrie.rs         # Patricia trie for prefix matching (~1,470 LOC)
-│   ├── verified_radix.rs    # Cross-checked RadixTree implementation
+│   ├── kvcache.rs           # BlockHashState + HashTableBlockHash (~1,165 LOC)
+│   │                        #   (radix impl moved to the `radixtree/` crate)
 │   ├── colocation.rs        # Co-location controller (~1,120 LOC)
 │   ├── engine_client.rs     # Engine client trait & dispatch (~510 LOC)
 │   ├── vllmlet.rs           # yaullm/vLLM HTTP+SSE backend
@@ -94,13 +93,22 @@ blitz-router/
 │       ├── batch.rs             # BatchForPredictor (inner-regressor input)
 │       ├── predictor.rs         # Predictor + TrainedPredictor traits
 │       ├── rollout.rs           # RolloutBuffer + RolloutSlot + RolloutGist
-│       ├── mirror.rs            # PCtx L1 incremental mirror (V=ReqId tree)
-│       ├── req_id_tree.rs       # RadixTreeReqIdHash (V=ReqId variant of PrefixBlockHash)
-│       ├── sched.rs             # PCtx SchedSnapshot (per-request progress: waiting/running)
+│       ├── mirror.rs            # PCtx L1 incremental mirror (uses radixtree::RadixTreeReqIdHash)
+│       ├── sched.rs              # PCtx SchedSnapshot (per-request progress: waiting/running)
 │       ├── vidur_rf.rs          # VidurRfPredictor (port of everparadise LlamaPredictor)
 │       └── config.rs            # SimulatorConfig (CSV path, model_hash, granularities)
 ├── policy-dsl/              # ~150 LOC proc-macro: parser + lint + lowering
 │   └── src/{lib,ast,parse,check,lower}.rs
+├── radixtree/               # Patricia trie crate consumed by router/kvcache + simulator
+│   ├── src/
+│   │   ├── lib.rs                  # public surface (BlockHash, RadixTreeBlockHash, RadixTreeReqIdHash)
+│   │   ├── core.rs                 # generic K,V Patricia primitives (Node, Children, CommonPrefixInner)
+│   │   ├── block_hash.rs           # production L3 specialization (V=Bids, SpinLock, epoch)
+│   │   ├── req_id_hash.rs          # simulator-mirror specialization (V=ReqId, Box-based)
+│   │   └── verified.rs             # Verus-verified L0 spec (gated by `verify` feature)
+│   └── benches/
+│       ├── workloads.rs            # Criterion harness (KV-cache-shaped workloads)
+│       └── lowering_levels.rs      # L0..L3 trait-based lowering ladder for regression tracking
 ├── docs/dsl/                # DSL spec, split for progressive disclosure
 │   ├── schema.md                # surface syntax + field/reducer schema
 │   ├── policies.md              # canonical DSL listings for every policy
@@ -157,7 +165,7 @@ Policies are organized under `router/src/policies/` by their upstream baseline s
 llm-d policies that cannot be expressed in the DSL (e.g. session-aware) are NOT ported; reference: `workspace/llm-d-scheduler/`.
 
 ### KV Cache Tracking
-- **RadixTree** (`radixtrie.rs`): Patricia trie mapping token sequences to block hashes
+- **RadixTree** (`radixtree` crate, specialization `RadixTreeBlockHash`): Patricia trie mapping token sequences to block hashes. The `radixtree` crate also holds the Verus-verified L0 spec (`verified.rs`, `verify` feature) and the L0..L3 lowering ladder under `benches/lowering_levels.rs`.
 - **Hash Algorithms**: `default-hash-algo` (single u64) or `sha256-hash-algo` (4x u64 SHA256)
 - **Implementations**: `radixtree-blockhash` (tree) or `hashtable-blockhash` (hash table)
 - Each request carries `BlockHashState` for cache-aware routing
@@ -212,7 +220,7 @@ cargo build -p router --features aibrix-q
 
 `vllm-backend` is the only backend and is enabled implicitly by other features that depend on it; you do not normally need to pass it explicitly.
 
-**Cargo workspace members**: `router`, `request-sim`, `rust-proto`, `policy-dsl`
+**Cargo workspace members**: `router`, `request-sim`, `rust-proto`, `policy-dsl`, `radixtree`
 
 ## Configuration
 

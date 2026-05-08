@@ -4,7 +4,7 @@
 //   Top:    spec layer — well-formedness + longest prefix correctness
 //   Middle: exec layer — safe Rust (Box<Node>, Vec<Box<Node>>)
 //
-// Run: verus router_v2/src/verified_radix.rs
+// Run: verus radixtree/src/verified.rs --crate-type=lib
 //
 // Strategy: Use `assume` for complex invariants first, then
 // progressively replace with proofs. This gives us a verified

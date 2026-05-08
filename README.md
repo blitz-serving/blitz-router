@@ -28,6 +28,8 @@ Full docs: <https://blitz-serving.github.io/blitzscale-doc/>
 ```
 blitz-router/
 ├── router/             # Rust router (~14,000 LOC)
+├── radixtree/          # Patricia trie crate (production + verified L0 + lowering bench ladder)
+├── policy-dsl/         # Scheduling-policy DSL proc-macro
 ├── rust-proto/         # Protobuf generated Rust code (internal types)
 ├── request-sim/        # Request simulator (git submodule)
 ├── proto/              # Protobuf type definitions (internal data structures)

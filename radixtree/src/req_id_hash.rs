@@ -1,16 +1,16 @@
-// Sibling of `kvcache::PrefixBlockHash` (`RadixTreeBlockHash`),
+// Sibling of `block_hash::RadixTreeBlockHash`,
 // purpose-built for the simulator's L1 incremental mirror.
 //
-// Why a fresh structure (rather than reusing `PrefixBlockHash`):
+// Why a fresh structure (rather than reusing `RadixTreeBlockHash`):
 //
-//   * `PrefixBlockHash` encodes the engine's exact KV-cache (V=Bids =
+//   * `RadixTreeBlockHash` encodes the engine's exact KV-cache (V=Bids =
 //     `SmallVec<[u64;1]>`, indexed by block id, must respond to
 //     `evicted_block_ids`). Mirror has different responsibilities:
 //     it tracks per-request prefix membership (V=ReqId), arbitrates
 //     evictions by checking against the in-flight set (Group B
 //     Point 2), and tolerates drift via the redo path (A2).
 //   * Decoupling lets each evolve independently. The block-id
-//     reverse-lookup table that `PrefixBlockHash` carries
+//     reverse-lookup table that `RadixTreeBlockHash` carries
 //     (`block_to_node` / `block_to_hash`) is unnecessary here.
 //
 // Operations:
@@ -26,7 +26,7 @@
 // Implementation choice: a simple Rust-idiomatic trie with one hash
 // per edge. Mirror cardinality is ~64 in-flight × ~100 hashes each =
 // 6400 nodes — deep optimisation (radix path-compression, the unsafe
-// `Node<K,V>` style of `kvcache.rs`) buys nothing here.
+// `Node<K,V>` style of `block_hash.rs`) buys nothing here.
 
 use std::collections::{HashMap, HashSet};
 

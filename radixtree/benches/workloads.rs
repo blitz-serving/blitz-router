@@ -5,12 +5,12 @@
 // - Key length: 16-64 elements (typical prompt token count / block_size)
 // - Alphabet: full u64 range (hash values)
 
-mod radix_levels;
+mod lowering_levels;
 
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
 };
-use radix_levels::RadixTree;
+use lowering_levels::RadixTree;
 use std::hint::black_box as bb;
 
 // ============================================================================
@@ -89,16 +89,16 @@ fn sequential_insert(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
 
         group.bench_with_input(BenchmarkId::new("L0_safe", n), &n, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l0::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l0::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L1_sorted", n), &n, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l1::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l1::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L2_rawptr", n), &n, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l2::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l2::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L3_split", n), &n, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l3::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l3::RadixTreeMap>(&keys, &payloads))
         });
     }
     group.finish();
@@ -119,16 +119,16 @@ fn random_insert(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
 
         group.bench_with_input(BenchmarkId::new("L0_safe", n), &n, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l0::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l0::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L1_sorted", n), &n, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l1::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l1::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L2_rawptr", n), &n, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l2::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l2::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L3_split", n), &n, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l3::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l3::RadixTreeMap>(&keys, &payloads))
         });
     }
     group.finish();
@@ -183,22 +183,22 @@ fn prefix_query(c: &mut Criterion) {
 
     group.bench_function("L0_safe", |b| {
         b.iter(|| {
-            bench_prefix_query::<radix_levels::l0::RadixTreeMap>(&keys, &payloads, &queries)
+            bench_prefix_query::<lowering_levels::l0::RadixTreeMap>(&keys, &payloads, &queries)
         })
     });
     group.bench_function("L1_sorted", |b| {
         b.iter(|| {
-            bench_prefix_query::<radix_levels::l1::RadixTreeMap>(&keys, &payloads, &queries)
+            bench_prefix_query::<lowering_levels::l1::RadixTreeMap>(&keys, &payloads, &queries)
         })
     });
     group.bench_function("L2_rawptr", |b| {
         b.iter(|| {
-            bench_prefix_query::<radix_levels::l2::RadixTreeMap>(&keys, &payloads, &queries)
+            bench_prefix_query::<lowering_levels::l2::RadixTreeMap>(&keys, &payloads, &queries)
         })
     });
     group.bench_function("L3_split", |b| {
         b.iter(|| {
-            bench_prefix_query::<radix_levels::l3::RadixTreeMap>(&keys, &payloads, &queries)
+            bench_prefix_query::<lowering_levels::l3::RadixTreeMap>(&keys, &payloads, &queries)
         })
     });
 
@@ -233,16 +233,16 @@ fn mixed_workload(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
 
         group.bench_with_input(BenchmarkId::new("L0_safe", n), &n, |b, _| {
-            b.iter(|| bench_mixed::<radix_levels::l0::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_mixed::<lowering_levels::l0::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L1_sorted", n), &n, |b, _| {
-            b.iter(|| bench_mixed::<radix_levels::l1::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_mixed::<lowering_levels::l1::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L2_rawptr", n), &n, |b, _| {
-            b.iter(|| bench_mixed::<radix_levels::l2::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_mixed::<lowering_levels::l2::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L3_split", n), &n, |b, _| {
-            b.iter(|| bench_mixed::<radix_levels::l3::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_mixed::<lowering_levels::l3::RadixTreeMap>(&keys, &payloads))
         });
     }
     group.finish();
@@ -264,16 +264,16 @@ fn variable_key_len(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
 
         group.bench_with_input(BenchmarkId::new("L0_safe", key_len), &key_len, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l0::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l0::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L1_sorted", key_len), &key_len, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l1::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l1::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L2_rawptr", key_len), &key_len, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l2::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l2::RadixTreeMap>(&keys, &payloads))
         });
         group.bench_with_input(BenchmarkId::new("L3_split", key_len), &key_len, |b, _| {
-            b.iter(|| bench_sequential_insert::<radix_levels::l3::RadixTreeMap>(&keys, &payloads))
+            b.iter(|| bench_sequential_insert::<lowering_levels::l3::RadixTreeMap>(&keys, &payloads))
         });
     }
     group.finish();

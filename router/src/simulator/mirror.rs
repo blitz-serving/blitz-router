@@ -38,7 +38,7 @@ use std::collections::HashMap;
 
 use crate::engine_client::EngineStepOutput;
 
-use super::req_id_tree::RadixTreeReqIdHash;
+use radixtree::RadixTreeReqIdHash;
 use super::sched::SchedSnapshot;
 
 pub struct IncrementalMirror {

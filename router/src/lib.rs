@@ -7,9 +7,6 @@
 compile_error!("You must enable either `vllm-backend` or `zmq-backend`!");
 
 mod kvcache;
-#[cfg(test)]
-#[allow(dead_code)]
-mod radixtrie;
 mod policies;
 mod colocation;
 mod metrics;
