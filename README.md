@@ -1,20 +1,19 @@
 # BlitzScale Router
 
-Distributed LLM inference router written in Rust. Routes client requests to backend engines (vLLM or BlitzLLM), manages KV cache state via RadixTree prefix matching, and dynamically scales replicas.
+Distributed LLM inference router written in Rust. Routes client requests to backend **yaullm** engines (a patched vLLM) over HTTP+SSE, manages KV cache state via RadixTree prefix matching, and dynamically scales replicas.
 
 ## Build
 
 ```bash
-# Build the full workspace
-cargo build --release
+# Default build (lmetric scheduling policy)
+cargo build -p router --features lmetric-q
 
-# Build router with specific scheduling policy
-cargo build -p router_v2 --features <policy>
+# Pick any other policy by swapping the feature
+cargo build -p router --features bounded-most-hit-q
+cargo build -p router --features aibrix-q
 ```
 
-Visit `router_v2/Cargo.toml` for available feature flags and scheduling policies.
-
-The system configuration is `impl_blitz,impl_fast_pro,impl_live_pro`; the implemented baseline system is `impl_sllm,cache_replace`.
+See `router/Cargo.toml` for the full list of policy feature flags.
 
 ## Run
 
@@ -28,10 +27,10 @@ Full docs: <https://blitz-serving.github.io/blitzscale-doc/>
 
 ```
 blitz-router/
-├── router_v2/          # Rust router (~8,400 LOC)
-├── rust-proto/         # Protobuf generated Rust code
+├── router/             # Rust router (~14,000 LOC)
+├── rust-proto/         # Protobuf generated Rust code (internal types)
 ├── request-sim/        # Request simulator (git submodule)
-├── proto/              # gRPC proto definitions
+├── proto/              # Protobuf type definitions (internal data structures)
 ├── scripts/            # e2e tests, batch utils
 └── docs/               # Documentation
 ```
@@ -39,7 +38,6 @@ blitz-router/
 ## Related Projects
 
 - **[yaullm](https://github.com/blitz-serving/yaullm)** — Patched vLLM engine with step-level SSE metrics
-- **[blitz-infer-pack](https://github.com/blitz-serving/blitz-infer-pack)** — Full system (router + C++ engine)
 
 ## Acknowledgements
 

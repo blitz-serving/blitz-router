@@ -87,5 +87,3 @@ Policies are organized under `router/src/policies/` by upstream baseline system.
 | `lmetric.rs` | `lmetric-q` |
 | `preble/` | `preble-q` |
 | `llm_d/` | `most-hit-q`, `least-waiting-q`, `least-bs-q`, `least-active-q`, `least-token-load-q`, `most-hit-load-q`, `most-hit-load-active-q` |
-
-Stale names previously documented here — `join-shortest-q`, `join-shortest-q-weight`, `join-shortest-q-tuple` — no longer exist; the canonical name is `join-shortest-weight-q`.

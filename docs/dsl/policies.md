@@ -62,8 +62,7 @@ policy dynamo-q (gctx: ()):                              # Dynamo Decode-node lo
     after: default
 
 policy dynamo-po-q (gctx: ()):                           # Dynamo Prefill-node logit
-                                                         # ("po" = prefill-only node;
-                                                         # was dynamo-decoupled-q)
+                                                         # ("po" = prefill-only node)
     Select min by w · (prefill_tokens(req, sctx) / sctx.block_size)
                   + floor(prefill_tokens(req, sctx) / sctx.block_size)
     after: default

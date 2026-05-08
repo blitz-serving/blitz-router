@@ -3,15 +3,13 @@
 ## Overview
 BlitzScale Router (blitz-router) is the **routing component** of the lmetric distributed LLM inference system. Written in Rust, it routes client requests to backend **yaullm** engines (a patched vLLM), manages KV cache state via RadixTree prefix matching, and dynamically scales replicas.
 
-This repo was extracted from `blitz-infer-pack`, retaining only the Rust router. The C++ inference engine (BlitzTransformer) is not part of the lmetric system.
-
 ## Communication Protocol — IMPORTANT
 
 **lmetric uses HTTP + SSE, NOT gRPC.**
 
-The legacy `blitzllm-backend` mode (with C++ BlitzTransformer engine over gRPC) has been removed. Only `vllm-backend` remains; it is the default and effectively non-optional. Entry point: `vllmlet.rs` → `VllmClient` (HTTP) plus `/v1/metrics` SSE consumption.
+Entry point: `vllmlet.rs` → `VllmClient` (HTTP) with `/v1/metrics` SSE consumption.
 
-### Why proto/ and rust-proto/ still exist
+### proto/ and rust-proto/ — internal data structures
 The protobuf-generated types (`Tokens`, `GeneratedText`, `Batch`, `Request`, `CachedBatch`, etc.) are used as **internal data structures** throughout the router (queue, infer, validation, colocation) regardless of backend. They are NOT used as a wire protocol — the actual transport is HTTP/SSE via `VllmClient` in `vllmlet.rs`.
 
 ### lmetric Data Flow
@@ -49,8 +47,6 @@ This drives cache-aware routing (via `evicted_block_ids`) and scheduling decisio
 
 ## Project Structure
 
-> **Note**: As of commit 2327a08, the crate `router_v2/` was renamed to `router/`. Anything that still says `router_v2` in scripts or older notes is stale.
-
 ```
 blitz-router/
 ├── router/src/              # Rust router (~14,000 LOC)
@@ -62,7 +58,7 @@ blitz-router/
 │   ├── kvcache.rs           # KV cache tracking with BlockHashState (~2,020 LOC)
 │   ├── radixtrie.rs         # Patricia trie for prefix matching (~1,470 LOC)
 │   ├── verified_radix.rs    # Cross-checked RadixTree implementation
-│   ├── colocation.rs        # Co-location controller (formerly replica/colocation.rs) (~1,120 LOC)
+│   ├── colocation.rs        # Co-location controller (~1,120 LOC)
 │   ├── engine_client.rs     # Engine client trait & dispatch (~510 LOC)
 │   ├── vllmlet.rs           # yaullm/vLLM HTTP+SSE backend
 │   ├── zmq_engine.rs        # ZMQ engine variant
@@ -118,8 +114,6 @@ blitz-router/
 └── docs/                    # reproduce.md
 ```
 
-The legacy `replica/` subdirectory and the `cybernetics/` planner code described in earlier revisions of this file have been removed; their relevant pieces are flattened into the top-level `router/src/` files (`colocation.rs`, `metrics.rs`, `engine_client.rs`).
-
 ## Key Components
 
 ### Scheduling Policies (DSL-driven, compile-time via Cargo features)
@@ -145,7 +139,7 @@ Policies are organized under `router/src/policies/` by their upstream baseline s
 
 **`dynamo.rs`** — AI-Dynamo baselines (PD-disaggregated formulas, ported as ablations)
 - `dynamo-q` — Dynamo's **Decode-node** formula: `Select min by w·(new_tokens/block_size) + (new_blocks + decode_blocks)`.
-- `dynamo-po-q` — Dynamo's **Prefill-node** formula ("po" = prefill-only node, NOT "uses new_tokens only"): `Select min by w·(prefill_tokens/block_size) + floor(prefill_blocks)`. (Renamed from legacy `dynamo-decoupled-q`.)
+- `dynamo-po-q` — Dynamo's **Prefill-node** formula ("po" = prefill-only node, NOT "uses new_tokens only"): `Select min by w·(prefill_tokens/block_size) + floor(prefill_blocks)`.
 
 **`lmetric.rs`** — our system
 - `lmetric-q` — `Select min by prefill_tokens · (bs+1)`.
@@ -163,8 +157,6 @@ Policies are organized under `router/src/policies/` by their upstream baseline s
 - `most-hit-load-active-q` — three-scorer combo (above + kv-cache-utilization w=1, cap-free via `1 − norm(all_tokens)`). Tunables `MOST_HIT_LOAD_ACTIVE_W_*` (`most_hit_load_active.rs`).
 
 llm-d policies that cannot be expressed in the DSL (e.g. session-aware) are NOT ported; reference: `workspace/llm-d-scheduler/`.
-
-Earlier revisions referred to `join-shortest-q`, `join-shortest-q-weight`, `join-shortest-q-tuple`, and `dynamo-decoupled-q` as Cargo features. The first two have been merged into the canonical `join-shortest-weight-q`; the latter two never were features (superseded by `aibrix-q` and `dynamo-po-q` respectively).
 
 ### KV Cache Tracking
 - **RadixTree** (`radixtrie.rs`): Patricia trie mapping token sequences to block hashes
@@ -220,7 +212,7 @@ cargo build -p router --features bounded-most-hit-q
 cargo build -p router --features aibrix-q
 ```
 
-`vllm-backend` is the only backend and is enabled implicitly by other features that depend on it; you do not normally need to pass it explicitly. The legacy `blitzllm-backend`, `impl_blitz`, `impl_fast_pro`, `impl_live_pro` features no longer exist.
+`vllm-backend` is the only backend and is enabled implicitly by other features that depend on it; you do not normally need to pass it explicitly.
 
 **Cargo workspace members**: `router`, `request-sim`, `rust-proto`, `policy-dsl`
 
@@ -257,7 +249,6 @@ envs = { CUDA_VISIBLE_DEVICES = "0" }
 
 ## Related Projects
 - **[yaullm](https://github.com/blitz-serving/yaullm)** (branch `lmetric/step-reporter-v2`) — Patched vLLM engine; provides HTTP inference API + SSE metrics push at `/v1/metrics`
-- **[blitz-infer-pack](https://github.com/blitz-serving/blitz-infer-pack)** — Original monorepo (router + C++ BlitzTransformer engine, gRPC-based)
 
 ## License
 Apache-2.0. Code derived from Hugging Face Text Generation Inference (TGI).
