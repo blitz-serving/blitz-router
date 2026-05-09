@@ -63,9 +63,9 @@ pub(crate) use simple::{JBoundMostHitQ2, JLeastWaitTokenQ, RandomQ, RoundRobinQ}
 #[allow(unused_imports)]
 pub(crate) use vllm::JShortestWeightQ;
 
-use crate::kvcache::BlockHashState;
-use crate::infer::{InferError, InferStreamResponse};
-use crate::validation::ValidGenerateRequest;
+use super::kvcache::BlockHashState;
+use super::infer::{InferError, InferStreamResponse};
+use crate::gateway::validation::ValidGenerateRequest;
 
 use std::time::Duration;
 

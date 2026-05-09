@@ -37,7 +37,7 @@
 //! formula) are already in `[0, 1]` so the `enforce_score_range` clamp
 //! is a no-op and elided.
 
-use crate::metrics::{LOAD_AWARE_QUEUE_T, MOST_HIT_LOAD_W_HIT, MOST_HIT_LOAD_W_LOAD};
+use crate::scheduler::state::{LOAD_AWARE_QUEUE_T, MOST_HIT_LOAD_W_HIT, MOST_HIT_LOAD_W_LOAD};
 use policy_dsl::policy;
 
 policy! {

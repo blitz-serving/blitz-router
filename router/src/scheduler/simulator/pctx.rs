@@ -49,7 +49,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use crate::engine_client::EngineStepOutput;
+use crate::engine::EngineStepOutput;
 
 use super::batch::BatchForPredictor;
 use super::mirror::IncrementalMirror;
@@ -550,9 +550,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::engine_client::RequestStepOutput;
-    use crate::simulator::config::SimulatorConfig;
-    use crate::simulator::predictor::{LinregCorrected, Predictor};
+    use crate::engine::RequestStepOutput;
+    use super::config::SimulatorConfig;
+    use super::predictor::{LinregCorrected, Predictor};
     use nohash_hasher::{BuildNoHashHasher, IntMap};
 
     struct ConstPredictor(f32);

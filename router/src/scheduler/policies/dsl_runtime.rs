@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::kvcache::BlockHash;
-use crate::policies::Entry;
-use crate::validation::ValidGenerateRequest;
+use crate::scheduler::kvcache::BlockHash;
+use super::Entry;
+use crate::gateway::validation::ValidGenerateRequest;
 use crate::{LMetricInc, ScheduleContext};
 
 /// Per-replica snapshot captured under a single `sctx.lock().await`.
@@ -143,7 +143,7 @@ pub(crate) fn decode_blocks(sctx: &Observation) -> usize {
 pub(crate) fn preble_cost(
     req: &ValidGenerateRequest,
     sctx: &Observation,
-    gctx: &crate::policies::preble::PrebleGCtx,
+    gctx: &super::preble::PrebleGCtx,
 ) -> i64 {
     let new_pre = new_tokens(req, sctx);
     let all = sctx.all_tokens;
@@ -171,9 +171,9 @@ pub(crate) fn preble_update_after(
     entry: &Entry,
     chosen: &Observation,
     num_replicas: usize,
-    gctx: &mut crate::policies::preble::PrebleGCtx,
+    gctx: &mut super::preble::PrebleGCtx,
 ) {
-    crate::policies::preble::update_histogram_into(
+    super::preble::update_histogram_into(
         gctx,
         entry.block_hash_state.get_hashes(),
         chosen.hit_blocks,

@@ -1,4 +1,4 @@
-use crate::{kvcache::BackendBlockHash, validation::ValidGenerateRequest};
+use crate::{scheduler::kvcache::BackendBlockHash, gateway::validation::ValidGenerateRequest};
 use axum::body::Bytes;
 use eventsource_client as es;
 use futures::{stream::FusedStream, StreamExt};

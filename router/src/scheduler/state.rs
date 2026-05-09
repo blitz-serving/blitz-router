@@ -2,7 +2,7 @@ use std::time::Duration;
 use std::collections::VecDeque;
 use std::ops::{AddAssign, SubAssign};
 
-use crate::kvcache::PrefixBlockHash;
+use super::kvcache::PrefixBlockHash;
 
 use serde::Serialize;
 use tokio::time::Instant;

@@ -16,7 +16,7 @@
 //! Reducers compute `lo` and `hi` once per call via `min_of_*` /
 //! `max_of_*` and the With-bound names are read inside the closure.
 
-use crate::metrics::{BAILIAN_ALPHA, BAILIAN_BETA, BAILIAN_GAMMA};
+use crate::scheduler::state::{BAILIAN_ALPHA, BAILIAN_BETA, BAILIAN_GAMMA};
 use policy_dsl::policy;
 
 policy! {

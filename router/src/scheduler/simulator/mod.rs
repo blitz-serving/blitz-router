@@ -32,7 +32,7 @@ pub use vidur_rf::VidurRfPredictor;
 
 use std::sync::{Arc, OnceLock};
 
-use crate::engine_client::EngineStepOutput;
+use crate::engine::EngineStepOutput;
 
 /// Process-wide per-replica predictor contexts. Set once at startup by
 /// `init()`; read on the SSE consumer hot path by `on_sse()` and on the
@@ -121,7 +121,7 @@ pub(crate) fn on_sse(replica_index: usize, m: &EngineStepOutput) {
 /// gains the request's prefix hashes, sched snapshot gains a fresh
 /// `ReqProgress` in `waiting`, and L3 ephemeral runs the
 /// promote-or-drop branch.
-pub(crate) fn on_admit(replica_index: usize, entry: &crate::policies::Entry) {
+pub(crate) fn on_admit(replica_index: usize, entry: &super::policies::Entry) {
     let Some(rt) = SIMULATOR.get() else {
         return;
     };
@@ -209,7 +209,7 @@ fn batch_from_step(m: &EngineStepOutput, block_size: usize) -> BatchForPredictor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine_client::RequestStepOutput;
+    use crate::engine::RequestStepOutput;
     use nohash_hasher::{BuildNoHashHasher, IntMap};
 
     fn empty_step(prefill_tokens: usize, latency_ms: u64, outputs: Vec<RequestStepOutput>) -> EngineStepOutput {
@@ -318,7 +318,7 @@ mod tests {
         //      corrected prediction toward the actual.
         // This is the local-CI proxy for piggyback success — runs without
         // CSV grids or a real engine.
-        use crate::simulator::predictor::Predictor;
+        use super::predictor::Predictor;
 
         struct ConstPred(f32);
         impl Predictor for ConstPred {

@@ -1,8 +1,8 @@
 use crate::{
-    engine_client::EngineClient,
-    queue::TaskAssigner,
+    scheduler::queue::TaskAssigner,
     ScheduleContext,
 };
+use super::client::EngineClient;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -58,12 +58,12 @@ mod task_assignment {
     use super::except_management::{ExtContext, ExtState};
     use super::ScheduleContext;
     use crate::{
-        engine_client::{EngineClient, EngineStepReceiver, RequestStepOutput},
-        infer::{InferError, InferStreamResponse},
-        kvcache::BlockHash,
-        queue::{Entry, QueuePro},
+        scheduler::infer::{InferError, InferStreamResponse},
+        scheduler::kvcache::BlockHash,
+        scheduler::queue::{Entry, QueuePro},
         ExtExcept, LMetricDec, Token,
     };
+    use super::super::client::{EngineClient, EngineStepReceiver, RequestStepOutput};
 
     /// Tracks the lifecycle phase of each request within the event loop.
     ///
@@ -419,7 +419,7 @@ mod task_assignment {
                 Err(e) => {
                     tracing::error!(engine = replica_index, error = %e, "RECV_STEP_ERROR");
                     // For stream-ended errors, break out of the loop
-                    if matches!(e, crate::engine_client::EngineClientError::StreamEnded) {
+                    if matches!(e, super::super::client::EngineClientError::StreamEnded) {
                         break;
                     }
                     continue;
@@ -458,7 +458,7 @@ mod task_assignment {
             // fast path: update metrics
             let tbt = Duration::from_millis(m.latency);
             #[cfg(feature = "simulator")]
-            crate::simulator::on_sse(replica_index, &m);
+            crate::scheduler::simulator::on_sse(replica_index, &m);
             let mut metric_delta = LMetricDec::new(&tbt);
             // NOTE: `prefill_tokens` doesn't count hit tokens, while
             //       `all_tokens` does count hit tokens
@@ -855,7 +855,7 @@ mod task_assignment {
 mod except_management {
     use nohash_hasher::{BuildNoHashHasher, IntMap};
 
-    use crate::Entry;
+    use crate::scheduler::policies::Entry;
 
     /// Events that drive the exception state machine.
     ///

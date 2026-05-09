@@ -133,7 +133,7 @@ impl SchedSnapshot {
     /// shape as `batch_from_step` in `simulator/mod.rs`. For typical
     /// chunked-prefill configs at most one PREFILL is active per step,
     /// so this is exact in practice.
-    pub fn sync(&mut self, m: &crate::engine_client::EngineStepOutput) {
+    pub fn sync(&mut self, m: &crate::engine::EngineStepOutput) {
         // Pre-compute per-PREFILL chunk size (even split with remainder
         // assigned to the leading entries — matches batch_from_step).
         let prefill_count = m.outputs.iter().filter(|o| o.state == "PREFILL").count();
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(s.in_flight_count(), 0);
     }
 
-    use crate::engine_client::{EngineStepOutput, RequestStepOutput};
+    use crate::engine::{EngineStepOutput, RequestStepOutput};
     use nohash_hasher::{BuildNoHashHasher, IntMap};
 
     fn step(

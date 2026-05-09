@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn linreg_correction_converges() {
-        use crate::simulator::predictor::{LinregCorrected, Predictor, TrainedPredictor};
+        use super::predictor::{LinregCorrected, Predictor, TrainedPredictor};
 
         struct ConstPred(f32);
         impl Predictor for ConstPred {

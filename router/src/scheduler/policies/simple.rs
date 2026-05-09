@@ -15,7 +15,7 @@
 //! Each invocation maps 1:1 to a spec-form DSL listing in
 //! `docs/dsl/policies.md` §2 via the rewrite table in `docs/dsl/implementation.md` §2.1.
 
-use crate::metrics::WAITINGT_PREFILL_TOKEN_BOUND;
+use crate::scheduler::state::WAITINGT_PREFILL_TOKEN_BOUND;
 use policy_dsl::policy;
 
 // =========================================================================

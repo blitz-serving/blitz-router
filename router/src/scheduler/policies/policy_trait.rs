@@ -6,7 +6,7 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::policies::Entry;
+use super::Entry;
 use crate::ScheduleContext;
 
 /// A scheduling policy. Picks one replica from `all_sctx` for `entry`,

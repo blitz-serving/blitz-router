@@ -1,6 +1,6 @@
 /// Payload validation logic
-use crate::chat_template::ChatRenderer;
-use crate::validation::ValidationError::{BestOfSampling, BestOfSeed, EmptyInput};
+use super::chat_template::ChatRenderer;
+use super::validation::ValidationError::{BestOfSampling, BestOfSeed, EmptyInput};
 use crate::{ChatMessage, GenerateParameters, GenerateRequest, TokenizerRender};
 
 use pb::generate::v2::{NextTokenChooserParameters, StoppingCriteriaParameters};

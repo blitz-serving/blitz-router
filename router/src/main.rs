@@ -24,7 +24,7 @@ use std::sync::Arc;
 use router::model_config::load_model_config;
 #[cfg(feature = "vllm-backend")]
 use router::VllmClient;
-use router::engine_client::EngineClient;
+use router::EngineClient;
 use thiserror::Error;
 #[allow(unused_imports)]
 use tokenizers::Tokenizer;
@@ -286,7 +286,7 @@ fn main() -> Result<(), RouterError> {
 
         #[cfg(feature = "vllm-backend")]
         let engine_clients: Vec<Box<dyn EngineClient>> = {
-            use router::engine_client::VllmEngineClient;
+            use router::VllmEngineClient;
             serde_json::from_str::<Vec<String>>(buf.as_str())
                 .unwrap()
                 .into_iter()
@@ -336,8 +336,8 @@ fn main() -> Result<(), RouterError> {
         // ZMQ backend: create engine clients from IPC/TCP socket addresses.
         #[cfg(feature = "zmq-backend")]
         let engine_clients: Vec<Box<dyn EngineClient>> = {
-            use router::engine_client::ZmqEngineClientAdapter;
-            use router::zmq_engine::ZmqEngineClient;
+            use router::ZmqEngineClientAdapter;
+            use router::ZmqEngineClient;
 
             let addr_pairs: Vec<(String, String)> =
                 serde_json::from_str::<Vec<Vec<String>>>(buf.as_str())

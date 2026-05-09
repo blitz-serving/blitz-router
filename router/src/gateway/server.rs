@@ -9,9 +9,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::health::Health;
-use crate::infer::{InferError, InferStreamResponse};
-use crate::engine_client::EngineClient;
+use super::health::Health;
+use crate::scheduler::infer::{InferError, InferStreamResponse};
+use crate::engine::EngineClient;
 use crate::{
     ChatRenderer, ChatMessage, ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionChoice, ChatCompletionUsage, ChatCompletionChunk, ChatCompletionChunkChoice,

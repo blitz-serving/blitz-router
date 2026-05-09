@@ -7,11 +7,11 @@
 #![allow(unused)]
 
 use crate::error::ClientError;
-use crate::engine_client::EngineClient;
-use crate::kvcache::{BlockHash, BlockHashState, PrefixBlockHash};
-use crate::queue::{QueuePro, TaskAssigner};
-use crate::statistic::{statistic, increase_prefill_tokens};
-use crate::validation::{Validation, ValidationError};
+use crate::engine::EngineClient;
+use super::kvcache::{BlockHash, BlockHashState, PrefixBlockHash};
+use super::queue::{QueuePro, TaskAssigner};
+use super::statistic::{statistic, increase_prefill_tokens};
+use crate::gateway::validation::{Validation, ValidationError};
 use crate::{
     start_vllm_colocation_event_loop,
     ColocationController, Entry, LMetric,

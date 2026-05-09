@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::validation::ValidationError;
+use super::validation::ValidationError;
 use crate::ChatMessage;
 
 // ---------------------------------------------------------------------------

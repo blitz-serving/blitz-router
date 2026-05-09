@@ -36,7 +36,7 @@
 
 use std::collections::HashMap;
 
-use crate::engine_client::EngineStepOutput;
+use crate::engine::EngineStepOutput;
 
 use radixtree::RadixTreeReqIdHash;
 use super::sched::SchedSnapshot;
@@ -145,19 +145,19 @@ impl Default for IncrementalMirror {
 /// down to the 64-bit key the mirror's trie operates on. `BlockHashState`
 /// uses the same first-u64 reduction internally so the keys agree
 /// across the mirror, the SCtx tree, and per-request `block_hashes`.
-fn backend_hash_to_key(h: &crate::kvcache::BackendBlockHash) -> u64 {
+fn backend_hash_to_key(h: &crate::scheduler::kvcache::BackendBlockHash) -> u64 {
     h[0]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine_client::{EngineStepOutput, RequestStepOutput};
+    use crate::engine::{EngineStepOutput, RequestStepOutput};
     use nohash_hasher::{BuildNoHashHasher, IntMap};
 
     fn step(
         outputs: Vec<RequestStepOutput>,
-        evicted_hashes: Vec<crate::kvcache::BackendBlockHash>,
+        evicted_hashes: Vec<crate::scheduler::kvcache::BackendBlockHash>,
         aborted: Vec<u64>,
         preempted: Vec<u64>,
     ) -> EngineStepOutput {
@@ -190,11 +190,11 @@ mod tests {
     }
 
     #[cfg(not(feature = "sha256-hash-algo"))]
-    fn bh(h: u64) -> crate::kvcache::BackendBlockHash {
+    fn bh(h: u64) -> crate::scheduler::kvcache::BackendBlockHash {
         [h]
     }
     #[cfg(feature = "sha256-hash-algo")]
-    fn bh(h: u64) -> crate::kvcache::BackendBlockHash {
+    fn bh(h: u64) -> crate::scheduler::kvcache::BackendBlockHash {
         [h, 0, 0, 0]
     }
 

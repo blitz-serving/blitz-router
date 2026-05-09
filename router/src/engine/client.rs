@@ -7,8 +7,8 @@
 // This module defines a common interface that the event loop can program
 // against, regardless of the underlying engine communication protocol.
 
-use crate::kvcache::BackendBlockHash;
-use crate::validation::ValidGenerateRequest;
+use crate::scheduler::kvcache::BackendBlockHash;
+use crate::gateway::validation::ValidGenerateRequest;
 use nohash_hasher::IntMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -162,7 +162,7 @@ pub trait EngineClient: Send {
 #[cfg(feature = "vllm-backend")]
 mod vllm_impl {
     use super::*;
-    use crate::vllmlet::{VllmClient, VllmMetric};
+    use super::super::vllm_http::{VllmClient, VllmMetric};
     use eventsource_client as es;
     use futures::StreamExt;
 
@@ -346,7 +346,7 @@ pub use vllm_impl::VllmEngineClient;
 #[cfg(feature = "zmq-backend")]
 mod zmq_impl {
     use super::*;
-    use crate::zmq_engine::{
+    use super::super::zmq::{
         EngineCoreRequest, SamplingParams, ZmqEngineClient, ZmqEngineError,
     };
 
@@ -426,7 +426,7 @@ mod zmq_impl {
             let data = msg.into_vec().into_iter().next().ok_or_else(|| {
                 EngineClientError::Zmq("Empty ZMQ message received".to_string())
             })?;
-            let outputs: crate::zmq_engine::EngineCoreOutputs =
+            let outputs: super::super::zmq::EngineCoreOutputs =
                 rmp_serde::from_slice(&data).map_err(|e| EngineClientError::Msgpack(e.to_string()))?;
 
             let step_outputs: Vec<RequestStepOutput> = outputs

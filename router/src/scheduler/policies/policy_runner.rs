@@ -90,7 +90,7 @@ where
                         let entry = uncommit_buffer.pop_front().unwrap();
                         let request_id = entry.request.request_id;
                         #[cfg(feature = "simulator")]
-                        crate::simulator::on_admit(replica_idx, &entry);
+                        super::super::simulator::on_admit(replica_idx, &entry);
                         all_commit_req_buffers[replica_idx]
                             .push_back((request_id, entry));
                     }
@@ -104,7 +104,7 @@ where
                                 let entry = uncommit_buffer.pop_front().unwrap();
                                 let request_id = entry.request.request_id;
                                 #[cfg(feature = "simulator")]
-                                crate::simulator::on_admit(tmp_replica_idx, &entry);
+                                super::super::simulator::on_admit(tmp_replica_idx, &entry);
                                 all_commit_req_buffers[tmp_replica_idx]
                                     .push_back((request_id, entry));
                             } else {

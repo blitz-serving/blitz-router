@@ -38,7 +38,7 @@
 //! `1 − min-max(all_tokens)`), matching llm-d's `enforce_score_range`
 //! guarantee. The `enforce_score_range` clamp is a no-op and elided.
 
-use crate::metrics::{
+use crate::scheduler::state::{
     LOAD_AWARE_QUEUE_T, MOST_HIT_LOAD_ACTIVE_W_HIT, MOST_HIT_LOAD_ACTIVE_W_KV,
     MOST_HIT_LOAD_ACTIVE_W_LOAD,
 };

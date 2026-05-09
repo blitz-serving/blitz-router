@@ -95,7 +95,7 @@ pub struct RolloutGist {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulator::BatchForPredictor;
+    use super::BatchForPredictor;
 
     fn slot(latency: f32) -> RolloutSlot {
         RolloutSlot {

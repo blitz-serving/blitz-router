@@ -11,7 +11,7 @@
 //   route to the replica with minimum total allocation cost.
 
 use super::histogram::SlidingWindowHistogram;
-use crate::policies::Entry;
+use super::super::Entry;
 
 /// Prefix routing threshold (Go line 477):
 /// ```go
@@ -209,7 +209,7 @@ pub(crate) fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policies::preble::cost_model::TargetGpu;
+    use super::super::cost_model::TargetGpu;
 
     #[test]
     fn test_route_cost_model_fallback() {
