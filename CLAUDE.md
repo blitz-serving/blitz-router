@@ -122,7 +122,7 @@ blitz-router/
 │   ├── policies.md              # canonical DSL listings for every policy
 │   └── implementation.md        # `policy!` macro: rewrite table + lint allowlist
 ├── request-sim/             # Request simulator (git submodule, main branch)
-├── formal/tlaplus/          # TLA+ spec — colocation/CompletionLoop entry lifecycle (NOT a policy spec)
+├── spec/abort-recovery/     # TLA+ spec — abort-recovery (FrontAbort/BackendFault) invariants for the colocation event-loop pair (NOT a system spec)
 └── docs/                    # architecture/ (split into per-topic files; start at architecture/README.md), refactor-plan.md, reproduce.md
 ```
 

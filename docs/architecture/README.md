@@ -386,7 +386,9 @@ Two consequences worth pinning:
 | Trace what a `policy! { … }` body lowers into | [`../dsl/implementation.md`](../dsl/implementation.md) §2.1 |
 | Add a new sidecar type for a new policy family | §2.3 above + [`middle-scheduler.md`](middle-scheduler.md) §"Why this is a Sidecar pattern" |
 
-The TLA+ specification for the colocation/CompletionLoop entry lifecycle
-lives in [`../../formal/tlaplus/`](../../formal/tlaplus/). It is not policy
-logic — it models the work-loop ↔ completion-loop handoff to catch
-order-dependent races.
+The TLA+ spec for the colocation event-loop pair's abort-recovery
+invariants lives in [`../../spec/abort-recovery/`](../../spec/abort-recovery/).
+It is not a system model — it models only the work-loop ↔
+completion-loop handoff under request-abort exceptions
+(`FrontAbort`, `BackendFault`) to catch order-dependent races in the
+recovery paths.

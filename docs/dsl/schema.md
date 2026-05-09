@@ -191,7 +191,7 @@ The DSL governs **commit-driven** state transitions only (synchronous post-decis
 It does **not** govern:
 
 - **SSE-driven mutations** to `sctx.block_hash` (insert / remove / alias-bid tracking) — these are triggered by yaullm step events in `colocation::handle_metric` and are entirely independent of policy choice. Their correctness is the scope of `verify_staleness` + the alias-bid soundness of `RadixTreeBlockHash` (see issue #10 for the canonical example of this layering boundary).
-- **Cross-system state machine** of replica lifecycle (`Inactive`, `LoadingPrefill`, `Prefill`, etc.) — these are governed by `formal/tlaplus/CompletionLoop.tla` and `colocation.rs`, not by policy DSL.
+- **Cross-system state machine** of replica lifecycle (`Inactive`, `LoadingPrefill`, `Prefill`, etc.) — these are governed by `spec/abort-recovery/AbortRecovery.tla` and `colocation.rs`, not by policy DSL.
 - **Validation, tokenization, batching** — pre- and post-scheduling pipeline stages.
 
 Conversely, anything inside `after:` that mutates `sctx` or `gctx` IS under DSL governance and subject to the §8 static check.

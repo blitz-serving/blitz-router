@@ -1,6 +1,19 @@
---------------------------- MODULE CompletionLoop ---------------------------
+--------------------------- MODULE AbortRecovery ---------------------------
 (*
- * TLA+ specification for blitz-router's work_event_loop + completion_event_loop.
+ * TLA+ specification for blitz-router's abort-recovery invariants.
+ *
+ * Scope: this is NOT a model of the whole system. It models only the
+ * recovery process when an in-flight request is terminated early by
+ * one of two exception flavours:
+ *
+ *   - FrontAbort:    the frontend (client) drops the response channel.
+ *   - BackendFault:  the engine reports an error mid-stream.
+ *
+ * The spec verifies that the colocation event-loop pair (work loop +
+ * completion loop) preserves entry-ownership and metric-accounting
+ * invariants under arbitrary interleavings of those exceptions with
+ * normal step processing. It catches order-dependent races in the
+ * exception-handling code paths, not policy logic.
  *
  * Models the interplay between:
  *   - Work loop:       polls queue, sends add_request to engine, passes entry
@@ -15,7 +28,7 @@
  * Entry ownership is tracked across three containers:
  *   entries, except_ctx, temp_leaving
  *
- * Reference: router_v2/src/replica/colocation.rs
+ * Reference: router/src/engine/colocation.rs
  * Issue:     https://github.com/blitz-serving/blitz-router/issues/4
  *)
 

@@ -82,9 +82,10 @@ Some questions span layers. Common combinations:
   scheduling policy DSL spec form and its lowering into Rust.
 - `radixtree/README.md` — the verified-then-lowered Patricia-trie
   crate used by both sidecars.
-- `formal/tlaplus/` — TLA+ spec of the colocation work-loop ↔
-  completion-loop handoff (catches order-dependent races, not
-  policy logic).
+- `spec/abort-recovery/` — TLA+ spec of the colocation event-loop
+  pair's invariants under request-abort recovery (FrontAbort,
+  BackendFault); catches order-dependent races in the exception
+  handling code paths, not policy logic.
 - `.claude/memory/project_lmetric_predictor_design.md` — design
   rationale for the simulator's three-layer predictor (`PCtx`),
   the calibration loop, and the future `simulator-q` policy.

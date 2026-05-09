@@ -429,7 +429,7 @@ These deserve explicit non-goals so reviewers don't ask:
   verbatim — only the parent path changes.
 - **`radixtree`, `policy-dsl`, `rust-proto`, `request-sim` workspace
   members** are not touched.
-- **TLA+ spec (`formal/tlaplus/`)** is not touched. (It models
+- **TLA+ spec (`spec/abort-recovery/`)** is not touched. (It models
   colocation-loop dynamics, not module structure.)
 
 ## 6. Verification
