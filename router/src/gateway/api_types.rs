@@ -244,10 +244,6 @@ pub struct Info {
     pub max_input_length: usize,
     #[schema(example = "2048")]
     pub max_total_tokens: usize,
-    #[schema(example = "1.2")]
-    pub waiting_served_ratio: f32,
-    #[schema(example = "20")]
-    pub max_waiting_tokens: usize,
     #[schema(example = "2")]
     pub validation_workers: usize,
     /// Router Info

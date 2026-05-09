@@ -524,8 +524,6 @@ pub async fn run(
         max_stop_sequences,
         max_input_length,
         max_total_tokens,
-        waiting_served_ratio: 0.0,
-        max_waiting_tokens: 0,
         validation_workers,
         version: env!("CARGO_PKG_VERSION"),
         sha: option_env!("VERGEN_GIT_SHA"),
