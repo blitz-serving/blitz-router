@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["router", "rust-proto", "request-sim", "policy-dsl", "radixtree"]
+members = ["router", "request-sim", "policy-dsl", "radixtree"]
 
 [workspace.package]
 version = "0.1.0"

@@ -39,7 +39,6 @@ tokio = { version = "1.32.0", features = [
     "fs",
 ] }
 tokio-stream = "0.1.14"
-pb = { path = "../rust-proto" }
 policy-dsl = { path = "../policy-dsl" }
 radixtree = { path = "../radixtree" }
 prost = "^0.12"

@@ -11,6 +11,7 @@ mod gateway;
 mod scheduler;
 
 pub mod error;
+pub mod types;
 
 #[allow(unused_imports)]
 pub use engine::*;

@@ -3,7 +3,7 @@ use super::chat_template::ChatRenderer;
 use super::validation::ValidationError::{BestOfSampling, BestOfSeed, EmptyInput};
 use crate::{ChatMessage, GenerateParameters, GenerateRequest, TokenizerRender};
 
-use pb::generate::v2::{NextTokenChooserParameters, StoppingCriteriaParameters};
+use crate::types::{NextTokenChooserParameters, StoppingCriteriaParameters};
 use rand::{thread_rng, Rng};
 use thiserror::Error;
 use tokenizers::TruncationDirection;

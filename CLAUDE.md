@@ -9,8 +9,8 @@ BlitzScale Router (blitz-router) is the **routing component** of the lmetric dis
 
 Entry point: `engine/vllm_http.rs` → `VllmClient` (HTTP) with `/v1/metrics` SSE consumption.
 
-### proto/ and rust-proto/ — internal data structures
-The protobuf-generated types (`Tokens`, `GeneratedText`, `Batch`, `Request`, `CachedBatch`, etc.) are used as **internal data structures** throughout the router (queue, infer, validation, colocation) regardless of backend. They are NOT used as a wire protocol — the actual transport is HTTP/SSE via `VllmClient` in `engine/vllm_http.rs`.
+### Internal data types
+The internal data structures used by the router (queue, infer, validation, colocation) — `Tokens`, `GeneratedText`, `Generation`, `FinishReason`, `InfoResponse`, `NextTokenChooserParameters`, `StoppingCriteriaParameters` — live in `router/src/types.rs`. They are plain hand-written Rust types and are NOT a wire protocol. The actual transport is HTTP/SSE via `VllmClient` in `engine/vllm_http.rs`. (Historical note: these types previously came from `proto/generate.proto` via a `rust-proto/` workspace member that ran `tonic_build` at compile time; both directories were deleted once the protobuf dependency was purged.)
 
 ### lmetric Data Flow
 ```
@@ -51,8 +51,9 @@ This drives cache-aware routing (via `evicted_block_ids`) and scheduling decisio
 blitz-router/
 ├── router/src/              # Rust router (~14,000 LOC)
 │   ├── main.rs              # CLI args & entry point
-│   ├── lib.rs               # ~35 LOC: layer mod decls + cross-cutting re-exports
+│   ├── lib.rs               # ~36 LOC: layer mod decls + cross-cutting re-exports
 │   ├── error.rs             # Error types
+│   ├── types.rs             # Hand-written internal data types (Tokens, GeneratedText, FinishReason, InfoResponse, NextTokenChooserParameters, StoppingCriteriaParameters, Generation)
 │   ├── gateway/             # FRONT layer — HTTP face
 │   │   ├── mod.rs
 │   │   ├── server.rs            # HTTP server (Axum): /v1/chat/completions, /info, /health, /metrics (~755 LOC); TGI URLs tombstoned to HTTP 410
@@ -120,8 +121,6 @@ blitz-router/
 │   ├── schema.md                # surface syntax + field/reducer schema
 │   ├── policies.md              # canonical DSL listings for every policy
 │   └── implementation.md        # `policy!` macro: rewrite table + lint allowlist
-├── proto/generate.proto     # Protobuf type definitions (used as internal data structures)
-├── rust-proto/              # Protobuf codegen (internal types only)
 ├── request-sim/             # Request simulator (git submodule, main branch)
 ├── formal/tlaplus/          # TLA+ spec — colocation/CompletionLoop entry lifecycle (NOT a policy spec)
 └── docs/                    # architecture/ (split into per-topic files; start at architecture/README.md), refactor-plan.md, reproduce.md
@@ -227,7 +226,7 @@ cargo build -p router --features aibrix-q
 
 `vllm-backend` is the only backend and is enabled implicitly by other features that depend on it; you do not normally need to pass it explicitly.
 
-**Cargo workspace members**: `router`, `request-sim`, `rust-proto`, `policy-dsl`, `radixtree`
+**Cargo workspace members**: `router`, `request-sim`, `policy-dsl`, `radixtree`
 
 ## Configuration
 

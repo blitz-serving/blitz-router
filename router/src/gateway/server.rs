@@ -31,7 +31,7 @@ use axum_tracing_opentelemetry::middleware::OtelAxumLayer;
 use futures::stream::StreamExt;
 use futures::Stream;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use pb::generate::v2::InfoResponse;
+use crate::types::InfoResponse;
 use tokio::signal;
 use tokio::time::Instant;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -122,8 +122,8 @@ async fn metrics(prom_handle: Extension<PrometheusHandle>) -> String {
 
 /// Convert a protobuf FinishReason (i32) to OpenAI-compatible string.
 fn finish_reason_to_openai(reason: i32) -> String {
-    match pb::generate::v2::FinishReason::try_from(reason) {
-        Ok(pb::generate::v2::FinishReason::Length) => "length".to_string(),
+    match crate::types::FinishReason::try_from(reason) {
+        Ok(crate::types::FinishReason::Length) => "length".to_string(),
         _ => "stop".to_string(),
     }
 }
@@ -654,11 +654,11 @@ async fn shutdown_signal() {
 
 impl From<i32> for FinishReason {
     fn from(finish_reason: i32) -> Self {
-        let finish_reason = pb::generate::v2::FinishReason::try_from(finish_reason).unwrap();
+        let finish_reason = crate::types::FinishReason::try_from(finish_reason).unwrap();
         match finish_reason {
-            pb::generate::v2::FinishReason::Length => FinishReason::Length,
-            pb::generate::v2::FinishReason::EosToken => FinishReason::EndOfSequenceToken,
-            pb::generate::v2::FinishReason::StopSequence => FinishReason::StopSequence,
+            crate::types::FinishReason::Length => FinishReason::Length,
+            crate::types::FinishReason::EosToken => FinishReason::EndOfSequenceToken,
+            crate::types::FinishReason::StopSequence => FinishReason::StopSequence,
         }
     }
 }

@@ -41,7 +41,7 @@ know the layer split.
 | End-to-end request lifecycle (`POST /v1/chat/completions` → reply); SSE consumption (engine `/v1/metrics` → `ScheduleContext` write) | `docs/architecture/request-lifecycle.md` |
 | Tasks per replica, channels, locks, `Mutex` vs `SpinLock`, sole-writer invariants | `docs/architecture/concurrency-model.md` |
 | Latency simulator, the `query()` service-sidecar API, `on_admit`/`on_sse` silent wiring, `PCtx` 3-layer predictor | `docs/architecture/latency-simulator.md` |
-| Cargo workspace members (`router`, `radixtree`, `policy-dsl`, `rust-proto`, `request-sim`); feature flags as wiring switches | `docs/architecture/workspace-and-features.md` |
+| Cargo workspace members (`router`, `radixtree`, `policy-dsl`, `request-sim`); feature flags as wiring switches | `docs/architecture/workspace-and-features.md` |
 
 ## Step 3 — when to read multiple docs
 

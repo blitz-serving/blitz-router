@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use futures::future::try_join_all;
 use nohash_hasher::IntMap;
-use pb::generate::v2::*;
+use crate::types::{GeneratedText, Generation, Tokens};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};

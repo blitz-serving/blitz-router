@@ -4,21 +4,19 @@
 
 ## Workspace members
 
-`blitz-router` is a Cargo workspace with five members:
+`blitz-router` is a Cargo workspace with four members:
 
 | Member         | Role                                                          | Loaded by         |
 |----------------|---------------------------------------------------------------|-------------------|
-| `router/`      | The router itself: all three layers ([FRONT](front-gateway.md), [MIDDLE](middle-scheduler.md), [BACK](back-engine-driver.md)) | top-level binary  |
+| `router/`      | The router itself: all three layers ([FRONT](front-gateway.md), [MIDDLE](middle-scheduler.md), [BACK](back-engine-driver.md)). Internal data types (`Tokens`, `GeneratedText`, `FinishReason`, `InfoResponse`, `NextTokenChooserParameters`, `StoppingCriteriaParameters`, `Generation`) live in `router/src/types.rs`. | top-level binary  |
 | `radixtree/`   | Patricia-trie crate (`BlockHash` trait + production impl + Verus L0 spec + L0..L3 lowering bench ladder). Provides the trie types used by both sidecars (`PrefixBlockHash` for the `ScheduleContext` data-sidecar, `RadixTreeReqIdHash` for the `simulator` service-sidecar's private prefix mirror). | `router/` middle (sidecar types) and back (`BlockHashState` builder) |
 | `policy-dsl/`  | Proc macro `policy! { … }` that lowers a DSL spec into `impl Policy for X` | `router/` middle layer |
-| `rust-proto/`  | Protobuf type definitions used as **internal Rust types** (NOT a wire protocol) | `router/` |
 | `request-sim/` | Git submodule — Rust load generator. Lives in this workspace only because the Cargo workspace lets developers `cargo run -p request-sim` from one checkout | standalone binary |
 
 ```mermaid
 graph TD
     radixtree --> router
     policy_dsl["policy-dsl"] --> router
-    rust_proto["rust-proto"] --> router
     radixtree -. used directly by .-> sim["router middle layer:<br/>simulator/"]
     router --- sim
 ```

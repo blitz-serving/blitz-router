@@ -46,7 +46,7 @@ pub(crate) fn start_vllm_colocation_event_loop(
 
 mod task_assignment {
     use nohash_hasher::{BuildNoHashHasher, IntMap};
-    use pb::generate::v2 as proto;
+    use crate::types as proto;
     use tokio::sync::mpsc::{self, channel, error::SendError, Receiver};
     use tokio::sync::Mutex;
     use tokio::task::yield_now;
