@@ -6,7 +6,6 @@
 // © 2022-present Hugging Face Inc. – Apache-2.0.
 #![allow(unused)]
 
-use crate::error::ClientError;
 use crate::engine::EngineClient;
 use super::kvcache::{BlockHash, BlockHashState, PrefixBlockHash};
 use super::queue::{QueuePro, TaskAssigner};
@@ -439,24 +438,6 @@ pub(crate) fn send_responses(
     }
 
     Ok(stopped)
-}
-
-/// Send errors to Infer for all `entries`
-#[instrument(skip_all)]
-fn send_errors(error: ClientError, entries: &mut IntMap<u64, Entry>) {
-    entries.drain().for_each(|(_, entry)| {
-        // Create and enter a span to link this function back to the entry
-        let _send_error_span = info_span!(parent: entry.temp_span.as_ref().expect("batch_span is None. This is a bug."), "send_error").entered();
-        let err = InferError::GenerationError(error.to_string());
-        metrics::increment_counter!("blitz_request_failure", "err" => "generation");
-        tracing::error!("{err}");
-
-        // unwrap_or is valid here as we don't care if the receiver is gone.
-        entry
-            .response_tx
-            .send(Err(err))
-            .unwrap_or(());
-    });
 }
 
 #[derive(Debug)]

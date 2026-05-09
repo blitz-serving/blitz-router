@@ -14,8 +14,9 @@
 // layout following the migration.
 //
 // NOTE: This module is intentionally a 1:1 preservation of the
-// prost-generated shapes; design changes (renames, dead-field removal,
-// enum simplification) are deliberately deferred to a follow-up step.
+// legacy prost-generated shapes; design changes (renames, dead-field
+// removal, enum simplification) are deliberately deferred to a
+// follow-up step.
 
 // ==== Tokens ====
 
@@ -43,8 +44,8 @@ pub struct Tokens {
 /// uint32 generated_tokens = 2; required FinishReason finish_reason = 3;
 /// optional uint64 seed = 4; }`.
 ///
-/// Note: `finish_reason` is stored as `i32` to match the prost convention
-/// for proto enum fields (callers parse it via
+/// Note: `finish_reason` is stored as `i32` to match the legacy proto
+/// enum-field convention (callers parse it via
 /// `FinishReason::try_from(i)`). Preserved verbatim.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GeneratedText {
@@ -85,8 +86,9 @@ pub struct Generation {
 /// Mirrors `enum FinishReason { FINISH_REASON_LENGTH = 0;
 /// FINISH_REASON_EOS_TOKEN = 1; FINISH_REASON_STOP_SEQUENCE = 2; }`.
 ///
-/// Variant names use prost's auto-converted CamelCase form (`Length`,
-/// `EosToken`, `StopSequence`) so existing match arms compile unchanged.
+/// Variant names use the auto-converted CamelCase form (`Length`,
+/// `EosToken`, `StopSequence`) inherited from the legacy prost output,
+/// so existing match arms compile unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum FinishReason {
@@ -102,9 +104,9 @@ impl Default for FinishReason {
 }
 
 /// Error returned when an `i32` does not match any `FinishReason`
-/// discriminant. Mirrors prost's `try_from` semantics; the original
-/// error type was an opaque `prost::DecodeError` whose details no
-/// caller in this crate inspects.
+/// discriminant. Mirrors the legacy `try_from` semantics; the original
+/// error type was an opaque `DecodeError` whose details no caller in
+/// this crate inspects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownFinishReason(pub i32);
 

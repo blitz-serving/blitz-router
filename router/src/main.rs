@@ -18,7 +18,6 @@ use opentelemetry::sdk::trace::Sampler;
 use opentelemetry::sdk::Resource;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
-use router::error::ClientError;
 use router::{server, ChatRenderer, HubModelInfo, TokenizerRender};
 use std::sync::Arc;
 use router::model_config::load_model_config;
@@ -554,19 +553,10 @@ pub async fn get_model_info(
     }
 }
 
-#[allow(unused)]
 #[derive(Debug, Error)]
 enum RouterError {
     #[error("Argument validation error: {0}")]
     ArgumentValidation(String),
-    #[error("Unable to connect to the Python model shards: {0}")]
-    Connection(ClientError),
-    #[error("Unable to clear the Python model shards cache: {0}")]
-    Cache(ClientError),
-    #[error("Unable to get the Python model shards info: {0}")]
-    Info(ClientError),
-    #[error("Unable to warmup the Python model shards: {0}")]
-    Warmup(ClientError),
     #[error("Tokio runtime failed to start: {0}")]
     Tokio(#[from] std::io::Error),
     #[error("Axum webserver failed: {0}")]

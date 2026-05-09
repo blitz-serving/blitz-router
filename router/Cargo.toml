@@ -41,9 +41,6 @@ tokio = { version = "1.32.0", features = [
 tokio-stream = "0.1.14"
 policy-dsl = { path = "../policy-dsl" }
 radixtree = { path = "../radixtree" }
-prost = "^0.12"
-tonic = "^0.10"
-tower = "^0.4"
 tracing = "^0.1"
 http = "*"
 rand = "0.8.5"
