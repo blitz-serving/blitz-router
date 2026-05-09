@@ -233,17 +233,15 @@ cargo build -p router --features aibrix-q
 ### CLI Arguments (router)
 ```
 --max-concurrent-requests     (default: 128)
---max-batch-prefill-tokens    (default: 4096)
---max-waiting-tokens          (default: 20)
 --max-total-tokens            (default: 2048)
---waiting-served-ratio        (default: 1.2)
---deployment                  ("disaggregation" | "colocation")
---deployment-config-path      (TOML path)
---tokens-prefilled-per-sec    (default: 13000)
---tokens-transferred-per-sec  (default: 20000)
 --port                        (default: 3000)
 --otlp-endpoint               (OpenTelemetry)
 ```
+
+Note: only Model-related (`--max-input-length`, `--max-total-tokens`,
+both auto-discovered from `config.json`) and service-related caps live
+here. Engine-internal admission knobs (batch capacities, KV-cache
+budgets) are owned by the engine, not the router.
 
 ### TOML Config Structure
 ```toml

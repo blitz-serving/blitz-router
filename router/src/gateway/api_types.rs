@@ -246,8 +246,6 @@ pub struct Info {
     pub max_total_tokens: usize,
     #[schema(example = "1.2")]
     pub waiting_served_ratio: f32,
-    #[schema(example = "32000")]
-    pub max_batch_total_tokens: u32,
     #[schema(example = "20")]
     pub max_waiting_tokens: usize,
     #[schema(example = "2")]

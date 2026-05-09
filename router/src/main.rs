@@ -49,10 +49,6 @@ struct Args {
     max_input_length: usize,
     #[clap(default_value = "2048", long, env)]
     max_total_tokens: usize,
-    #[clap(default_value = "4096", long, env)]
-    max_batch_prefill_tokens: u32,
-    #[clap(long, env)]
-    max_batch_total_tokens: Option<u32>,
     #[clap(default_value = "0.0.0.0", long, env)]
     hostname: String,
     #[clap(default_value = "3000", long, short, env)]
@@ -137,8 +133,6 @@ fn main() -> Result<(), RouterError> {
         max_top_n_tokens,
         mut max_input_length,
         mut max_total_tokens,
-        max_batch_prefill_tokens,
-        max_batch_total_tokens,
         kvcache_block_size,
         hostname,
         port,
@@ -172,23 +166,11 @@ fn main() -> Result<(), RouterError> {
             "`max_input_length` must be < `max_total_tokens`".to_string(),
         ));
     }
-    if max_input_length as u32 > max_batch_prefill_tokens {
-        return Err(RouterError::ArgumentValidation(format!("`max_batch_prefill_tokens` must be >= `max_input_length`. Given: {max_batch_prefill_tokens} and {max_input_length}")));
-    }
 
     if validation_workers == 0 {
         return Err(RouterError::ArgumentValidation(
             "`validation_workers` must be > 0".to_string(),
         ));
-    }
-
-    if let Some(ref max_batch_total_tokens) = max_batch_total_tokens {
-        if max_batch_prefill_tokens > *max_batch_total_tokens {
-            return Err(RouterError::ArgumentValidation(format!("`max_batch_prefill_tokens` must be <= `max_batch_total_tokens`. Given: {max_batch_prefill_tokens} and {max_batch_total_tokens}")));
-        }
-        if max_total_tokens as u32 > *max_batch_total_tokens {
-            return Err(RouterError::ArgumentValidation(format!("`max_total_tokens` must be <= `max_batch_total_tokens`. Given: {max_total_tokens} and {max_batch_total_tokens}")));
-        }
     }
 
     // CORS allowed origins
@@ -377,8 +359,6 @@ fn main() -> Result<(), RouterError> {
             }
         };
 
-        let max_supported_batch_total_tokens = 16000;
-
         // --- Auto-discovery from model config.json ---
         // blitz-router is an inner cluster router (not a full inference system).
         // Model-dependent parameters should be auto-discovered, not manually specified.
@@ -424,8 +404,6 @@ fn main() -> Result<(), RouterError> {
             max_top_n_tokens,
             max_input_length,
             max_total_tokens,
-            max_batch_prefill_tokens,
-            max_supported_batch_total_tokens,
             engine_clients,
             kvcache_block_size,
             tokenizer,

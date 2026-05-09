@@ -55,7 +55,6 @@ impl Infer {
         all_engine_clients: Vec<Box<dyn EngineClient>>,
         block_size: usize,
         validation: Validation,
-        max_batch_prefill_tokens: u32,
         max_concurrent_requests: usize,
         statistic_path: Option<String>,
         shared_tokenizer: Option<Arc<tokenizers::Tokenizer>>,
