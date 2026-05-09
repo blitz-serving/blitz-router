@@ -8,13 +8,13 @@ a `ValidGenerateRequest` plus a response channel to the scheduler.
 
 ## Modules
 
-| Module (current path) | Role                                                                          | LOC  |
-|-----------------------|-------------------------------------------------------------------------------|------|
-| `server.rs`           | Axum router. Canonical endpoint: `POST /v1/chat/completions` (OpenAI-compatible). Legacy TGI URLs (`/`, `/generate`, `/generate_stream`, `/invocations`) are tombstoned to a single `tgi_deprecated` handler that returns `HTTP 410 Gone`. Plus `/info`, `/health`, `/metrics` | ~755 |
-| `validation.rs`       | `Validation` — fan-out of CPU-bound tokenization to a thread pool via `spawn_blocking`; round-robin task; produces `ValidGenerateRequest` | 467  |
-| `chat_template.rs`    | Chat template rendering (Jinja-style or PyO3-backed when feature `python-chat-template` is on) | 340  |
-| `model_config.rs`     | Auto-discovery of `config.json` / `tokenizer_config.json` at startup          | 81   |
-| `health.rs`           | Health endpoint logic                                                         | 11   |
+| Module (path)              | Role                                                                          | LOC  |
+|----------------------------|-------------------------------------------------------------------------------|------|
+| `gateway/server.rs`        | Axum router. Canonical endpoint: `POST /v1/chat/completions` (OpenAI-compatible). Legacy TGI URLs (`/`, `/generate`, `/generate_stream`, `/invocations`) are tombstoned to a single `tgi_deprecated` handler that returns `HTTP 410 Gone`. Plus `/info`, `/health`, `/metrics` | ~755 |
+| `gateway/validation.rs`    | `Validation` — fan-out of CPU-bound tokenization to a thread pool via `spawn_blocking`; round-robin task; produces `ValidGenerateRequest` | 467  |
+| `gateway/chat_template.rs` | Chat template rendering (Jinja-style or PyO3-backed when feature `python-chat-template` is on) | 340  |
+| `gateway/model_config.rs`  | Auto-discovery of `config.json` / `tokenizer_config.json` at startup          | 81   |
+| `gateway/health.rs`        | Health endpoint logic                                                         | 11   |
 
 ## Outbound surface
 

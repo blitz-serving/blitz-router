@@ -5,7 +5,7 @@ description: Verify a policy! invocation matches its docs/dsl/policies.md §2 sp
 
 # Verifying a Policy Implementation
 
-Mechanically check that one `policy!` invocation in `router/src/policies/...` is the impl-form image of its spec-form listing in `docs/dsl/policies.md` §2 under the rewrite table in `docs/dsl/implementation.md` §2.1.
+Mechanically check that one `policy!` invocation in `router/src/scheduler/policies/...` is the impl-form image of its spec-form listing in `docs/dsl/policies.md` §2 under the rewrite table in `docs/dsl/implementation.md` §2.1.
 
 The procedure is purely syntactic — no semantic equivalence reasoning needed. A reviewer applies the rewrite table right-to-left and compares.
 
@@ -19,9 +19,9 @@ If the user suspects the SPEC is wrong (vs. upstream), this skill cannot help �
 
 Identify the policy name (e.g. `lmetric-q`, `dynamo-po-q`). From it derive:
 
-- **Source location**: search `router/src/policies/` for `name: <PascalCaseQ>` in a `policy!` block. Use:
+- **Source location**: search `router/src/scheduler/policies/` for `name: <PascalCaseQ>` in a `policy!` block. Use:
   ```bash
-  rg -l 'name: <PascalCaseQ>' router/src/policies/
+  rg -l 'name: <PascalCaseQ>' router/src/scheduler/policies/
   ```
 - **Spec-form location**: `docs/dsl/policies.md` §2 — find the `policy <name>-q (gctx: ...):` block.
 
@@ -75,4 +75,4 @@ Some policies have known caveats — apply the right reading lens:
 
 - `bounded-most-hit-q` (`simple.rs`): the else-branch routes to `Select min by prefill_tokens`, NOT to a second `Select max by hit_blocks`. This is the "attention black hole" guard noted in `policies.md` §2.
 - `dynamo-q` vs `dynamo-po-q`: the per-request prefill term differs by `new_tokens` vs `prefill_tokens` — a swap is the historical drift from issue #11. ALWAYS cross-check against `selector.rs:150` in upstream Dynamo if both formulas look plausible.
-- `most-hit-load-q` / `most-hit-load-active-q`: tunable weights live in `router/src/metrics.rs` (`MOST_HIT_LOAD_W_*`); spec-form uses placeholder names `w_hit`, `w_load`, etc. Don't flag this as drift.
+- `most-hit-load-q` / `most-hit-load-active-q`: tunable weights live in `router/src/scheduler/state.rs` (`MOST_HIT_LOAD_W_*`); spec-form uses placeholder names `w_hit`, `w_load`, etc. Don't flag this as drift.

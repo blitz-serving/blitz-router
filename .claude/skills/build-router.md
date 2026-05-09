@@ -75,7 +75,7 @@ sudo apt-get install -y python3.10-dev
 
 ## Scheduling Policy (pick exactly one)
 
-Policies are organized under `router/src/policies/` by upstream baseline system. Pick exactly one of the 18 features below; if none is given, the build defaults to `join-shortest-weight-q`.
+Policies are organized under `router/src/scheduler/policies/` by upstream baseline system. Pick exactly one of the 18 features below; if none is given, the build defaults to `join-shortest-weight-q`.
 
 | Module | Features |
 |---|---|

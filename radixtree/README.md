@@ -6,7 +6,7 @@ Patricia-trie prefix-matching crate consumed by `blitz-router`.
 
 - `BlockHash` — interface trait the router's KV-cache prefix matcher
   consumes. Two implementations live behind it: `RadixTreeBlockHash`
-  (here) and `HashTableBlockHash` (in `router/src/kvcache.rs`).
+  (here) and `HashTableBlockHash` (in `router/src/scheduler/kvcache.rs`).
 - `RadixTreeBlockHash` — production L3-lowered Patricia trie with
   `V = Bids` (multi-bid per position via `SmallVec<[u64;1]>`),
   `SpinLock`-guarded mutation, `AtomicUsize` node count, monotonic

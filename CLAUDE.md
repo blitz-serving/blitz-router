@@ -7,16 +7,16 @@ BlitzScale Router (blitz-router) is the **routing component** of the lmetric dis
 
 **lmetric uses HTTP + SSE, NOT gRPC.**
 
-Entry point: `vllmlet.rs` → `VllmClient` (HTTP) with `/v1/metrics` SSE consumption.
+Entry point: `engine/vllm_http.rs` → `VllmClient` (HTTP) with `/v1/metrics` SSE consumption.
 
 ### proto/ and rust-proto/ — internal data structures
-The protobuf-generated types (`Tokens`, `GeneratedText`, `Batch`, `Request`, `CachedBatch`, etc.) are used as **internal data structures** throughout the router (queue, infer, validation, colocation) regardless of backend. They are NOT used as a wire protocol — the actual transport is HTTP/SSE via `VllmClient` in `vllmlet.rs`.
+The protobuf-generated types (`Tokens`, `GeneratedText`, `Batch`, `Request`, `CachedBatch`, etc.) are used as **internal data structures** throughout the router (queue, infer, validation, colocation) regardless of backend. They are NOT used as a wire protocol — the actual transport is HTTP/SSE via `VllmClient` in `engine/vllm_http.rs`.
 
 ### lmetric Data Flow
 ```
-Client (HTTP) → Router (Axum server.rs)
+Client (HTTP) → Router (Axum gateway/server.rs)
     → [Validation] → [Queue + BlockHashState] → [Replica Selection]
-    → VllmClient (vllmlet.rs) → HTTP → yaullm engine
+    → VllmClient (engine/vllm_http.rs) → HTTP → yaullm engine
     ← HTTP streaming response ← yaullm
     ← SSE metrics push (/v1/metrics) ← yaullm  [async, separate connection]
 ```
@@ -51,52 +51,59 @@ This drives cache-aware routing (via `evicted_block_ids`) and scheduling decisio
 blitz-router/
 ├── router/src/              # Rust router (~14,000 LOC)
 │   ├── main.rs              # CLI args & entry point
-│   ├── lib.rs               # Crate root
-│   ├── server.rs            # HTTP server (Axum): /v1/chat/completions, /info, /health, /metrics (~755 LOC); TGI URLs tombstoned to HTTP 410
-│   ├── infer.rs             # Inference orchestration (~530 LOC)
-│   ├── queue.rs             # Request queue scaffolding (~380 LOC; policy logic now in policies/)
-│   ├── kvcache.rs           # BlockHashState + HashTableBlockHash (~1,165 LOC)
-│   │                        #   (radix impl moved to the `radixtree/` crate)
-│   ├── colocation.rs        # Co-location controller (~1,120 LOC)
-│   ├── engine_client.rs     # Engine client trait & dispatch (~510 LOC)
-│   ├── vllmlet.rs           # yaullm/vLLM HTTP+SSE backend
-│   ├── zmq_engine.rs        # ZMQ engine variant
-│   ├── metrics.rs           # SystemMetric counters & replica states
-│   ├── validation.rs        # Request validation
-│   ├── chat_template.rs     # Chat template handling
-│   ├── model_config.rs      # Model config auto-discovery
-│   ├── statistic.rs         # Statistics collection
-│   ├── health.rs            # Health checks
+│   ├── lib.rs               # ~35 LOC: layer mod decls + cross-cutting re-exports
 │   ├── error.rs             # Error types
-│   ├── policies/            # Scheduling policies — DSL-driven,
-│   │   │                    # one module per upstream baseline system
-│   │   ├── mod.rs               # ~200 LOC: Entry, QueuePro, TaskAssigner aliases
-│   │   ├── policy_trait.rs      # `Policy` trait (5 lines, lowering target)
-│   │   ├── policy_runner.rs     # `PolicyRunner<P: Policy>` queue runner
-│   │   ├── dsl_runtime.rs       # combinators, reducers, named pure fns,
-│   │   │                        # `apply_default_after`, Observation schema
-│   │   ├── simple.rs            # random-q, round-robin-q, least-wait-token-q,
-│   │   │                        # bounded-most-hit-q (no upstream-system origin)
-│   │   ├── vllm.rs              # join-shortest-weight-q (vLLM 4·waiting + bs)
-│   │   ├── lmetric.rs           # lmetric-q
-│   │   ├── bailian.rs           # bailian-impl-q
-│   │   ├── aibrix.rs            # aibrix-q
-│   │   ├── dynamo.rs            # dynamo-q + dynamo-po-q (Decode-/Prefill-node logits)
-│   │   ├── preble/              # preble-q + cost_model/histogram/router utils
-│   │   └── llm_d/               # llm-d single-scorer ablations + multi-scorer combos
-│   │       ├── mod.rs
-│   │       ├── most_hit.rs / most_hit_load.rs / most_hit_load_active.rs
-│   │       └── least_active.rs / least_bs.rs / least_token_load.rs / least_waiting.rs
-│   └── simulator/           # Latency simulator (feature-gated `simulator`)
-│       ├── mod.rs               # piggyback observation entry points (on_sse, on_admit, query)
-│       ├── pctx.rs              # process-wide PredictorContext (OnceLock); 3-layer state machine
-│       ├── batch.rs             # BatchForPredictor (inner-regressor input)
-│       ├── predictor.rs         # Predictor + TrainedPredictor traits
-│       ├── rollout.rs           # RolloutBuffer + RolloutSlot + RolloutGist
-│       ├── mirror.rs            # PCtx L1 incremental mirror (uses radixtree::RadixTreeReqIdHash)
-│       ├── sched.rs              # PCtx SchedSnapshot (per-request progress: waiting/running)
-│       ├── vidur_rf.rs          # VidurRfPredictor (port of everparadise LlamaPredictor)
-│       └── config.rs            # SimulatorConfig (CSV path, model_hash, granularities)
+│   ├── gateway/             # FRONT layer — HTTP face
+│   │   ├── mod.rs
+│   │   ├── server.rs            # HTTP server (Axum): /v1/chat/completions, /info, /health, /metrics (~755 LOC); TGI URLs tombstoned to HTTP 410
+│   │   ├── validation.rs        # Request validation
+│   │   ├── chat_template.rs     # Chat template handling
+│   │   ├── model_config.rs      # Model config auto-discovery
+│   │   ├── health.rs            # Health checks
+│   │   └── api_types.rs         # DTOs (incl. Info, HubModelInfo, TokenizerRender)
+│   ├── scheduler/           # MIDDLE layer — decides
+│   │   ├── mod.rs
+│   │   ├── infer.rs             # Inference orchestration (~530 LOC)
+│   │   ├── queue.rs             # Request queue scaffolding (~380 LOC; policy logic now in policies/)
+│   │   ├── kvcache.rs           # BlockHashState + HashTableBlockHash (~1,165 LOC)
+│   │   │                        #   (radix impl moved to the `radixtree/` crate)
+│   │   ├── state.rs             # formerly metrics.rs (renamed: collision with crates.io `metrics`); SystemMetric counters & replica states
+│   │   ├── statistic.rs         # Statistics collection
+│   │   ├── policies/            # Scheduling policies — DSL-driven,
+│   │   │   │                    # one module per upstream baseline system
+│   │   │   ├── mod.rs               # ~200 LOC: Entry, QueuePro, TaskAssigner aliases
+│   │   │   ├── policy_trait.rs      # `Policy` trait (5 lines, lowering target)
+│   │   │   ├── policy_runner.rs     # `PolicyRunner<P: Policy>` queue runner
+│   │   │   ├── dsl_runtime.rs       # combinators, reducers, named pure fns,
+│   │   │   │                        # `apply_default_after`, Observation schema
+│   │   │   ├── simple.rs            # random-q, round-robin-q, least-wait-token-q,
+│   │   │   │                        # bounded-most-hit-q (no upstream-system origin)
+│   │   │   ├── vllm.rs              # join-shortest-weight-q (vLLM 4·waiting + bs)
+│   │   │   ├── lmetric.rs           # lmetric-q
+│   │   │   ├── bailian.rs           # bailian-impl-q
+│   │   │   ├── aibrix.rs            # aibrix-q
+│   │   │   ├── dynamo.rs            # dynamo-q + dynamo-po-q (Decode-/Prefill-node logits)
+│   │   │   ├── preble/              # preble-q + cost_model/histogram/router utils
+│   │   │   └── llm_d/               # llm-d single-scorer ablations + multi-scorer combos
+│   │   │       ├── mod.rs
+│   │   │       ├── most_hit.rs / most_hit_load.rs / most_hit_load_active.rs
+│   │   │       └── least_active.rs / least_bs.rs / least_token_load.rs / least_waiting.rs
+│   │   └── simulator/           # service-sidecar (feature `simulator`) — Latency simulator
+│   │       ├── mod.rs               # piggyback observation entry points (on_sse, on_admit, query)
+│   │       ├── pctx.rs              # process-wide PredictorContext (OnceLock); 3-layer state machine
+│   │       ├── batch.rs             # BatchForPredictor (inner-regressor input)
+│   │       ├── predictor.rs         # Predictor + TrainedPredictor traits
+│   │       ├── rollout.rs           # RolloutBuffer + RolloutSlot + RolloutGist
+│   │       ├── mirror.rs            # PCtx L1 incremental mirror (uses radixtree::RadixTreeReqIdHash)
+│   │       ├── sched.rs             # PCtx SchedSnapshot (per-request progress: waiting/running)
+│   │       ├── vidur_rf.rs          # VidurRfPredictor (port of everparadise LlamaPredictor)
+│   │       └── config.rs            # SimulatorConfig (CSV path, model_hash, granularities)
+│   └── engine/              # BACK layer — executes + observes
+│       ├── mod.rs
+│       ├── client.rs            # formerly engine_client.rs; engine client trait & dispatch (~510 LOC)
+│       ├── colocation.rs        # work + completion event loops (~1,120 LOC)
+│       ├── vllm_http.rs         # formerly vllmlet.rs; yaullm/vLLM HTTP+SSE backend
+│       └── zmq.rs               # formerly zmq_engine.rs (feature `zmq-backend`); ZMQ engine variant
 ├── policy-dsl/              # ~150 LOC proc-macro: parser + lint + lowering
 │   └── src/{lib,ast,parse,check,lower}.rs
 ├── radixtree/               # Patricia trie crate consumed by router/kvcache + simulator
@@ -124,9 +131,9 @@ blitz-router/
 
 ### Scheduling Policies (DSL-driven, compile-time via Cargo features)
 
-Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `router/src/policies/` that the `policy-dsl/` proc macro lowers into an `impl Policy for X { fn schedule(...) }` block. The macro enforces an allowlist lint (`docs/dsl/implementation.md` §2.2) so the impl always corresponds 1:1 to a spec-form DSL listing (`docs/dsl/policies.md` §2) via the rewrite table (`docs/dsl/implementation.md` §2.1). `PolicyRunner<P: Policy>` is the dispatch shim. Feature names are the source of truth — anything not in this list is stale.
+Each policy is one Cargo feature flag plus a `policy! { ... }` invocation in `router/src/scheduler/policies/` that the `policy-dsl/` proc macro lowers into an `impl Policy for X { fn schedule(...) }` block. The macro enforces an allowlist lint (`docs/dsl/implementation.md` §2.2) so the impl always corresponds 1:1 to a spec-form DSL listing (`docs/dsl/policies.md` §2) via the rewrite table (`docs/dsl/implementation.md` §2.1). `PolicyRunner<P: Policy>` is the dispatch shim. Feature names are the source of truth — anything not in this list is stale.
 
-Policies are organized under `router/src/policies/` by their upstream baseline system, plus `simple.rs` for trivial policies that have no upstream-system origin.
+Policies are organized under `router/src/scheduler/policies/` by their upstream baseline system, plus `simple.rs` for trivial policies that have no upstream-system origin.
 
 **`simple.rs`** — trivial, no upstream-system origin
 - `random-q` — `Select rand by 1`.
@@ -159,7 +166,7 @@ Policies are organized under `router/src/policies/` by their upstream baseline s
 - `least-bs-q` — `Select min by sctx.bs`. Closest single-scorer port of llm-d's `running-requests-scorer`; honest about composite signal (`sctx.bs = running + queued` per §4.2, not pure RunningRequestsSize) (`least_bs.rs`).
 - `least-active-q` — `Select min by sctx.all_tokens`. llm-d's `kv-cache-utilization-scorer` single-scorer ablation, cap-free (`1 − all_tokens/CAP` argmax = `all_tokens` argmin for any fixed CAP) (`least_active.rs`).
 - `least-token-load-q` — `Select min by queued_tokens(sctx) + sctx.all_tokens`. llm-d's `token-load-scorer` single-scorer ablation (`least_token_load.rs`).
-- `most-hit-load-q` — llm-d's two-scorer combo (precise-prefix-cache w=10 + load-aware w=1): per-component min-max-norm + weighted sum, argmax via `select_max_by`. Tunables in `metrics.rs::MOST_HIT_LOAD_W_*` (`most_hit_load.rs`).
+- `most-hit-load-q` — llm-d's two-scorer combo (precise-prefix-cache w=10 + load-aware w=1): per-component min-max-norm + weighted sum, argmax via `select_max_by`. Tunables in `state.rs::MOST_HIT_LOAD_W_*` (`most_hit_load.rs`).
 - `most-hit-load-active-q` — three-scorer combo (above + kv-cache-utilization w=1, cap-free via `1 − norm(all_tokens)`). Tunables `MOST_HIT_LOAD_ACTIVE_W_*` (`most_hit_load_active.rs`).
 
 llm-d policies that cannot be expressed in the DSL (e.g. session-aware) are NOT ported; reference: `workspace/llm-d-scheduler/`.
@@ -185,7 +192,7 @@ The scheduling policy is selected at compile time via Cargo features. Each polic
 
 ### Latency Simulator (feature-gated `simulator`, ORTHOGONAL to `<name>-q`)
 
-`router/src/simulator/` is a per-replica latency-prediction subsystem. Two layers:
+`router/src/scheduler/simulator/` is a per-replica latency-prediction subsystem. Two layers:
 - **Inner regressor** (`predictor.rs`, `vidur_rf.rs`): offline-trained ML model (port of Vidur RandomForest from `tmp/blitz-infer-pack-sim/`) with online linear-regression correction (`LinregCorrected`). `Predictor::predict(&BatchForPredictor) -> f32` (ms).
 - **Outer discrete-event simulator** (`rollout.rs`): rolls forward engine steps from the current `ScheduleContext`, calls the inner regressor per step, fills a `RolloutBuffer`. Stop condition: `waiting==∅ && chunked_prefill_in_progress==∅`. (RolloutBuffer types defined; full DES `query_sim` driver is a follow-up.)
 
@@ -269,12 +276,12 @@ Before every commit that changes code, scan **all related doc surfaces** and fol
 
 Per-change-type checklist (apply when relevant):
 
-- **Policy added / renamed / deleted** → `router/Cargo.toml` features, `router/src/policies/mod.rs` (module decl + re-export + TaskAssigner alias + catch-all exclusion list), `docs/dsl/policies.md` §2 listing + module-org table in §1, `CLAUDE.md` scheduling-policies list, file header doc, `.claude/memory/*.md` if a memory file references it.
+- **Policy added / renamed / deleted** → `router/Cargo.toml` features, `router/src/scheduler/policies/mod.rs` (module decl + re-export + TaskAssigner alias + catch-all exclusion list), `docs/dsl/policies.md` §2 listing + module-org table in §1, `CLAUDE.md` scheduling-policies list, file header doc, `.claude/memory/*.md` if a memory file references it.
 - **Algorithm change inside a policy body** → file header doc, `docs/dsl/policies.md` §2 listing, `CLAUDE.md` one-liner, related `.claude/memory/*.md` if any.
 - **New / renamed / removed named-fn or reducer** → `docs/dsl/schema.md` §5 + `docs/dsl/implementation.md` §2.1 rewrite table + §2.2 allowlist doc, `policy-dsl/src/check.rs` `ALLOWED_FNS`.
 - **`Observation` field rename or removal from DSL surface** → `docs/dsl/schema.md` §4.2 (or remove the row if no longer DSL-canonical) + §5 Body / Reads columns referring to it + `docs/dsl/policies.md` §2 listings using it, file headers using it, `policy-dsl/src/check.rs` if relevant.
 - **New cargo feature** → `router/Cargo.toml`, `mod.rs` catch-all exclusion list, `CLAUDE.md`, `docs/dsl/policies.md` §2 if applicable.
-- **Tunable constant added** → `router/src/metrics.rs` (per `docs/dsl/schema.md` §10.4 convention), file header pointer, `CLAUDE.md` if user-facing.
+- **Tunable constant added** → `router/src/scheduler/state.rs` (per `docs/dsl/schema.md` §10.4 convention), file header pointer, `CLAUDE.md` if user-facing.
 - **Public API / CLI flag change** → `README.md`, `CLAUDE.md` Configuration section, related `.claude/memory/*.md`.
 
 **Skills (load on-demand)**: invoke `/add-policy` when adding / renaming / deleting a policy — it walks the first checklist entry mechanically. Invoke `/verify-policy` when reviewing a `policy!` body for impl ↔ spec drift against its `docs/dsl/policies.md` §2 listing. Both skills reference this checklist as source of truth, so any change to the checklist must also be reflected in `.claude/skills/{add,verify}-policy.md`.

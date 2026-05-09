@@ -8,10 +8,9 @@ the per-topic files listed in §Index below.
 > mdBook, and Obsidian. Plain `cmark` will show them as fenced code;
 > that is acceptable but you lose the diagrams.
 
-> The three-layer view is the **conceptual** architecture. The
-> on-disk layout under `router/src/` does not yet reflect it
-> (everything is currently flat). Bringing the file tree into
-> alignment is tracked in [`../refactor-plan.md`](../refactor-plan.md).
+> The three-layer view is mirrored on disk: `router/src/gateway/`,
+> `router/src/scheduler/`, `router/src/engine/`. The original
+> reorganization is documented in [`../refactor-plan.md`](../refactor-plan.md).
 
 ## Index
 
@@ -300,11 +299,11 @@ flowchart TB
     subgraph BACK["BACK — Engine driver (execute + observe)"]
         direction LR
         b_coloc["colocation::ColocationController<br/>{work,completion}_event_loop[i]<br/>(N replica pairs)"]:::back
-        b_trait["engine_client::<br/>EngineClient + EngineStepReceiver<br/>(trait surface,<br/>EngineStepOutput unified type)"]:::back
+        b_trait["engine::client::<br/>EngineClient + EngineStepReceiver<br/>(trait surface,<br/>EngineStepOutput unified type)"]:::back
         subgraph adapters["impls (one selected by feature)"]
             direction LR
-            b_vllm["vllmlet::VllmClient<br/>(HTTP + SSE)"]:::back
-            b_zmq["zmq_engine::ZmqEngineClient<br/>(ZMQ, alt)"]:::back
+            b_vllm["engine::vllm_http::VllmClient<br/>(HTTP + SSE)"]:::back
+            b_zmq["engine::zmq::ZmqEngineClient<br/>(ZMQ, alt)"]:::back
         end
         b_trait -- impl --> b_vllm
         b_trait -- impl --> b_zmq
@@ -369,7 +368,7 @@ Everything else is internal to its layer.
 
 Two consequences worth pinning:
 
-- **Adding a new engine transport** = `impl EngineClient + EngineStepReceiver`. Neither MIDDLE nor `colocation` change. Just add a new adapter file alongside `vllmlet.rs` / `zmq_engine.rs`.
+- **Adding a new engine transport** = `impl EngineClient + EngineStepReceiver`. Neither MIDDLE nor `colocation` change. Just add a new adapter file alongside `engine/vllm_http.rs` / `engine/zmq.rs`.
 - **Adding a new data-sidecar** = a new `Vec<Arc<Mutex<NewCtx>>>` + one writer (whatever subsystem produces the data) + N readers (whatever policies want it). PolicyRunner core stays untouched.
 - **Adding a new service-sidecar** = a new subsystem that owns its private state, registers its silent-wiring callbacks, and exposes a service trait; consumers get an `Arc<NewService>`-style handle. PolicyRunner core still stays untouched.
 
@@ -377,7 +376,7 @@ Two consequences worth pinning:
 
 | You want to … | Read |
 |---|---|
-| Bring the directory layout into alignment with the three-layer model above | [`../refactor-plan.md`](../refactor-plan.md) |
+| See how the on-disk three-layer reorg was carried out | [`../refactor-plan.md`](../refactor-plan.md) |
 | Understand any single layer in depth | The per-topic file in §Index above |
 | Add a new scheduling policy | [`../dsl/policies.md`](../dsl/policies.md) + invoke the `/add-policy` skill |
 | Verify a policy spec matches its impl | invoke `/verify-policy` |

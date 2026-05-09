@@ -17,16 +17,16 @@ Before starting, confirm:
 
 Open `docs/dsl/policies.md` §1 (Module organisation by upstream baseline system). Decide which existing module the policy belongs to:
 
-- vLLM-derived → `router/src/policies/vllm.rs`
-- bailian-derived → `router/src/policies/bailian.rs`
-- AIBrix-derived → `router/src/policies/aibrix.rs`
-- Dynamo-derived → `router/src/policies/dynamo.rs`
-- our system (lmetric) → `router/src/policies/lmetric.rs`
-- Preble-derived → `router/src/policies/preble/` (a directory)
-- llm-d-derived → `router/src/policies/llm_d/<file>.rs` (one file per policy in the directory)
-- no upstream-system origin AND a single `Select` or shallow `Filter` → `router/src/policies/simple.rs`
+- vLLM-derived → `router/src/scheduler/policies/vllm.rs`
+- bailian-derived → `router/src/scheduler/policies/bailian.rs`
+- AIBrix-derived → `router/src/scheduler/policies/aibrix.rs`
+- Dynamo-derived → `router/src/scheduler/policies/dynamo.rs`
+- our system (lmetric) → `router/src/scheduler/policies/lmetric.rs`
+- Preble-derived → `router/src/scheduler/policies/preble/` (a directory)
+- llm-d-derived → `router/src/scheduler/policies/llm_d/<file>.rs` (one file per policy in the directory)
+- no upstream-system origin AND a single `Select` or shallow `Filter` → `router/src/scheduler/policies/simple.rs`
 
-If the policy comes from a NEW upstream baseline system (not in the table above), create a new module file/dir at `router/src/policies/<system>.rs` and update `policies.md` §1's table in the same commit.
+If the policy comes from a NEW upstream baseline system (not in the table above), create a new module file/dir at `router/src/scheduler/policies/<system>.rs` and update `policies.md` §1's table in the same commit.
 
 ## 2. Add the cargo feature
 
@@ -82,7 +82,7 @@ Add at the top of the policy's source file (or above the `policy!` invocation if
 
 ## 5. Wire up `mod.rs`
 
-Edit `router/src/policies/mod.rs`. **Three** places to update:
+Edit `router/src/scheduler/policies/mod.rs`. **Three** places to update:
 
 1. Module declaration (only if you added a new file/module, not when extending `simple.rs`):
    ```rust

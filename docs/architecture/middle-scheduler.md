@@ -15,15 +15,15 @@ replica's buffer. All of that lives in [BACK](back-engine-driver.md).
 
 ## Modules
 
-| Module (current path) | Role                                                                          | LOC  |
-|-----------------------|-------------------------------------------------------------------------------|------|
-| `infer.rs`            | `Infer` — process orchestrator. Owns validation, queue, the concurrency `Semaphore`, and `PolicyRunner`. **Spawns BACK's `ColocationController`** at startup. Public method `generate(req)` is the gateway-facing handle. | 530  |
-| `queue.rs`            | 8-line shim — re-exports `Entry`, `QueuePro`, `TaskAssigner` from `policies/`. Queue logic itself lives in `policies/policy_runner.rs`. | 8    |
-| `policies/`           | DSL-driven scheduling policies (18 of them, one per upstream baseline). One Cargo feature flag selects the active policy at compile time. **This is the actual scheduler.** | dir  |
-| `metrics.rs`          | Defines the `ScheduleContext` data-sidecar struct (`LMetric` + `PrefixBlockHash`). Tunable constants for policies (`BAILIAN_*`, `MOST_HIT_LOAD_*`, …). **Note**: this `metrics.rs` is unrelated to the Prometheus crate also called `metrics` (which `server.rs` imports as `metrics = "0.21.1"` and uses for `metrics::increment_counter!`). The naming collision is real and is the reason [`../refactor-plan.md`](../refactor-plan.md) renames the file to `scheduler/state.rs`. | 216  |
-| `kvcache.rs`          | `BlockHashState` (per-request prefix-hash builder used by BACK to compute hashes for insertion), `mod hashtable_block_hash` (alternative `BlockHash` impl selected by the `hashtable-blockhash` feature), the feature-gated `PrefixBlockHash` re-export from the `radixtree` crate. | 1130 |
-| `statistic.rs`        | Statistics task spawned by `Infer` to dump `ScheduleContext` periodically     | 47   |
-| `simulator/`          | Latency simulator (feature `simulator`). **Service-sidecar to `PolicyRunner`**: subscribes silently to BACK's `on_sse` and `PolicyRunner`'s `on_admit` (the silent wiring); owns `Vec<Arc<PCtx>>` (one `PCtx` per replica) as **private state**, where each `PCtx` privately owns the L1 mirror (`RadixTreeReqIdHash` + per-request progress), L2 regressor, and L3 ephemeral rollout; exposes `query(replica, request_id, …) -> Option<RolloutGist>` to simulator-aware policies (none consume it yet — purely future). | dir  |
+| Module (path)            | Role                                                                          | LOC  |
+|--------------------------|-------------------------------------------------------------------------------|------|
+| `scheduler/infer.rs`     | `Infer` — process orchestrator. Owns validation, queue, the concurrency `Semaphore`, and `PolicyRunner`. **Spawns BACK's `ColocationController`** at startup. Public method `generate(req)` is the gateway-facing handle. | 530  |
+| `scheduler/queue.rs`     | 8-line shim — re-exports `Entry`, `QueuePro`, `TaskAssigner` from `policies/`. Queue logic itself lives in `policies/policy_runner.rs`. | 8    |
+| `scheduler/policies/`    | DSL-driven scheduling policies (18 of them, one per upstream baseline). One Cargo feature flag selects the active policy at compile time. **This is the actual scheduler.** | dir  |
+| `scheduler/state.rs`     | Defines the `ScheduleContext` data-sidecar struct (`LMetric` + `PrefixBlockHash`). Tunable constants for policies (`BAILIAN_*`, `MOST_HIT_LOAD_*`, …). *(formerly `metrics.rs`; renamed to avoid collision with the crates.io `metrics` crate used by `gateway/server.rs` for `metrics::increment_counter!`.)* | 216  |
+| `scheduler/kvcache.rs`   | `BlockHashState` (per-request prefix-hash builder used by BACK to compute hashes for insertion), `mod hashtable_block_hash` (alternative `BlockHash` impl selected by the `hashtable-blockhash` feature), the feature-gated `PrefixBlockHash` re-export from the `radixtree` crate. | 1130 |
+| `scheduler/statistic.rs` | Statistics task spawned by `Infer` to dump `ScheduleContext` periodically     | 47   |
+| `scheduler/simulator/`   | Latency simulator (feature `simulator`). **Service-sidecar to `PolicyRunner`**: subscribes silently to BACK's `on_sse` and `PolicyRunner`'s `on_admit` (the silent wiring); owns `Vec<Arc<PCtx>>` (one `PCtx` per replica) as **private state**, where each `PCtx` privately owns the L1 mirror (`RadixTreeReqIdHash` + per-request progress), L2 regressor, and L3 ephemeral rollout; exposes `query(replica, request_id, …) -> Option<RolloutGist>` to simulator-aware policies (none consume it yet — purely future). | dir  |
 
 ## Scheduler-internal containment + wiring
 
@@ -118,7 +118,7 @@ flowchart TB
 Every policy implements one trait:
 
 ```rust
-// Currently at: router/src/policies/policy_trait.rs
+// Currently at: router/src/scheduler/policies/policy_trait.rs
 pub trait Policy {
     type GlobalContext: Default + Send + Sync + 'static;
 
@@ -141,7 +141,7 @@ any internal predictor state.)
 
 You don't write this `impl` by hand. You write a DSL spec and the
 `policy! { … }` proc macro from `policy-dsl/` lowers it. Example
-(`router/src/policies/lmetric.rs`):
+(`router/src/scheduler/policies/lmetric.rs`):
 
 ```text
 policy lmetric-q (gctx: ()):

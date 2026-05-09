@@ -16,12 +16,12 @@ transport (HTTP+SSE today, ZMQ alternative).
 
 ## Modules
 
-| Module (current path)  | Role                                                                          | LOC  |
-|------------------------|-------------------------------------------------------------------------------|------|
-| `colocation.rs`        | `ColocationController` + the two per-replica async loops: `work_event_loop` (drains the commit buffer via `next_request(i)`, calls `EngineClient::add_request`, owns the in-flight `entries` map) and `completion_event_loop` (consumes engine SSE → `EngineStepOutput`, writes to the `ScheduleContext` sidecar, drives request lifecycle bookkeeping) | 1105 |
-| `engine_client.rs`     | The `EngineClient` + `EngineStepReceiver` traits + the unified `EngineStepOutput` type. The single point of dispatch from `colocation` to a transport adapter | 518  |
-| `vllmlet.rs`           | `VllmClient` — reqwest-based HTTP client to a single engine; `/v1/metrics` SSE consumer that yields `VllmMetric` | 309  |
-| `zmq_engine.rs`        | Alternate ZMQ transport (feature-gated `zmq-backend`)                          | 595  |
+| Module (path)            | Role                                                                          | LOC  |
+|--------------------------|-------------------------------------------------------------------------------|------|
+| `engine/colocation.rs`   | `ColocationController` + the two per-replica async loops: `work_event_loop` (drains the commit buffer via `next_request(i)`, calls `EngineClient::add_request`, owns the in-flight `entries` map) and `completion_event_loop` (consumes engine SSE → `EngineStepOutput`, writes to the `ScheduleContext` sidecar, drives request lifecycle bookkeeping) | 1105 |
+| `engine/client.rs`       | The `EngineClient` + `EngineStepReceiver` traits + the unified `EngineStepOutput` type. The single point of dispatch from `colocation` to a transport adapter. *(formerly `engine_client.rs`.)* | 518  |
+| `engine/vllm_http.rs`    | `VllmClient` — reqwest-based HTTP client to a single engine; `/v1/metrics` SSE consumer that yields `VllmMetric`. *(formerly `vllmlet.rs`.)* | 309  |
+| `engine/zmq.rs`          | Alternate ZMQ transport (feature-gated `zmq-backend`). *(formerly `zmq_engine.rs`.)* | 595  |
 
 ## Back-internal containment + wiring
 
@@ -44,13 +44,13 @@ flowchart TB
     end
 
     subgraph trait_layer["the transport-adapter trait surface"]
-        b_trait["engine_client::EngineClient<br/>+ engine_client::EngineStepReceiver<br/>(EngineStepOutput unified type)"]:::back
+        b_trait["engine::client::EngineClient<br/>+ engine::client::EngineStepReceiver<br/>(EngineStepOutput unified type)"]:::back
     end
 
     subgraph adapters["impls (one selected by feature flag)"]
         direction LR
-        b_vllm["vllmlet::VllmClient<br/>(reqwest HTTP +<br/>eventsource-client SSE)"]:::back
-        b_zmq["zmq_engine::ZmqEngineClient<br/>(ZMQ, feature 'zmq-backend')"]:::back
+        b_vllm["engine::vllm_http::VllmClient<br/>(reqwest HTTP +<br/>eventsource-client SSE)"]:::back
+        b_zmq["engine::zmq::ZmqEngineClient<br/>(ZMQ, feature 'zmq-backend')"]:::back
     end
 
     %% Hot-path: work loop drains commit buffer and dispatches
@@ -78,7 +78,7 @@ flowchart TB
 The trait surface is small enough to quote in full:
 
 ```rust
-// engine_client.rs
+// engine/client.rs
 pub trait EngineClient: Send {
     async fn add_request(&mut self, req: ValidGenerateRequest) -> Result<(), EngineClientError>;
     async fn abort_request(&mut self, id: u64) -> Result<(), EngineClientError>;
