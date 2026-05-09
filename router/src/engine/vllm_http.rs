@@ -75,8 +75,8 @@ impl VllmClient {
             prompt: request.input_tokens.clone(),
             model: self.model_name.clone(),
             stream: false,
-            max_tokens: Some(request.stopping_parameters.max_new_tokens),
-            min_tokens: Some(request.stopping_parameters.max_new_tokens),
+            max_tokens: Some(request.params.max_new_tokens),
+            min_tokens: Some(request.params.max_new_tokens),
             temperature: None,
         };
         self.send_request("/v1/completions", id, json!(request2vllm)).await

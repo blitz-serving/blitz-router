@@ -18,24 +18,6 @@
 // removal, enum simplification) are deliberately deferred to a
 // follow-up step.
 
-// ==== Tokens ====
-
-/// Per-step token output for a single request.
-///
-/// Mirrors `message Tokens { repeated uint32 ids = 1; repeated float
-/// logprobs = 2; repeated string texts = 3; repeated bool is_special = 4; }`.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Tokens {
-    /// Token IDs.
-    pub ids: Vec<u32>,
-    /// Logprobs.
-    pub logprobs: Vec<f32>,
-    /// Decoded token strings.
-    pub texts: Vec<String>,
-    /// Whether each token is a special token.
-    pub is_special: Vec<bool>,
-}
-
 // ==== Generation result ====
 
 /// Final generation result for a finished request.
@@ -57,26 +39,6 @@ pub struct GeneratedText {
     pub finish_reason: i32,
     /// Sampling seed, if any.
     pub seed: Option<u64>,
-}
-
-/// Per-request generation event emitted by the (legacy) backend.
-///
-/// Mirrors `message Generation { required uint64 request_id = 1;
-/// optional Tokens prefill_tokens = 2; required Tokens tokens = 3;
-/// optional GeneratedText generated_text = 4; repeated Tokens
-/// top_tokens = 5; }`.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Generation {
-    /// Request ID.
-    pub request_id: u64,
-    /// Prefill tokens (optional).
-    pub prefill_tokens: Option<Tokens>,
-    /// Newly produced tokens for this step.
-    pub tokens: Tokens,
-    /// Final generated text, if the request just finished.
-    pub generated_text: Option<GeneratedText>,
-    /// Top-N alternative tokens (optional).
-    pub top_tokens: Vec<Tokens>,
 }
 
 // ==== Finish reason ====
@@ -135,62 +97,56 @@ impl TryFrom<i32> for FinishReason {
 
 /// Backend shard info reported at startup.
 ///
-/// Mirrors `message InfoResponse { required bool requires_padding = 1;
-/// required string dtype = 2; required string device_type = 3;
-/// optional uint32 window_size = 4; required uint32 speculate = 5; }`.
+/// Pared to the fields actually consumed by the gateway: `dtype` and
+/// `device_type` flow into `Info { model_dtype, model_device_type }`
+/// for the `/info` debug endpoint, and `speculate` parameterises the
+/// Prometheus latency-bucket setup. The legacy `requires_padding` and
+/// `window_size` fields had no live reader and were dropped.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InfoResponse {
-    /// Whether the backend requires inputs to be padded.
-    pub requires_padding: bool,
     /// Compute dtype label (e.g. `"float16"`).
     pub dtype: String,
     /// Device type label (e.g. `"cuda"`).
     pub device_type: String,
-    /// Optional sliding-window size.
-    pub window_size: Option<u32>,
     /// Number of speculatively generated tokens per step.
     pub speculate: u32,
 }
 
-// ==== Sampling parameters ====
+// ==== Generation parameters ====
 
-/// Per-request sampling configuration.
+/// Per-request generation parameters: a merged sampling + stopping
+/// configuration that mirrors the OpenAI ChatCompletion → vanilla vLLM
+/// passthrough surface.
 ///
-/// Mirrors `message NextTokenChooserParameters { required float
-/// temperature = 1; required uint32 top_k = 2; required float top_p = 3;
-/// required float typical_p = 4; required bool do_sample = 5; required
-/// uint64 seed = 6; required float repetition_penalty = 7; required
-/// bool watermark = 8; }`.
+/// Field selection follows the rule: a field is kept iff it can flow
+/// from an OpenAI-style request through to vanilla vLLM's
+/// `CompletionRequest` (see `vllm/entrypoints/openai/protocol.py`).
+/// Fields currently unwired but in the path are kept stubbed (`Default`
+/// supplies sensible neutrals) so the wiring can be added later without
+/// reshape. Fields not in the path were dropped:
+///
+///   - `typical_p` (no vLLM equivalent at the OpenAI layer)
+///   - `do_sample` (vLLM uses temperature == 0 to mean greedy)
+///   - `watermark` (TGI-only)
+///
+/// The legacy split between `NextTokenChooserParameters` and
+/// `StoppingCriteriaParameters` was a proto-era artefact; the merged
+/// shape matches how callers consume it.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct NextTokenChooserParameters {
-    /// Exponential scaling output probability distribution.
+pub struct GenerationParams {
+    /// Exponential scaling of the output probability distribution.
     pub temperature: f32,
     /// Restrict to the `k` highest probability elements.
     pub top_k: u32,
     /// Restrict to top tokens summing to `<= top_p`.
     pub top_p: f32,
-    /// Restrict to top tokens summing to `<= typical_p`.
-    pub typical_p: f32,
-    /// Apply sampling on the logits.
-    pub do_sample: bool,
-    /// Random seed for sampling.
-    pub seed: u64,
     /// Repetition penalty.
     pub repetition_penalty: f32,
-    /// Token watermarking ("A Watermark for Large Language Models").
-    pub watermark: bool,
-}
-
-/// Per-request stopping criteria.
-///
-/// Mirrors `message StoppingCriteriaParameters { required uint32
-/// max_new_tokens = 1; repeated string stop_sequences = 2; required
-/// bool ignore_eos_token = 3; }`.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct StoppingCriteriaParameters {
+    /// Random seed for sampling.
+    pub seed: u64,
     /// Maximum number of generated tokens.
     pub max_new_tokens: u32,
-    /// Optional stopping sequences.
+    /// Stopping sequences (matched against generated text).
     pub stop_sequences: Vec<String>,
     /// Ignore end-of-sequence token (used for benchmarking).
     pub ignore_eos_token: bool,

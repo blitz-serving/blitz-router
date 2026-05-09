@@ -3,7 +3,7 @@ use super::chat_template::ChatRenderer;
 use super::validation::ValidationError::{BestOfSampling, BestOfSeed, EmptyInput};
 use crate::{ChatMessage, GenerateParameters, GenerateRequest, TokenizerRender};
 
-use crate::types::{NextTokenChooserParameters, StoppingCriteriaParameters};
+use crate::types::GenerationParams;
 use rand::{thread_rng, Rng};
 use thiserror::Error;
 use tokenizers::TruncationDirection;
@@ -162,13 +162,10 @@ impl Validation {
             repetition_penalty,
             top_k,
             top_p,
-            typical_p,
-            do_sample,
             max_new_tokens,
             stop: stop_sequences,
             truncate,
             seed,
-            watermark,
             decoder_input_details,
             top_n_tokens,
             ..
@@ -176,11 +173,7 @@ impl Validation {
 
         // sampling must be true when best_of > 1
         let best_of = best_of.unwrap_or(1);
-        let sampling = do_sample
-            || temperature.is_some()
-            || top_k.is_some()
-            || top_p.is_some()
-            || typical_p.is_some();
+        let sampling = temperature.is_some() || top_k.is_some() || top_p.is_some();
 
         if best_of > 1 && !sampling {
             return Err(BestOfSampling);
@@ -202,15 +195,6 @@ impl Validation {
             .map(|value| {
                 if value <= 0.0 || value >= 1.0 {
                     return Err(ValidationError::TopP);
-                }
-                Ok(value)
-            })
-            .unwrap_or(Ok(1.0))?;
-
-        let typical_p = typical_p
-            .map(|value| {
-                if value <= 0.0 || value >= 1.0 {
-                    return Err(ValidationError::TypicalP);
                 }
                 Ok(value)
             })
@@ -278,18 +262,16 @@ impl Validation {
         let (messages, inputs, input_length, max_new_tokens, input_tokens) =
             self.validate_input(request.inputs, truncate, max_new_tokens, request.chat_messages).await?;
 
-        let parameters = NextTokenChooserParameters {
+        let params = GenerationParams {
             temperature,
             repetition_penalty,
             top_k,
             top_p,
-            typical_p,
-            do_sample,
             seed,
-            watermark,
+            max_new_tokens,
+            stop_sequences,
+            ignore_eos_token: false,
         };
-        let stopping_parameters =
-            StoppingCriteriaParameters { max_new_tokens, stop_sequences, ignore_eos_token: false };
 
         metrics::histogram!("blitz_request_max_new_tokens", max_new_tokens as f64);
 
@@ -300,8 +282,7 @@ impl Validation {
             decoder_input_details,
             input_length: input_length as u32,
             truncate: truncate.unwrap_or(self.max_input_length) as u32,
-            parameters,
-            stopping_parameters,
+            params,
             top_n_tokens,
             input_tokens,
         })
@@ -412,8 +393,7 @@ pub(crate) struct ValidGenerateRequest {
     pub input_length: u32,
     pub truncate: u32,
     pub decoder_input_details: bool,
-    pub parameters: NextTokenChooserParameters,
-    pub stopping_parameters: StoppingCriteriaParameters,
+    pub params: GenerationParams,
     pub top_n_tokens: u32,
     pub input_tokens: Vec<u32>,
 }
@@ -446,8 +426,6 @@ pub enum ValidationError {
     TopK,
     #[error("`truncate` must be strictly positive and less than {0}. Given: {1}")]
     Truncate(usize, usize),
-    #[error("`typical_p` must be > 0.0 and < 1.0")]
-    TypicalP,
     #[error("one of `max_new_tokens` or `truncate` must be set if a fast tokenizer is not in use")]
     UnsetMaxNewTokens,
     #[error("`max_new_tokens` must be strictly positive")]

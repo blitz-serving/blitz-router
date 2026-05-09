@@ -16,7 +16,7 @@ use crate::{
     ChatRenderer, ChatMessage, ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionChoice, ChatCompletionUsage, ChatCompletionChunk, ChatCompletionChunkChoice,
     ChatCompletionDelta, ErrorResponse,
-    FinishReason, GenerateParameters, GenerateRequest, HubModelInfo, Infer, Info,
+    GenerateParameters, GenerateRequest, HubModelInfo, Infer, Info,
     Token, TokenizerRender, Validation,
     default_parameters,
 };
@@ -276,8 +276,7 @@ async fn chat_completions_stream(
                     match response {
                         Ok(response) => {
                             match response {
-                                InferStreamResponse::PrefillDone => {}
-                                InferStreamResponse::Prefill(_) => {}
+                                InferStreamResponse::Prefill => {}
                                 InferStreamResponse::Intermediate { token, .. } => {
                                     let chunk = ChatCompletionChunk {
                                         id: chat_id.clone(),
@@ -421,7 +420,6 @@ pub async fn run(
     GenerateRequest,
     GenerateParameters,
     Token,
-    FinishReason,
     ErrorResponse,
     )
     ),
@@ -650,17 +648,6 @@ async fn shutdown_signal() {
 
     tracing::info!("signal received, starting graceful shutdown");
     opentelemetry::global::shutdown_tracer_provider();
-}
-
-impl From<i32> for FinishReason {
-    fn from(finish_reason: i32) -> Self {
-        let finish_reason = crate::types::FinishReason::try_from(finish_reason).unwrap();
-        match finish_reason {
-            crate::types::FinishReason::Length => FinishReason::Length,
-            crate::types::FinishReason::EosToken => FinishReason::EndOfSequenceToken,
-            crate::types::FinishReason::StopSequence => FinishReason::StopSequence,
-        }
-    }
 }
 
 /// Convert to Axum supported formats

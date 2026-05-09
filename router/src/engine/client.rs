@@ -396,9 +396,9 @@ mod zmq_impl {
             mm_hashes: vec![],
             mm_placeholders: vec![],
             sampling_params: SamplingParams {
-                max_tokens: request.stopping_parameters.max_new_tokens,
+                max_tokens: request.params.max_new_tokens,
                 temperature: 0.0,
-                min_tokens: request.stopping_parameters.max_new_tokens,
+                min_tokens: request.params.max_new_tokens,
                 ..Default::default()
             },
             eos_token_id: None,

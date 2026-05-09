@@ -38,18 +38,6 @@ pub(crate) struct GenerateParameters {
         example = 0.95
     )]
     pub top_p: Option<f32>,
-    #[serde(default)]
-    #[schema(
-        exclusive_minimum = 0.0,
-        maximum = 1.0,
-        nullable = true,
-        default = "null",
-        example = 0.95
-    )]
-    pub typical_p: Option<f32>,
-    #[serde(default)]
-    #[schema(default = "false", example = true)]
-    pub do_sample: bool,
     #[serde(default = "default_max_new_tokens")]
     #[schema(nullable = true, default = "100", example = "20")]
     pub max_new_tokens: Option<u32>,
@@ -59,9 +47,6 @@ pub(crate) struct GenerateParameters {
     #[serde(default)]
     #[schema(nullable = true, default = "null", example = "null")]
     pub truncate: Option<usize>,
-    #[serde(default)]
-    #[schema(default = "false", example = true)]
-    pub watermark: bool,
     #[serde(default)]
     #[schema(default = "true")]
     pub decoder_input_details: bool,
@@ -84,12 +69,9 @@ pub(crate) fn default_parameters() -> GenerateParameters {
         repetition_penalty: None,
         top_k: None,
         top_p: None,
-        typical_p: None,
-        do_sample: false,
         max_new_tokens: default_max_new_tokens(),
         stop: Vec::new(),
         truncate: None,
-        watermark: false,
         decoder_input_details: false,
         seed: None,
         top_n_tokens: None,
@@ -117,20 +99,6 @@ pub struct Token {
     pub(crate) text: String,
     #[schema(nullable = true, example = "-0.34")]
     pub(crate) logprob: f32,
-    #[schema(example = "false")]
-    pub(crate) special: bool,
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all(serialize = "snake_case"))]
-pub(crate) enum FinishReason {
-    #[schema(rename = "length")]
-    Length,
-    #[serde(rename = "eos_token")]
-    #[schema(rename = "eos_token")]
-    EndOfSequenceToken,
-    #[schema(rename = "stop_sequence")]
-    StopSequence,
 }
 
 #[derive(Serialize, ToSchema)]

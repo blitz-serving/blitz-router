@@ -9,7 +9,7 @@
 use crate::engine::EngineClient;
 use super::kvcache::{BlockHash, BlockHashState, PrefixBlockHash};
 use super::queue::{QueuePro, TaskAssigner};
-use super::statistic::{statistic, increase_prefill_tokens};
+use super::statistic::statistic;
 use crate::gateway::validation::{Validation, ValidationError};
 use crate::{
     start_vllm_colocation_event_loop,
@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use futures::future::try_join_all;
 use nohash_hasher::IntMap;
-use crate::types::{GeneratedText, Generation, Tokens};
+use crate::types::GeneratedText;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
@@ -174,7 +174,7 @@ impl Infer {
         while let Some(response) = stream.next().await {
             match response? {
                 // Add prefill tokens
-                InferStreamResponse::Prefill(_) => {
+                InferStreamResponse::Prefill => {
                     first_token_time.get_or_insert(s.elapsed());
                     interval = tokio::time::Instant::now();
                 }
@@ -207,11 +207,6 @@ impl Infer {
                     time_between_tokens.remove(0);
                     output_length = result_tokens.len();
                     break;
-                }
-                // DIY message
-                InferStreamResponse::PrefillDone => {
-                    first_token_time.get_or_insert(s.elapsed());
-                    interval = tokio::time::Instant::now();
                 }
             }
         }
@@ -308,142 +303,10 @@ impl Infer {
 /// (BLITZ) :: send generation to http server
 /// Send one or multiple `InferStreamResponse` to Infer for all `entries`
 /// and filter entries
-#[instrument(skip_all)]
-pub(crate) fn filter_send_generations(
-    generations: &Vec<Generation>,
-    entries: &mut IntMap<u64, Entry>,
-) {
-    generations.iter().for_each(|generation| {
-        let id = generation.request_id;
-        // Get entry
-        // We can `expect` here as the request id should always be in the entries
-        let entry = entries
-            .get_mut(&id)
-            .expect(format!("ID {} not found in entries. This is a bug.", id).as_str());
-
-        if entry.prev_token_time.is_none() {
-            entry.prev_token_time = Some(Instant::now());
-        } else {
-            let elapsed = entry.prev_token_time.unwrap().elapsed();
-            entry.prev_token_time = Some(Instant::now());
-            entry.max_time_between_tokens = std::cmp::max(entry.max_time_between_tokens, elapsed);
-        }
-
-        // Send generation responses back to the infer task
-        // If the receive an error from the Flume channel, it means that the client dropped the
-        // request and we need to stop generating hence why we unwrap_or(true)
-        let stopped = send_responses(generation.clone(), entry)
-            .map_err(|err| {
-                tracing::error!("Entry response channel error.");
-                metrics::increment_counter!("blitz_request_failure", "err" => "dropped");
-                err
-            })
-            .unwrap_or(true);
-        if stopped {
-            entries
-                .remove(&id)
-                .expect(format!("ID {} not found in entries. This is a bug.", id).as_str());
-        }
-    });
-}
-
-/// (BLITZ) :: modify http server state
-pub(crate) fn filter_send_generations_on_prefill_done(
-    generations: &Vec<Generation>,
-    entries: &mut IntMap<u64, Entry>,
-) {
-    generations.iter().for_each(|generation| {
-        let id = generation.request_id;
-        let entry = entries
-            .get_mut(&id)
-            .expect(format!("ID {} not found in entries. This is a bug.", id).as_str());
-
-        increase_prefill_tokens(entry.request.input_length as _);
-
-        let stopped = entry.response_tx.send(Ok(InferStreamResponse::PrefillDone)).is_err();
-        if stopped {
-            entries
-                .remove(&id)
-                .expect(format!("ID {} not found in entries. This is a bug.", id).as_str());
-        }
-    });
-}
-
-/// Send responses through the `entry` response channel
-#[instrument(skip_all)]
-pub(crate) fn send_responses(
-    generation: Generation,
-    entry: &Entry,
-) -> Result<bool, Box<SendError<Result<InferStreamResponse, InferError>>>> {
-    // Return directly if the channel is disconnected
-    if entry.response_tx.is_closed() {
-        metrics::increment_counter!("blitz_request_failure", "err" => "dropped");
-        return Ok(true);
-    }
-
-    let mut stopped = false;
-
-    if let Some(prefill_tokens) = generation.prefill_tokens {
-        // Send message
-        entry.response_tx.send(Ok(InferStreamResponse::Prefill(prefill_tokens)))?;
-    }
-
-    // Create last Token
-    let tokens_ = generation.tokens;
-    let n = tokens_.ids.len();
-    metrics::histogram!("blitz_request_skipped_tokens", (n - 1) as f64);
-    let mut iterator =
-        tokens_.ids.into_iter().zip(tokens_.texts.into_iter()).enumerate().peekable();
-    while let Some((i, (id, text))) = iterator.next() {
-        let token = Token { id, text, logprob: 0.0, special: false };
-        let top_tokens = if let Some(top_tokens_) = generation.top_tokens.get(i) {
-            top_tokens_
-                .ids
-                .iter()
-                .zip(top_tokens_.logprobs.iter())
-                .zip(top_tokens_.texts.iter())
-                .zip(top_tokens_.is_special.iter())
-                .map(|(((&id, &logprob), text), &special)| Token {
-                    id,
-                    text: text.to_string(),
-                    logprob,
-                    special,
-                })
-                .collect()
-        } else {
-            vec![]
-        };
-        match (&generation.generated_text, iterator.peek()) {
-            (Some(generated_text), None) => {
-                tracing::trace!("Request {} finished.", generation.request_id);
-                // Generation has ended
-                stopped = true;
-                // Send message
-                entry.response_tx.send(Ok(InferStreamResponse::End {
-                    token,
-                    top_tokens,
-                    generated_text: generated_text.clone(),
-                    queued: entry.queue_time,
-                    start: entry.batch_time.unwrap(),
-                    max_time_between_tokens: entry.max_time_between_tokens,
-                }))?;
-            }
-            _ => {
-                // Send message
-                entry
-                    .response_tx
-                    .send(Ok(InferStreamResponse::Intermediate { token, top_tokens }))?;
-            }
-        }
-    }
-
-    Ok(stopped)
-}
-
 #[derive(Debug)]
 pub(crate) enum InferStreamResponse {
     // Optional first message
-    Prefill(Tokens),
+    Prefill,
     // Intermediate messages
     Intermediate {
         token: Token,
@@ -458,9 +321,6 @@ pub(crate) enum InferStreamResponse {
         queued: Instant,
         max_time_between_tokens: Duration,
     },
-
-    // DIY message
-    PrefillDone,
 }
 
 #[allow(dead_code)]

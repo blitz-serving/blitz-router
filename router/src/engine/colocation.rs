@@ -207,7 +207,7 @@ mod task_assignment {
                             request_id = id,
                             queue_time_us = entry.batch_time.unwrap().duration_since(entry.queue_time).as_micros() as u64,
                             input_length = entry.request.input_length,
-                            max_new_tokens = entry.request.stopping_parameters.max_new_tokens,
+                            max_new_tokens = entry.request.params.max_new_tokens,
                             engine = replica_index,
                             "REQUEST_ADMIT"
                         );
@@ -302,7 +302,7 @@ mod task_assignment {
         );
         entry
             .response_tx
-            .send(Ok(InferStreamResponse::Prefill(proto::Tokens::default())))
+            .send(Ok(InferStreamResponse::Prefill))
             .map_err(|_| ExtExcept::FrontendAbort)?;
         for &t in new_token_ids {
             entry
@@ -314,7 +314,6 @@ mod task_assignment {
                             .and_then(|tok| tok.decode(&[t], false).ok())
                             .unwrap_or_default(),
                         logprob: 0.0,
-                        special: false,
                     },
                     top_tokens: Vec::default(),
                 }))
@@ -345,7 +344,6 @@ mod task_assignment {
                             .and_then(|tok| tok.decode(&[t], false).ok())
                             .unwrap_or_default(),
                         logprob: 0.0,
-                        special: false,
                     },
                     top_tokens: Vec::default(),
                 }))

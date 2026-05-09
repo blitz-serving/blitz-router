@@ -1,7 +1,4 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -11,13 +8,6 @@ use tokio::time::{Duration, sleep};
 use crate::ScheduleContext;
 
 const STATISIC_INTERVAL: u64 = 2;
-static PREFILL_TOKENS: AtomicUsize = AtomicUsize::new(0);
-
-pub(crate) fn increase_prefill_tokens(count: usize) {
-    PREFILL_TOKENS.fetch_add(count, Ordering::SeqCst);
-}
-
-
 pub(crate) async fn statistic(
     all_schedule_contexts: Vec<Arc<Mutex<ScheduleContext>>>,
     statistic_path: Option<String>,
