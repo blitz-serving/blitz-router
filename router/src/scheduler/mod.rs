@@ -33,3 +33,5 @@ pub(crate) use state::{
     MOST_HIT_LOAD_ACTIVE_W_LOAD, MOST_HIT_LOAD_W_HIT, MOST_HIT_LOAD_W_LOAD, ScheduleContext,
     WAITINGT_PREFILL_TOKEN_BOUND,
 };
+#[cfg(feature = "bailian-impl-q")]
+pub use state::init_bailian_params;

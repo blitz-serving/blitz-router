@@ -23,6 +23,11 @@ policy! {
     name: BailianImplQ,
     gctx: (),
     body: {
+        // Snapshot CLI-tunable params (set once at startup in main.rs;
+        // fall back to the paper-tuned ChatBot defaults if not initialised).
+        let alpha = BAILIAN_ALPHA.get().copied().unwrap_or(0.7);
+        let beta  = BAILIAN_BETA.get().copied().unwrap_or(0.15);
+        let gamma = BAILIAN_GAMMA.get().copied().unwrap_or(0.15);
         let lo_hit = min_of_f32(&observations, |o| hit_pct(req, o));
         let hi_hit = max_of_f32(&observations, |o| hit_pct(req, o));
         let lo_bs  = min_of_usize(&observations, |o| o.bs) as f32;
@@ -37,7 +42,7 @@ policy! {
             let n0 = ((hit_pct(req, o) - lo_hit) / dx_hit).clamp(0.0, 1.0);
             let n1 = ((hi_bs - o.bs as f32) / dx_bs).clamp(0.0, 1.0);
             let n2 = ((hi_tok - o.all_tokens as f32) / dx_tok).clamp(0.0, 1.0);
-            let p = n0 * BAILIAN_ALPHA + n1 * BAILIAN_BETA + n2 * BAILIAN_GAMMA;
+            let p = n0 * alpha + n1 * beta + n2 * gamma;
             if p.is_finite() && p > 0.0 { p } else { 0.0 }
         })
     },

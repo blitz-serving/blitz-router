@@ -38,4 +38,7 @@ output/
 
 # Profiling
 *.nsys-rep
-formal/tlaplus/states/
+spec/abort-recovery/states/
+
+# Project memory (untracked until user-reviewed; see CLAUDE.md "Memory Policy")
+.claude/memory/

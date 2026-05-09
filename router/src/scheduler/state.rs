@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::collections::VecDeque;
 use std::ops::{AddAssign, SubAssign};
@@ -13,10 +14,26 @@ static PREFILL_TKN_FREQ_EMA_GAMMA: f32 = 0.75;
 static TBT_EMA_GAMMA: f32 = 0.5;
 /// Prefill token bound, used in JBSQ(1), set to 2⨉ CP size
 pub(crate) static WAITINGT_PREFILL_TOKEN_BOUND: usize = 2048;
-/// Parameters for Bailian
-pub(crate) static BAILIAN_ALPHA: f32 = 0.7; // prefix cache hit block (paper-tuned for ChatBot)
-pub(crate) static BAILIAN_BETA: f32 = 0.15; // num requests on instance
-pub(crate) static BAILIAN_GAMMA: f32 = 0.15; // num tokens on instance
+/// Parameters for Bailian (set once from CLI in `main.rs` via
+/// [`init_bailian_params`]; defaults 0.7 / 0.15 / 0.15 if unset).
+/// The statics themselves are unconditional so `policies/bailian.rs` (which
+/// is compiled regardless of feature flags, like every other policy module)
+/// can read them; only the `init_bailian_params` setter and the
+/// `--bailian-{alpha,beta,gamma}` CLI surface are gated by
+/// `feature = "bailian-impl-q"`.
+pub(crate) static BAILIAN_ALPHA: OnceLock<f32> = OnceLock::new();
+pub(crate) static BAILIAN_BETA: OnceLock<f32> = OnceLock::new();
+pub(crate) static BAILIAN_GAMMA: OnceLock<f32> = OnceLock::new();
+
+/// Install the Bailian scoring weights from CLI flags. Called once at
+/// startup; subsequent calls are no-ops (the values cannot change at
+/// runtime).
+#[cfg(feature = "bailian-impl-q")]
+pub fn init_bailian_params(alpha: f32, beta: f32, gamma: f32) {
+    let _ = BAILIAN_ALPHA.set(alpha);
+    let _ = BAILIAN_BETA.set(beta);
+    let _ = BAILIAN_GAMMA.set(gamma);
+}
 /// llm-d load-aware-scorer's queue-depth threshold (default in upstream)
 pub(crate) static LOAD_AWARE_QUEUE_T: f32 = 128.0;
 /// most-hit-load-q (llm-d precise-prefix-cache + load-aware combo)

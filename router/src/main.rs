@@ -45,10 +45,29 @@ struct Args {
     max_stop_sequences: usize,
     #[clap(default_value = "5", long, env)]
     max_top_n_tokens: u32,
-    #[clap(default_value = "1024", long, env)]
-    max_input_length: usize,
-    #[clap(default_value = "2048", long, env)]
-    max_total_tokens: usize,
+    /// Maximum prompt length in tokens. If unset, blitz-router auto-discovers
+    /// from `config.json:max_position_embeddings - 1` when the model directory
+    /// is reachable; setting this flag overrides auto-discovery (with a WARN).
+    #[clap(long, env)]
+    max_input_length: Option<usize>,
+    /// Maximum total context length in tokens (input + output). If unset,
+    /// auto-discovered from `config.json:max_position_embeddings`; setting this
+    /// flag overrides auto-discovery (with a WARN).
+    #[clap(long, env)]
+    max_total_tokens: Option<usize>,
+    /// Bailian scoring weight for prefix-cache-hit term
+    /// (only consulted when policy `bailian-impl-q` is selected).
+    #[cfg(feature = "bailian-impl-q")]
+    #[clap(default_value_t = 0.7, long, env)]
+    bailian_alpha: f32,
+    /// Bailian scoring weight for running-request-count term.
+    #[cfg(feature = "bailian-impl-q")]
+    #[clap(default_value_t = 0.15, long, env)]
+    bailian_beta: f32,
+    /// Bailian scoring weight for running-token-count term.
+    #[cfg(feature = "bailian-impl-q")]
+    #[clap(default_value_t = 0.15, long, env)]
+    bailian_gamma: f32,
     #[clap(default_value = "0.0.0.0", long, env)]
     hostname: String,
     #[clap(default_value = "3000", long, short, env)]
@@ -131,8 +150,14 @@ fn main() -> Result<(), RouterError> {
         max_best_of,
         max_stop_sequences,
         max_top_n_tokens,
-        mut max_input_length,
-        mut max_total_tokens,
+        max_input_length: cli_max_input_length,
+        max_total_tokens: cli_max_total_tokens,
+        #[cfg(feature = "bailian-impl-q")]
+        bailian_alpha,
+        #[cfg(feature = "bailian-impl-q")]
+        bailian_beta,
+        #[cfg(feature = "bailian-impl-q")]
+        bailian_gamma,
         kvcache_block_size,
         hostname,
         port,
@@ -161,17 +186,16 @@ fn main() -> Result<(), RouterError> {
     } = args;
 
     // Validate args
-    if max_input_length >= max_total_tokens {
-        return Err(RouterError::ArgumentValidation(
-            "`max_input_length` must be < `max_total_tokens`".to_string(),
-        ));
-    }
-
     if validation_workers == 0 {
         return Err(RouterError::ArgumentValidation(
             "`validation_workers` must be > 0".to_string(),
         ));
     }
+
+    // Bailian scoring weights are CLI-tunable; install them once for the
+    // process so the policy body can read them via `OnceLock::get()`.
+    #[cfg(feature = "bailian-impl-q")]
+    router::init_bailian_params(bailian_alpha, bailian_beta, bailian_gamma);
 
     // CORS allowed origins
     let cors_allow_origin: Option<AllowOrigin> = cors_allow_origin.map(|cors_allow_origin| {
@@ -364,24 +388,61 @@ fn main() -> Result<(), RouterError> {
         // Model-dependent parameters should be auto-discovered, not manually specified.
         let num_engines = engine_clients.len();
 
-        if let Some(model_config) = load_model_config(local_path) {
+        let model_config = load_model_config(local_path);
+        if let Some(ref mc) = model_config {
             tracing::info!(
                 "Loaded model config: type={}, max_position_embeddings={}",
-                model_config.model_type,
-                model_config.max_position_embeddings
+                mc.model_type,
+                mc.max_position_embeddings
             );
+        }
 
-            // Auto-discover max_total_tokens if user didn't override (default is 2048)
-            if max_total_tokens == 2048 {
-                max_total_tokens = model_config.max_position_embeddings;
-                tracing::info!("Auto-set max_total_tokens={} from config.json", max_total_tokens);
+        // Resolve max_total_tokens: prefer auto-discovered value; if the user
+        // CLI-overrode, respect their choice but emit a WARN so it's loud.
+        let auto_max_total = model_config.as_ref().map(|c| c.max_position_embeddings);
+        let max_total_tokens = match (cli_max_total_tokens, auto_max_total) {
+            (Some(user), Some(auto)) if user != auto => {
+                tracing::warn!(
+                    "--max-total-tokens={} overrides auto-discovered max_position_embeddings={} from config.json",
+                    user, auto
+                );
+                user
             }
+            (Some(user), _) => user,
+            (None, Some(auto)) => {
+                tracing::info!("Auto-set max_total_tokens={} from config.json", auto);
+                auto
+            }
+            (None, None) => {
+                tracing::warn!(
+                    "config.json not found and --max-total-tokens not set; falling back to 2048"
+                );
+                2048
+            }
+        };
 
-            // Auto-discover max_input_length if user didn't override (default is 1024)
-            if max_input_length == 1024 {
-                max_input_length = max_total_tokens - 1;
-                tracing::info!("Auto-set max_input_length={}", max_input_length);
+        // Resolve max_input_length: defaults to max_total_tokens - 1; user
+        // override (with WARN) wins.
+        let auto_max_input = max_total_tokens.saturating_sub(1);
+        let max_input_length = match cli_max_input_length {
+            Some(user) if user != auto_max_input => {
+                tracing::warn!(
+                    "--max-input-length={} overrides auto-discovered max_total_tokens-1={}",
+                    user, auto_max_input
+                );
+                user
             }
+            Some(user) => user,
+            None => {
+                tracing::info!("Auto-set max_input_length={}", auto_max_input);
+                auto_max_input
+            }
+        };
+
+        if max_input_length >= max_total_tokens {
+            return Err(RouterError::ArgumentValidation(
+                "`max_input_length` must be < `max_total_tokens`".to_string(),
+            ));
         }
 
         // Scale max_concurrent_requests with engine count if user didn't override (default is 128)

@@ -267,6 +267,8 @@ Apache-2.0. Code derived from Hugging Face Text Generation Inference (TGI).
 
 Project-level memory (operational lessons, deployment pitfalls, design decisions) MUST be stored in `.claude/memory/` within this repo, NOT in user-level `~/.claude/projects/` directories. This ensures all agents and sessions working on this project share the same knowledge.
 
+**Memory entries MUST remain untracked (gitignored) until the user reviews and approves them.** Agents that write a new file under `.claude/memory/` should NOT stage it for commit, and `.claude/memory/` should be listed in `.gitignore` until each entry has been individually approved by the user. Reviewed-and-approved entries can then be promoted into the tracked set in a dedicated commit. Rationale: agent-authored memory frequently encodes session-local misreads as if they were durable facts; gating commit on user review prevents that drift from spreading to future sessions.
+
 ## Doc-Code Consistency at Commit Time
 
 Before every commit that changes code, scan **all related doc surfaces** and fold any required doc updates into the SAME commit. Doc surfaces drift coherently — the dynamo formula swap and the `queued_pre` type drift incidents (see [issue #11](https://github.com/blitz-serving/blitz-router/issues/11)) both involved a prior session writing the same error into code AND every sibling doc surface. The scan must therefore cover every surface a future reader might cite to verify the change, not just the files `git diff` shows touched.
