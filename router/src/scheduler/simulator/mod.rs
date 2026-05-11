@@ -24,7 +24,10 @@ pub use batch::BatchForPredictor;
 pub use config::{ModelKind, SimulatorConfig};
 pub use mirror::IncrementalMirror;
 pub use pctx::PCtx;
-pub use predictor::{LinregCorrected, Predictor, TrainedPredictor};
+pub use predictor::{
+    Corrector, LinregCorrector, NullCorrector, Predictor, RegressionalPredictor,
+    TrainedPredictor,
+};
 pub use radixtree::RadixTreeReqIdHash;
 pub use rollout::{RolloutBuffer, RolloutGist, RolloutSlot};
 pub use sched::{ReqProgress, SchedSnapshot};
@@ -54,8 +57,10 @@ pub fn init_with_predictor(
 ) -> Result<(), &'static str> {
     let mut pctxs = Vec::with_capacity(num_replicas);
     for _ in 0..num_replicas {
-        let trained: Box<dyn TrainedPredictor> =
-            Box::new(LinregCorrected::new(inner.clone(), config));
+        let trained: Box<dyn TrainedPredictor> = Box::new(RegressionalPredictor::new(
+            inner.clone(),
+            LinregCorrector::new(config),
+        ));
         pctxs.push(Arc::new(PCtx::new(
             trained,
             config.block_size as u32,

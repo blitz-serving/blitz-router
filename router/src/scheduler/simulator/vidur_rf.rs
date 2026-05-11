@@ -450,7 +450,9 @@ mod tests {
 
     #[test]
     fn linreg_correction_converges() {
-        use super::predictor::{LinregCorrected, Predictor, TrainedPredictor};
+        use super::super::predictor::{
+            LinregCorrector, Predictor, RegressionalPredictor, TrainedPredictor,
+        };
 
         struct ConstPred(f32);
         impl Predictor for ConstPred {
@@ -464,7 +466,8 @@ mod tests {
         cfg.learning_rate = 0.05;
         cfg.linreg_outlier_threshold_ms = 100.0;
 
-        let mut wrapped = LinregCorrected::new(Arc::new(ConstPred(2.0)), &cfg);
+        let mut wrapped =
+            RegressionalPredictor::new(Arc::new(ConstPred(2.0)), LinregCorrector::new(&cfg));
         let batch = BatchForPredictor::default();
         // Inner says 2.0; truth is 4.0. After many calibration steps the
         // correction should bring the corrected output close to 4.0.

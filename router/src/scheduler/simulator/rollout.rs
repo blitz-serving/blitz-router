@@ -22,6 +22,8 @@
 // invariant-keeping rollout for a PCtx whose engine has prefill work
 // but no associated candidate query).
 
+use std::collections::VecDeque;
+
 #[derive(Debug, Clone)]
 pub struct RolloutSlot {
     pub batch: super::BatchForPredictor,
@@ -52,7 +54,10 @@ pub struct RolloutBuffer {
     /// `query(candidate)`). `None` for the candidate-free baseline
     /// rebuilt on the SSE path to satisfy the non-empty invariant.
     pub candidate_id: Option<u64>,
-    pub slots: Vec<RolloutSlot>,
+    /// Slot timeline. `VecDeque` so the `on_sse` "F3 PASS" path can
+    /// `pop_front` the validated head in O(1) as the rollout's leading
+    /// slot is consumed by the engine.
+    pub slots: VecDeque<RolloutSlot>,
     pub prefill_begin_step: Option<usize>,
     pub prefill_end_step: Option<usize>,
     pub in_decode_step: Option<usize>,
@@ -95,7 +100,7 @@ pub struct RolloutGist {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::BatchForPredictor;
+    use super::super::BatchForPredictor;
 
     fn slot(latency: f32) -> RolloutSlot {
         RolloutSlot {
@@ -110,7 +115,7 @@ mod tests {
     fn gist_extracts_three_fields() {
         let buf = RolloutBuffer {
             candidate_id: Some(7),
-            slots: vec![slot(2.0), slot(3.0), slot(4.0), slot(5.0)],
+            slots: VecDeque::from(vec![slot(2.0), slot(3.0), slot(4.0), slot(5.0)]),
             prefill_begin_step: Some(0),
             prefill_end_step: Some(2),
             in_decode_step: Some(3),
@@ -125,7 +130,7 @@ mod tests {
     fn gist_baseline_with_no_candidate() {
         let buf = RolloutBuffer {
             candidate_id: None,
-            slots: vec![slot(2.0), slot(3.0)],
+            slots: VecDeque::from(vec![slot(2.0), slot(3.0)]),
             prefill_begin_step: None,
             prefill_end_step: None,
             in_decode_step: None,
@@ -138,7 +143,7 @@ mod tests {
     fn gist_partial_only_in_decode() {
         let buf = RolloutBuffer {
             candidate_id: Some(1),
-            slots: vec![slot(2.0)],
+            slots: VecDeque::from(vec![slot(2.0)]),
             prefill_begin_step: None,
             prefill_end_step: None,
             in_decode_step: Some(0),

@@ -56,7 +56,7 @@ pub struct SimulatorConfig {
     pub nccl_cpu_skew_overhead_per_device_ms: Option<f32>,
     pub skip_cpu_overhead_modeling: bool,
 
-    /// SGD learning rate for the `LinregCorrected` online-correction wrapper.
+    /// SGD learning rate for the `LinregCorrector` online-correction strategy.
     pub learning_rate: f32,
     /// Warmup samples skipped before the linreg starts updating (vLLM startup
     /// latency variance).

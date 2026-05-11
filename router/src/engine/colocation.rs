@@ -455,8 +455,6 @@ mod task_assignment {
 
             // fast path: update metrics
             let tbt = Duration::from_millis(m.latency);
-            #[cfg(feature = "simulator")]
-            crate::scheduler::simulator::on_sse(replica_index, &m);
             let mut metric_delta = LMetricDec::new(&tbt);
             // NOTE: `prefill_tokens` doesn't count hit tokens, while
             //       `all_tokens` does count hit tokens
@@ -677,6 +675,15 @@ mod task_assignment {
             // Publishes updated instance-level metric state
             sctx.lmetric -= metric_delta;
             drop(sctx);
+
+            // Notify simulator AFTER the SCtx prefix-cache update completes.
+            // Doing this earlier would create a cross-sidecar TOCTOU window in
+            // which the simulator's L1 mirror is post-step but `SCtx.block_hash`
+            // is still pre-step, causing concurrent queries to under-count
+            // prefix-cache hits for requests that finish with new blocks in the
+            // same step.
+            #[cfg(feature = "simulator")]
+            crate::scheduler::simulator::on_sse(replica_index, &m);
 
             // Aborted requests ACK-ed by backend
             let term_requests = m.aborted_requests;
