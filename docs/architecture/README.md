@@ -27,7 +27,7 @@ go to the per-topic file you need:
 | BACK (Engine driver): colocation, EngineClient adapters | [`back-engine-driver.md`](back-engine-driver.md) |
 | Request lifecycle + SSE consumption (cross-layer flows) | [`request-lifecycle.md`](request-lifecycle.md) |
 | Concurrency model (tasks, channels, locks, invariants) | [`concurrency-model.md`](concurrency-model.md) |
-| Latency simulator (the service-sidecar) | [`latency-simulator.md`](latency-simulator.md) |
+| Latency simulator (the service-sidecar) | [`latency-simulator.md`](latency-simulator.md); deep design in [`../predictor/`](../predictor/) |
 
 ## 1. System boundary
 
