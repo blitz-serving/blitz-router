@@ -111,6 +111,9 @@ bounded-most-hit-q = []
 # vllm/ — vLLM-baseline scheduling (4·waiting + bs)
 join-shortest-weight-q = []
 
+# prediction-based — uses simulator::query (RolloutGist.ttft_ms)
+least-ttft-q = ["simulator"]
+
 # bailian/ — Bailian baseline
 bailian-impl-q = []
 

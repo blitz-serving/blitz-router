@@ -32,6 +32,7 @@ pub(crate) mod aibrix;
 pub(crate) mod bailian;
 pub(crate) mod dsl_runtime;
 pub(crate) mod dynamo;
+pub(crate) mod least_ttft;
 pub(crate) mod llm_d;
 pub(crate) mod lmetric;
 pub(crate) mod policy_runner;
@@ -49,6 +50,8 @@ pub(crate) use aibrix::AibrixQ;
 pub(crate) use bailian::BailianImplQ;
 #[allow(unused_imports)]
 pub(crate) use dynamo::{DynamoPoQ, DynamoQ};
+#[allow(unused_imports)]
+pub(crate) use least_ttft::LeastTtftQ;
 #[allow(unused_imports)]
 pub(crate) use llm_d::{
     LeastActiveQ, LeastBsQ, LeastTokenLoadQ, LeastWaitingQ, MostHitLoadActiveQ, MostHitLoadQ,
@@ -186,6 +189,8 @@ pub(crate) type TaskAssigner = PolicyRunner<LeastTokenLoadQ>;
 pub(crate) type TaskAssigner = PolicyRunner<RoundRobinQ>;
 #[cfg(feature = "random-q")]
 pub(crate) type TaskAssigner = PolicyRunner<RandomQ>;
+#[cfg(feature = "least-ttft-q")]
+pub(crate) type TaskAssigner = PolicyRunner<LeastTtftQ>;
 // `join-shortest-weight-q` is also the catch-all default — vLLM's
 // `4·sctx.waiting + sctx.bs` formula.
 #[cfg(any(
@@ -208,6 +213,7 @@ pub(crate) type TaskAssigner = PolicyRunner<RandomQ>;
         feature = "least-token-load-q",
         feature = "round-robin-q",
         feature = "random-q",
+        feature = "least-ttft-q",
     ))
 ))]
 pub(crate) type TaskAssigner = PolicyRunner<JShortestWeightQ>;
