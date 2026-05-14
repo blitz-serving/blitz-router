@@ -35,8 +35,8 @@ impl Policy for PolyserveQ {
                 return None;
             }
 
-            let ttft_slo_ms = POLYSERVE_TTFT_SLO_MS.get().copied().unwrap_or(1000.0);
-            let tpot_slo_ms = POLYSERVE_TPOT_SLO_MS.get().copied().unwrap_or(200.0);
+            let ttft_slo_ms = POLYSERVE_TTFT_SLO_MS.get().copied().unwrap_or(5000.0);
+            let tpot_slo_ms = POLYSERVE_TPOT_SLO_MS.get().copied().unwrap_or(40.0);
 
             let candidate_id = entry.request.request_id;
             let input_length = entry.request.input_length;
@@ -58,14 +58,31 @@ impl Policy for PolyserveQ {
                     sctx_hits,
                 );
 
-                let Some(gist) = gist else {
-                    continue;
-                };
-                let (Some(ttft_ms), Some(tpot_ms)) = (gist.ttft_ms, gist.in_decode_tbt_ms) else {
+                let ttft_ms = gist.and_then(|g| g.ttft_ms);
+                let tpot_ms = gist.and_then(|g| g.in_decode_tbt_ms);
+                let slo_ok = matches!(
+                    (ttft_ms, tpot_ms),
+                    (Some(ttft), Some(tpot)) if ttft <= ttft_slo_ms && tpot <= tpot_slo_ms
+                );
+                tracing::info!(
+                    target: "policy.polyserve-q",
+                    request_id = candidate_id,
+                    replica = idx,
+                    input_length,
+                    sctx_prefix_hits = sctx_hits,
+                    ttft_ms = ?ttft_ms,
+                    tpot_ms = ?tpot_ms,
+                    ttft_slo_ms,
+                    tpot_slo_ms,
+                    slo_ok,
+                    "simulator query result"
+                );
+
+                let (Some(_ttft_ms), Some(tpot_ms)) = (ttft_ms, tpot_ms) else {
                     continue;
                 };
 
-                if ttft_ms <= ttft_slo_ms && tpot_ms <= tpot_slo_ms {
+                if slo_ok {
                     if best_slo_ok.map_or(true, |(_, prev_tpot)| tpot_ms > prev_tpot) {
                         best_slo_ok = Some((idx, tpot_ms));
                     }

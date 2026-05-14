@@ -60,17 +60,29 @@ impl Policy for LeastTtftQ {
                 };
 
                 #[cfg(feature = "simulator")]
-                let ttft = crate::scheduler::simulator::query(
+                let gist = crate::scheduler::simulator::query(
                     idx,
                     candidate_id,
                     input_length,
                     hashes,
                     sctx_hits,
-                )
-                .and_then(|g| g.ttft_ms);
+                );
+
+                #[cfg(feature = "simulator")]
+                let ttft = gist.and_then(|g| g.ttft_ms);
 
                 #[cfg(not(feature = "simulator"))]
                 let ttft: Option<f32> = None;
+
+                tracing::info!(
+                    target: "policy.least-ttft-q",
+                    request_id = candidate_id,
+                    replica = idx,
+                    input_length,
+                    sctx_prefix_hits = sctx_hits,
+                    ttft_ms = ?ttft,
+                    "simulator query result"
+                );
 
                 if let Some(t) = ttft {
                     any_gist = true;
