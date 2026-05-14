@@ -61,6 +61,7 @@ pub struct RolloutBuffer {
     pub prefill_begin_step: Option<usize>,
     pub prefill_end_step: Option<usize>,
     pub in_decode_step: Option<usize>,
+    pub max_avg_tpot_ms: Option<f32>,
 }
 
 impl RolloutBuffer {
@@ -83,7 +84,12 @@ impl RolloutBuffer {
         };
         let in_decode_tbt_ms =
             self.in_decode_step.and_then(|i| self.slots.get(i)).map(|s| s.predicted_lat_ms);
-        RolloutGist { ttft_ms, chunked_prefill_steps, in_decode_tbt_ms }
+        RolloutGist {
+            ttft_ms,
+            chunked_prefill_steps,
+            in_decode_tbt_ms,
+            max_avg_tpot_ms: self.max_avg_tpot_ms,
+        }
     }
 }
 
@@ -95,6 +101,7 @@ pub struct RolloutGist {
     pub ttft_ms: Option<f32>,
     pub chunked_prefill_steps: Option<usize>,
     pub in_decode_tbt_ms: Option<f32>,
+    pub max_avg_tpot_ms: Option<f32>,
 }
 
 #[cfg(test)]
@@ -119,11 +126,13 @@ mod tests {
             prefill_begin_step: Some(0),
             prefill_end_step: Some(2),
             in_decode_step: Some(3),
+            max_avg_tpot_ms: Some(6.0),
         };
         let g = buf.gist();
         assert_eq!(g.ttft_ms, Some(9.0));
         assert_eq!(g.chunked_prefill_steps, Some(3));
         assert_eq!(g.in_decode_tbt_ms, Some(5.0));
+        assert_eq!(g.max_avg_tpot_ms, Some(6.0));
     }
 
     #[test]
@@ -134,6 +143,7 @@ mod tests {
             prefill_begin_step: None,
             prefill_end_step: None,
             in_decode_step: None,
+            max_avg_tpot_ms: None,
         };
         let g = buf.gist();
         assert_eq!(g, RolloutGist::default());
@@ -147,6 +157,7 @@ mod tests {
             prefill_begin_step: None,
             prefill_end_step: None,
             in_decode_step: Some(0),
+            max_avg_tpot_ms: None,
         };
         let g = buf.gist();
         assert_eq!(g.ttft_ms, None);

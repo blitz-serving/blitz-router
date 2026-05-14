@@ -69,13 +69,13 @@ struct Args {
     #[clap(default_value_t = 0.15, long, env)]
     bailian_gamma: f32,
     /// PolyServe TTFT SLO in milliseconds
-    /// (only consulted when policy `polyserve-q` is selected).
-    #[cfg(feature = "polyserve-q")]
+    /// (only consulted when policy `polyserve-q` or `polyserve2-q` is selected).
+    #[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
     #[clap(default_value_t = 5000.0, long, env)]
     polyserve_ttft_slo_ms: f32,
     /// PolyServe TPOT SLO in milliseconds. The current implementation
     /// uses simulator `in_decode_tbt_ms` as a TPOT approximation.
-    #[cfg(feature = "polyserve-q")]
+    #[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
     #[clap(default_value_t = 40.0, long, env)]
     polyserve_tpot_slo_ms: f32,
     #[clap(default_value = "0.0.0.0", long, env)]
@@ -149,6 +149,10 @@ struct Args {
     /// grid that's way off, low (e.g. 5) when the grid is well-calibrated.
     #[clap(long, env, default_value_t = 10000.0)]
     simulator_outlier_threshold_ms: f32,
+    /// Average generated length used by simulator PolyServe TPOT projection.
+    #[cfg(feature = "simulator")]
+    #[clap(long, env, default_value_t = 1024)]
+    avg_output_len: u32,
 }
 
 fn main() -> Result<(), RouterError> {
@@ -168,9 +172,9 @@ fn main() -> Result<(), RouterError> {
         bailian_beta,
         #[cfg(feature = "bailian-impl-q")]
         bailian_gamma,
-        #[cfg(feature = "polyserve-q")]
+        #[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
         polyserve_ttft_slo_ms,
-        #[cfg(feature = "polyserve-q")]
+        #[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
         polyserve_tpot_slo_ms,
         kvcache_block_size,
         hostname,
@@ -197,6 +201,8 @@ fn main() -> Result<(), RouterError> {
         simulator_moe,
         simulator_learning_rate,
         simulator_outlier_threshold_ms,
+        #[cfg(feature = "simulator")]
+        avg_output_len,
     } = args;
 
     // Validate args
@@ -210,7 +216,7 @@ fn main() -> Result<(), RouterError> {
     // process so the policy body can read them via `OnceLock::get()`.
     #[cfg(feature = "bailian-impl-q")]
     router::init_bailian_params(bailian_alpha, bailian_beta, bailian_gamma);
-    #[cfg(feature = "polyserve-q")]
+    #[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
     router::init_polyserve_params(polyserve_ttft_slo_ms, polyserve_tpot_slo_ms);
 
     // CORS allowed origins
@@ -331,6 +337,7 @@ fn main() -> Result<(), RouterError> {
             sim_cfg.learning_rate = simulator_learning_rate;
             sim_cfg.linreg_outlier_threshold_ms = simulator_outlier_threshold_ms;
             sim_cfg.block_size = kvcache_block_size;
+            sim_cfg.avg_output_len = avg_output_len;
             let n = engine_clients.len();
             tracing::info!(
                 target: "simulator",

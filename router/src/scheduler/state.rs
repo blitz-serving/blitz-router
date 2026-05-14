@@ -41,7 +41,7 @@ pub fn init_bailian_params(alpha: f32, beta: f32, gamma: f32) {
 }
 /// Install the PolyServe TTFT / TPOT SLO thresholds from CLI flags.
 /// Called once at startup; subsequent calls are no-ops.
-#[cfg(feature = "polyserve-q")]
+#[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
 pub fn init_polyserve_params(ttft_slo_ms: f32, tpot_slo_ms: f32) {
     let _ = POLYSERVE_TTFT_SLO_MS.set(ttft_slo_ms);
     let _ = POLYSERVE_TPOT_SLO_MS.set(tpot_slo_ms);

@@ -49,6 +49,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::engine::EngineStepOutput;
 
@@ -113,10 +114,17 @@ pub struct PCtx {
     /// Engine per-step token budget (typically 1024). The `query`
     /// schedule loop uses this as the chunked-prefill budget per slot.
     token_budget: u32,
+    /// Average generated length used to project per-request average TPOT.
+    avg_output_len: u32,
 }
 
 impl PCtx {
-    pub fn new(regressor: Box<dyn TrainedPredictor>, block_size: u32, token_budget: u32) -> Self {
+    pub fn new(
+        regressor: Box<dyn TrainedPredictor>,
+        block_size: u32,
+        token_budget: u32,
+        avg_output_len: u32,
+    ) -> Self {
         Self {
             regressor: Mutex::new(regressor),
             mirror: Mutex::new(IncrementalMirror::new()),
@@ -125,6 +133,7 @@ impl PCtx {
             last_sse_step_id: AtomicU64::new(0),
             block_size: block_size.max(1),
             token_budget: token_budget.max(1),
+            avg_output_len: avg_output_len.max(1),
         }
     }
 
@@ -249,6 +258,7 @@ impl PCtx {
                             buf.prefill_begin_step = None;
                             buf.prefill_end_step = None;
                             buf.in_decode_step = None;
+                            buf.max_avg_tpot_ms = None;
                             Some((buf, e.sse_anchor_step_id, saved_tail))
                         }
                         _ => None, // savepoint cleared or never set → scratch rebuild
@@ -373,6 +383,7 @@ impl PCtx {
         buffer.prefill_begin_step = None;
         buffer.prefill_end_step = None;
         buffer.in_decode_step = None;
+        buffer.max_avg_tpot_ms = None;
 
         const MAX_SLOTS: usize = 256;
         while buffer.slots.len() < MAX_SLOTS {
@@ -428,9 +439,10 @@ impl PCtx {
         running_prefillers.sort_unstable();
 
         for rid in &running_decoders {
-            if let Some(req) = sched.running.get(rid) {
+            if let Some(req) = sched.running.get_mut(rid) {
                 decode_rids.push(*rid);
                 num_decode_computed.push(req.processed_tokens as usize);
+                req.processed_tokens = req.processed_tokens.saturating_add(1);
                 budget -= 1;
             }
         }
@@ -516,6 +528,14 @@ impl PCtx {
         }
         if candidate_in_decode && buffer.in_decode_step.is_none() {
             buffer.in_decode_step = Some(slot_idx);
+            let rollout_elapsed_ms = buffer
+                .slots
+                .iter()
+                .map(|s| s.predicted_lat_ms)
+                .sum::<f32>()
+                + predicted_lat_ms;
+            buffer.max_avg_tpot_ms =
+                self.max_avg_tpot_ms(sched, predicted_lat_ms, rollout_elapsed_ms);
         }
 
         Some(RolloutSlot {
@@ -524,6 +544,31 @@ impl PCtx {
             prefill_rids,
             decode_rids,
         })
+    }
+
+    fn max_avg_tpot_ms(
+        &self,
+        sched: &SchedSnapshot,
+        first_tbt_time_ms: f32,
+        rollout_elapsed_ms: f32,
+    ) -> Option<f32> {
+        let now = Instant::now();
+        let avg_output_len = self.avg_output_len as f32;
+        let mut max_avg_tpot_ms: Option<f32> = None;
+
+        for req in sched.iter_in_flight() {
+            let generated_len = req.generated_len().min(self.avg_output_len);
+            let remaining_len = self.avg_output_len.saturating_sub(generated_len) as f32;
+            let age_ms =
+                now.duration_since(req.admit_time).as_secs_f32() * 1000.0 + rollout_elapsed_ms;
+            let total_lifespan_ms = remaining_len * first_tbt_time_ms + age_ms;
+            let avg_tpot_ms = total_lifespan_ms / avg_output_len;
+            if max_avg_tpot_ms.map_or(true, |prev| avg_tpot_ms > prev) {
+                max_avg_tpot_ms = Some(avg_tpot_ms);
+            }
+        }
+
+        max_avg_tpot_ms
     }
 
     /// Trigger B — admission. Called by `simulator::on_admit` after
@@ -753,7 +798,7 @@ mod tests {
             inner,
             LinregCorrector::new(&SimulatorConfig::default()),
         ));
-        PCtx::new(trained, 16, 1024)
+        PCtx::new(trained, 16, 1024, 1024)
     }
 
     fn step(
@@ -798,7 +843,12 @@ mod tests {
 
         let inner = Arc::new(ConstPredictor(2.0));
         let trained = Box::new(RegressionalPredictor::new(inner, LinregCorrector::new(&cfg)));
-        let pctx = PCtx::new(trained, cfg.block_size as u32, cfg.token_budget);
+        let pctx = PCtx::new(
+            trained,
+            cfg.block_size as u32,
+            cfg.token_budget,
+            cfg.avg_output_len,
+        );
 
         let batch = BatchForPredictor::default();
         let mut last_pred = 0.0f32;

@@ -395,7 +395,7 @@ mod tests {
 
     fn build_minimal_grids(dir: &std::path::Path, hash: &str) {
         // 2D grids
-        write_csv(dir, &format!("attn_decode_{hash}_predictions.csv"), &[(1, 64, 0.5), (2, 64, 0.7)]);
+        write_csv(dir, &format!("attn_decode_{hash}_predictions.csv"), &[(1, 1024, 0.5), (2, 1024, 0.7)]);
         write_csv(dir, &format!("attn_prefill_{hash}_predictions.csv"), &[(0, 1024, 1.0)]);
         // 1D-only grids (k2=0 is implied, both 2-col and 3-col formats supported)
         for op in [
@@ -441,7 +441,7 @@ mod tests {
         let ms = predictor.predict(&batch);
         // Single layer, decode-only. Components (all from single CSV grids):
         //   pre_proj 0.05 + post_proj 0.05 + rope 0.05 + kv_save 0.05
-        //   + attn_decode (1, 64=>0.5) + attn_norm 0.05 + 0 (mlp_norm disabled)
+        //   + attn_decode (1, 1024=>0.5) + attn_norm 0.05 + 0 (mlp_norm disabled)
         //   + mlp_up 0.05 + mlp_down 0.05 (not > 0.78125 threshold) + mlp_act 0.05
         //   + add 0.05 + 0 (tp/pp comm disabled)
         // = 9 * 0.05 + 0.5 = 0.95ms

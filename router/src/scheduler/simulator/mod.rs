@@ -65,6 +65,7 @@ pub fn init_with_predictor(
             trained,
             config.block_size as u32,
             config.token_budget,
+            config.avg_output_len,
         )));
     }
     SIMULATOR

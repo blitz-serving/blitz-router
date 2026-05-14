@@ -40,6 +40,9 @@ pub struct SimulatorConfig {
     /// `full_token_cache` fast-path when num_tokens_rounded == token_budget.
     pub token_budget: u32,
 
+    /// Average generated length used by PolyServe-style TPOT projection.
+    pub avg_output_len: u32,
+
     /// Engine block size in tokens (typically 16). Used to round
     /// `num_tokens` → `num_tokens_rounded` when reconstructing the
     /// just-completed step's `BatchForPredictor` from SSE.
@@ -79,6 +82,7 @@ impl Default for SimulatorConfig {
             attention_prefill_batching_overhead_fraction: 0.1,
             attention_decode_batching_overhead_fraction: 0.4,
             token_budget: 4096,
+            avg_output_len: 1024,
             block_size: 16,
             num_blocks: 80860,
             kv_cache_prediction_granularity: 1024,

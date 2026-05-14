@@ -1,9 +1,9 @@
-//! `polyserve-q` — choose the replica with the largest predicted TPOT
-//! among those that satisfy both TTFT and TPOT SLOs.
+//! `polyserve2-q` — PolyServe2-style routing over simulator projections.
 //!
-//! This baseline uses simulator `RolloutGist.in_decode_tbt_ms` as a TPOT
-//! approximation. If no replica satisfies both SLOs, the policy falls back
-//! to uniformly random assignment.
+//! The policy keeps the original first decode TBT in `RolloutGist`, but uses
+//! `RolloutGist.max_avg_tpot_ms` as the TPOT score for SLO filtering and
+//! replica selection. If no replica satisfies both SLOs, the policy falls
+//! back to uniformly random assignment.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -21,9 +21,9 @@ use super::recent_exclusion::RecentReplicaExclusion;
 use super::Entry;
 
 #[derive(Default, Debug)]
-pub(crate) struct PolyserveQ;
+pub(crate) struct Polyserve2Q;
 
-impl Policy for PolyserveQ {
+impl Policy for Polyserve2Q {
     type GlobalContext = RecentReplicaExclusion;
 
     fn schedule<'a>(
@@ -54,7 +54,7 @@ impl Policy for PolyserveQ {
             for idx in 0..all_sctx.len() {
                 if enforce_recent_exclusion && gctx.is_excluded(idx) {
                     tracing::info!(
-                        target: "policy.polyserve-q",
+                        target: "policy.polyserve2-q",
                         request_id = candidate_id,
                         replica = idx,
                         recent_excluded = ?recent_excluded,
@@ -89,7 +89,7 @@ impl Policy for PolyserveQ {
             for task in query_tasks {
                 let Ok((idx, sctx_hits, gist)) = task.await else {
                     tracing::warn!(
-                        target: "policy.polyserve-q",
+                        target: "policy.polyserve2-q",
                         request_id = candidate_id,
                         "simulator query task failed"
                     );
@@ -97,21 +97,21 @@ impl Policy for PolyserveQ {
                 };
                 let ttft_ms = gist.and_then(|g| g.ttft_ms);
                 let chunked_prefill_steps = gist.and_then(|g| g.chunked_prefill_steps);
-                let tpot_ms = gist.and_then(|g| g.in_decode_tbt_ms);
+                let first_tbt_time_ms = gist.and_then(|g| g.in_decode_tbt_ms);
                 let max_avg_tpot_ms = gist.and_then(|g| g.max_avg_tpot_ms);
                 let slo_ok = matches!(
-                    (ttft_ms, tpot_ms),
+                    (ttft_ms, max_avg_tpot_ms),
                     (Some(ttft), Some(tpot)) if ttft <= ttft_slo_ms && tpot <= tpot_slo_ms
                 );
                 tracing::info!(
-                    target: "policy.polyserve-q",
+                    target: "policy.polyserve2-q",
                     request_id = candidate_id,
                     replica = idx,
                     input_length,
                     sctx_prefix_hits = sctx_hits,
                     ttft_ms = ?ttft_ms,
                     chunked_prefill_steps = ?chunked_prefill_steps,
-                    tpot_ms = ?tpot_ms,
+                    first_tbt_time_ms = ?first_tbt_time_ms,
                     max_avg_tpot_ms = ?max_avg_tpot_ms,
                     ttft_slo_ms,
                     tpot_slo_ms,
@@ -119,17 +119,18 @@ impl Policy for PolyserveQ {
                     "simulator query result"
                 );
 
-                if let Some(tpot_ms) = tpot_ms {
-                    if best_fallback_tpot.map_or(true, |(_, prev_tpot)| tpot_ms < prev_tpot) {
-                        best_fallback_tpot = Some((idx, tpot_ms));
+                if let Some(max_avg_tpot_ms) = max_avg_tpot_ms {
+                    if best_fallback_tpot.map_or(true, |(_, prev_tpot)| max_avg_tpot_ms < prev_tpot)
+                    {
+                        best_fallback_tpot = Some((idx, max_avg_tpot_ms));
                     }
                 }
                 if slo_ok {
-                    let Some(tpot_ms) = tpot_ms else {
+                    let Some(max_avg_tpot_ms) = max_avg_tpot_ms else {
                         continue;
                     };
-                    if best_slo_ok.map_or(true, |(_, prev_tpot)| tpot_ms > prev_tpot) {
-                        best_slo_ok = Some((idx, tpot_ms));
+                    if best_slo_ok.map_or(true, |(_, prev_tpot)| max_avg_tpot_ms > prev_tpot) {
+                        best_slo_ok = Some((idx, max_avg_tpot_ms));
                     }
                 }
             }
@@ -138,28 +139,28 @@ impl Policy for PolyserveQ {
                 idx
             } else if let Some((idx, _)) = best_fallback_tpot {
                 tracing::warn!(
-                    target: "policy.polyserve-q",
+                    target: "policy.polyserve2-q",
                     replicas = all_sctx.len(),
                     recent_excluded = ?recent_excluded,
                     recent_exclusion_enforced = enforce_recent_exclusion,
                     ttft_slo_ms,
                     tpot_slo_ms,
                     chosen = idx,
-                    "no replica satisfied PolyServe SLOs; choosing minimum predicted TPOT"
+                    "no replica satisfied PolyServe2 SLOs; choosing minimum predicted TPOT"
                 );
                 idx
             } else {
                 let idx =
                     candidate_replicas[rand::thread_rng().gen_range(0..candidate_replicas.len())];
                 tracing::warn!(
-                    target: "policy.polyserve-q",
+                    target: "policy.polyserve2-q",
                     replicas = all_sctx.len(),
                     recent_excluded = ?recent_excluded,
                     recent_exclusion_enforced = enforce_recent_exclusion,
                     ttft_slo_ms,
                     tpot_slo_ms,
                     chosen = idx,
-                    "no replica satisfied PolyServe SLOs; falling back to random replica"
+                    "no replica satisfied PolyServe2 SLOs; falling back to random replica"
                 );
                 idx
             };

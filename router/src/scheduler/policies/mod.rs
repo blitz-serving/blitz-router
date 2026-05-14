@@ -38,7 +38,9 @@ pub(crate) mod lmetric;
 pub(crate) mod policy_runner;
 pub(crate) mod policy_trait;
 pub(crate) mod polyserve;
+pub(crate) mod polyserve2;
 pub(crate) mod preble;
+mod recent_exclusion;
 pub(crate) mod simple;
 pub(crate) mod vllm;
 
@@ -63,14 +65,16 @@ pub(crate) use lmetric::LmetricQ;
 #[allow(unused_imports)]
 pub(crate) use polyserve::PolyserveQ;
 #[allow(unused_imports)]
+pub(crate) use polyserve2::Polyserve2Q;
+#[allow(unused_imports)]
 pub(crate) use preble::PrebleQ;
 #[allow(unused_imports)]
 pub(crate) use simple::{JBoundMostHitQ2, JLeastWaitTokenQ, RandomQ, RoundRobinQ};
 #[allow(unused_imports)]
 pub(crate) use vllm::JShortestWeightQ;
 
-use super::kvcache::BlockHashState;
 use super::infer::{InferError, InferStreamResponse};
+use super::kvcache::BlockHashState;
 use crate::gateway::validation::ValidGenerateRequest;
 
 use std::time::Duration;
@@ -196,6 +200,8 @@ pub(crate) type TaskAssigner = PolicyRunner<RandomQ>;
 pub(crate) type TaskAssigner = PolicyRunner<LeastTtftQ>;
 #[cfg(feature = "polyserve-q")]
 pub(crate) type TaskAssigner = PolicyRunner<PolyserveQ>;
+#[cfg(feature = "polyserve2-q")]
+pub(crate) type TaskAssigner = PolicyRunner<Polyserve2Q>;
 // `join-shortest-weight-q` is also the catch-all default — vLLM's
 // `4·sctx.waiting + sctx.bs` formula.
 #[cfg(any(
@@ -220,6 +226,7 @@ pub(crate) type TaskAssigner = PolicyRunner<PolyserveQ>;
         feature = "random-q",
         feature = "least-ttft-q",
         feature = "polyserve-q",
+        feature = "polyserve2-q",
     ))
 ))]
 pub(crate) type TaskAssigner = PolicyRunner<JShortestWeightQ>;

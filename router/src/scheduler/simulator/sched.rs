@@ -21,6 +21,7 @@
 // Lock discipline (set by `PCtx`): `sched → mirror → ephemeral`.
 
 use std::collections::{HashMap, VecDeque};
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct ReqProgress {
@@ -29,11 +30,13 @@ pub struct ReqProgress {
     /// `0..input_length` while in PREFILL; `input_length..` after the
     /// first DECODE step (each subsequent DECODE step += 1).
     pub processed_tokens: u32,
+    /// Router-side admission time into this replica's simulator state.
+    pub admit_time: Instant,
 }
 
 impl ReqProgress {
     pub fn new(request_id: u64, input_length: u32) -> Self {
-        Self { request_id, input_length, processed_tokens: 0 }
+        Self { request_id, input_length, processed_tokens: 0, admit_time: Instant::now() }
     }
 
     /// True iff this request still owes prefill work (needs more
@@ -45,6 +48,11 @@ impl ReqProgress {
     /// Tokens still to prefill. Saturates at zero.
     pub fn prefill_remaining(&self) -> u32 {
         self.input_length.saturating_sub(self.processed_tokens)
+    }
+
+    /// Decode tokens already generated according to the simulator snapshot.
+    pub fn generated_len(&self) -> u32 {
+        self.processed_tokens.saturating_sub(self.input_length)
     }
 }
 

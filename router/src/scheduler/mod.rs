@@ -35,5 +35,5 @@ pub(crate) use state::{
 };
 #[cfg(feature = "bailian-impl-q")]
 pub use state::init_bailian_params;
-#[cfg(feature = "polyserve-q")]
+#[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
 pub use state::init_polyserve_params;
