@@ -86,7 +86,7 @@ impl Default for SimulatorConfig {
             nccl_cpu_launch_overhead_ms: None,
             nccl_cpu_skew_overhead_per_device_ms: None,
             skip_cpu_overhead_modeling: true,
-            learning_rate: 1e-4,
+            learning_rate: 0.0,
             linreg_warmup: 10,
             linreg_outlier_threshold_ms: 0.5,
         }

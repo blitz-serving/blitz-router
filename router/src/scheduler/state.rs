@@ -24,6 +24,11 @@ pub(crate) static WAITINGT_PREFILL_TOKEN_BOUND: usize = 2048;
 pub(crate) static BAILIAN_ALPHA: OnceLock<f32> = OnceLock::new();
 pub(crate) static BAILIAN_BETA: OnceLock<f32> = OnceLock::new();
 pub(crate) static BAILIAN_GAMMA: OnceLock<f32> = OnceLock::new();
+/// PolyServe SLO thresholds (set once from CLI in `main.rs` via
+/// [`init_polyserve_params`]). The policy consumes both thresholds as
+/// milliseconds and compares them against simulator projections.
+pub(crate) static POLYSERVE_TTFT_SLO_MS: OnceLock<f32> = OnceLock::new();
+pub(crate) static POLYSERVE_TPOT_SLO_MS: OnceLock<f32> = OnceLock::new();
 
 /// Install the Bailian scoring weights from CLI flags. Called once at
 /// startup; subsequent calls are no-ops (the values cannot change at
@@ -33,6 +38,13 @@ pub fn init_bailian_params(alpha: f32, beta: f32, gamma: f32) {
     let _ = BAILIAN_ALPHA.set(alpha);
     let _ = BAILIAN_BETA.set(beta);
     let _ = BAILIAN_GAMMA.set(gamma);
+}
+/// Install the PolyServe TTFT / TPOT SLO thresholds from CLI flags.
+/// Called once at startup; subsequent calls are no-ops.
+#[cfg(feature = "polyserve-q")]
+pub fn init_polyserve_params(ttft_slo_ms: f32, tpot_slo_ms: f32) {
+    let _ = POLYSERVE_TTFT_SLO_MS.set(ttft_slo_ms);
+    let _ = POLYSERVE_TPOT_SLO_MS.set(tpot_slo_ms);
 }
 /// llm-d load-aware-scorer's queue-depth threshold (default in upstream)
 pub(crate) static LOAD_AWARE_QUEUE_T: f32 = 128.0;

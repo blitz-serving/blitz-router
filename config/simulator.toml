@@ -1,0 +1,50 @@
+# Router config for 16-GPU distributed test
+
+[runtime.raw]
+config = [
+    { app = "router", envs = { RUST_BACKTRACE = "full", LOG_LEVEL = "info,cache_tracking=info" }, background = false },
+]
+
+[variables]
+model_path = "/home/admin/cpfs/zkx/Qwen--Qwen3-30B-A3B-Instruct-2507/"
+work_dir = "/home/admin/cpfs/zkx/code/blitz-router"
+work-dir = "/home/admin/cpfs/zkx/code/blitz-router"
+output_dir = "${output-dir}"
+
+[app.router]
+executable = ["${work_dir}/target/release/router"]
+extra_args = ["--use-tokenizer"]
+
+[app.router.macro_rules]
+"--hostname" = "hostname"
+"--port" = "port"
+"--client-config" = "cli_stub_cfg"
+"--tokenizer-name" = "tokenizer"
+"--model-name" = "model"
+"--log-path" = "log_path"
+"--max-input-length" = "context_length"
+"--max-total-tokens" = "total_tokens"
+"--max-concurrent-requests" = "concurrent_req"
+"--kvcache-block-size" = "block_size"
+"--simulator-cache-dir" = "simulator_cache_dir"
+"--simulator-model-hash" = "simulator_model_hash"
+"--simulator-num-layers" = "simulator_num_layers"
+"--simulator-moe" = "simulator_moe"
+"--simulator-learning-rate" = "simulator_learning_rate" 
+
+[app.router.config]
+hostname = "localhost"
+port = "58009"
+model = "${model_path}"
+tokenizer = "${model_path}"
+cli_stub_cfg = "${work_dir}/exps/blitz-run/configs/config-stubs.json"
+log_path = "${output_dir}/router_v2.log"
+context_length = 59999
+total_tokens = 60000
+concurrent_req = 4096
+block_size = 16
+simulator_learning_rate = 0
+simulator_moe = True
+simulator_num_layers = 48
+simulator_model_hash = "cfdf769d"
+simulator_cache_dir = "/home/admin/cpfs/zkx/code/MetricsTestRunner/moe_long"

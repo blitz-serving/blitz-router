@@ -93,6 +93,9 @@ impl Corrector for LinregCorrector {
     }
 
     fn calibrate(&mut self, raw_ms: f32, actual_ms: f32) {
+        if self.learning_rate == 0.0 {
+            return;
+        }
         if self.warmup_remaining > 0 {
             self.warmup_remaining -= 1;
             return;

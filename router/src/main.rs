@@ -68,6 +68,16 @@ struct Args {
     #[cfg(feature = "bailian-impl-q")]
     #[clap(default_value_t = 0.15, long, env)]
     bailian_gamma: f32,
+    /// PolyServe TTFT SLO in milliseconds
+    /// (only consulted when policy `polyserve-q` is selected).
+    #[cfg(feature = "polyserve-q")]
+    #[clap(default_value_t = 5000.0, long, env)]
+    polyserve_ttft_slo_ms: f32,
+    /// PolyServe TPOT SLO in milliseconds. The current implementation
+    /// uses simulator `in_decode_tbt_ms` as a TPOT approximation.
+    #[cfg(feature = "polyserve-q")]
+    #[clap(default_value_t = 40.0, long, env)]
+    polyserve_tpot_slo_ms: f32,
     #[clap(default_value = "0.0.0.0", long, env)]
     hostname: String,
     #[clap(default_value = "3000", long, short, env)]
@@ -132,7 +142,7 @@ struct Args {
     #[clap(long, env, default_value_t = false)]
     simulator_moe: bool,
     /// Online linreg correction learning rate.
-    #[clap(long, env, default_value_t = 1e-6)]
+    #[clap(long, env, default_value_t = 0.0)]
     simulator_learning_rate: f32,
     /// Reject calibration samples whose |actual - corrected| exceeds this
     /// many milliseconds. Set high (e.g. 10000) when starting from a stopgap
@@ -158,6 +168,10 @@ fn main() -> Result<(), RouterError> {
         bailian_beta,
         #[cfg(feature = "bailian-impl-q")]
         bailian_gamma,
+        #[cfg(feature = "polyserve-q")]
+        polyserve_ttft_slo_ms,
+        #[cfg(feature = "polyserve-q")]
+        polyserve_tpot_slo_ms,
         kvcache_block_size,
         hostname,
         port,
@@ -196,6 +210,8 @@ fn main() -> Result<(), RouterError> {
     // process so the policy body can read them via `OnceLock::get()`.
     #[cfg(feature = "bailian-impl-q")]
     router::init_bailian_params(bailian_alpha, bailian_beta, bailian_gamma);
+    #[cfg(feature = "polyserve-q")]
+    router::init_polyserve_params(polyserve_ttft_slo_ms, polyserve_tpot_slo_ms);
 
     // CORS allowed origins
     let cors_allow_origin: Option<AllowOrigin> = cors_allow_origin.map(|cors_allow_origin| {

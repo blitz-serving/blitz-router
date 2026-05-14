@@ -37,6 +37,7 @@ pub(crate) mod llm_d;
 pub(crate) mod lmetric;
 pub(crate) mod policy_runner;
 pub(crate) mod policy_trait;
+pub(crate) mod polyserve;
 pub(crate) mod preble;
 pub(crate) mod simple;
 pub(crate) mod vllm;
@@ -59,6 +60,8 @@ pub(crate) use llm_d::{
 };
 #[allow(unused_imports)]
 pub(crate) use lmetric::LmetricQ;
+#[allow(unused_imports)]
+pub(crate) use polyserve::PolyserveQ;
 #[allow(unused_imports)]
 pub(crate) use preble::PrebleQ;
 #[allow(unused_imports)]
@@ -191,6 +194,8 @@ pub(crate) type TaskAssigner = PolicyRunner<RoundRobinQ>;
 pub(crate) type TaskAssigner = PolicyRunner<RandomQ>;
 #[cfg(feature = "least-ttft-q")]
 pub(crate) type TaskAssigner = PolicyRunner<LeastTtftQ>;
+#[cfg(feature = "polyserve-q")]
+pub(crate) type TaskAssigner = PolicyRunner<PolyserveQ>;
 // `join-shortest-weight-q` is also the catch-all default — vLLM's
 // `4·sctx.waiting + sctx.bs` formula.
 #[cfg(any(
@@ -214,6 +219,7 @@ pub(crate) type TaskAssigner = PolicyRunner<LeastTtftQ>;
         feature = "round-robin-q",
         feature = "random-q",
         feature = "least-ttft-q",
+        feature = "polyserve-q",
     ))
 ))]
 pub(crate) type TaskAssigner = PolicyRunner<JShortestWeightQ>;
