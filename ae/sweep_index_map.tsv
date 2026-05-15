@@ -1,0 +1,9 @@
+figure	trace	trace_file	scale_factor	policies	sweep_indices	estimated_time	command
+Figure 21(a)	ChatBot (Qwen)	qwen_traceA_blksz_16.jsonl	5.6	5 plotted policies	0,10,15,25,30	2-3 hours	Run each index with SWEEP_TEST_LIMIT=1 bash sweep_test_robust.sh <index>
+Figure 21(b)	Agent/API (Qwen)	qwen_traceB_blksz_16.jsonl	5.5	5 plotted policies	35,45,50,60,65	2-3 hours	Run each index with SWEEP_TEST_LIMIT=1 bash sweep_test_robust.sh <index>
+Figure 21(c)	Coder	anony-qwen3-coder-20251118-14-16.jsonl	2.4	5 plotted policies	72,82,87,97,102	2-3 hours	Run each index with SWEEP_TEST_LIMIT=1 bash sweep_test_robust.sh <index>
+Figure 21(d)	ToolAgent (Kimi)	mooncake_toolagent_trace_poissoned.jsonl	1.6	5 plotted policies	107,115,119,127,131	2-3 hours	Run each index with SWEEP_TEST_LIMIT=1 bash sweep_test_robust.sh <index>
+Figure 22	ChatBot (Qwen) scaling	qwen_traceA_blksz_16.jsonl	5.6,6.0,6.4,6.8,7.2	5 plotted policies	0-4;10-19;25-34	10-15 hours	Run each listed index with SWEEP_TEST_LIMIT=1 bash sweep_test_robust.sh <index>
+Figure 22	Agent/API (Qwen) scaling	qwen_traceB_blksz_16.jsonl	5.5,6.0,6.5,7.0,7.5	5 plotted policies	35-39;45-54;60-69	10-15 hours	Run each listed index with SWEEP_TEST_LIMIT=1 bash sweep_test_robust.sh <index>
+Figure 22	Coder scaling	anony-qwen3-coder-20251118-14-16.jsonl	2.0,2.2,2.4,2.6,2.8	5 plotted policies	70-74;80-89;95-104	10-15 hours	Run each listed index with SWEEP_TEST_LIMIT=1 bash sweep_test_robust.sh <index>
+Figure 22	ToolAgent (Kimi) scaling	mooncake_toolagent_trace_poissoned.jsonl	1.2,1.4,1.6,1.8	5 plotted policies	105-108;113-120;125-132	8-12 hours	Run each listed index with SWEEP_TEST_LIMIT=1 bash sweep_test_robust.sh <index>

@@ -1,0 +1,8 @@
+numpy
+pandas
+matplotlib
+scienceplots
+seaborn
+setuptools<81
+tqdm
+scipy

@@ -19,6 +19,37 @@ See `router/Cargo.toml` for the full list of policy feature flags.
 
 End-to-end tests (router + yaullm + request-sim orchestration) live in the [MetricsTestRunner](https://github.com/blitz-serving/MetricsTestRunner) repo, not here.
 
+## OSDI'26 Artifact Evaluation
+
+The AE workflow is documented in [`ae/README.md`](ae/README.md). It explains
+how to prepare the required repositories, rerun the MetricsTestRunner
+experiments that produce `client.jsonl` and router logs, and regenerate the
+paper evaluation figures from `${AE_ROOT}/xmetric-plots/figs`. Use
+`AE_ROOT` for the artifact root directory, `blitz-router` branch
+`osdi26-ae-workflow`, `yaullm` branch
+`lmetric/step-reporter-v2`, `MetricsTestRunner` branch `ae`, and
+`xmetric-plots` branch `ae`.
+
+To set up the required repositories:
+
+```bash
+cd "${AE_ROOT}/blitz-router"
+bash ae/setup_repos.sh
+```
+
+To print the full experiment command list without launching the cluster jobs:
+
+```bash
+bash ae/run_all.sh print-experiments
+```
+
+To regenerate Figure 21 and Figure 22 from the archived data in
+`${AE_ROOT}/xmetric-plots/data`:
+
+```bash
+bash ae/run_all.sh figures
+```
+
 ## Docs
 
 Full docs: <https://blitz-serving.github.io/blitzscale-doc/>
