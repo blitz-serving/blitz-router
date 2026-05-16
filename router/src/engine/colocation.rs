@@ -455,8 +455,7 @@ mod task_assignment {
             // NOTE: `prefill_tokens` doesn't count hit tokens, while
             //       `all_tokens` does count hit tokens
             metric_delta.prefill_tokens_dec = m.prefill_tokens as isize;
-            let is_pure_decode_step =
-                !m.outputs.is_empty() && m.outputs.iter().all(|o| o.state == "DECODE");
+            let is_pure_decode_step = m.prefill_tokens == 0 && !m.outputs.is_empty();
             let mut first_tbt_request_ids = Vec::new();
             for request_status in &m.outputs {
                 let RequestStepOutput {
