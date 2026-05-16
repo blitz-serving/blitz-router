@@ -17,10 +17,11 @@ pub enum ModelKind {
 
 #[derive(Clone, Debug)]
 pub struct SimulatorConfig {
-    /// MD5(config_str)[..8] of the model from Modified_vidur. Used to find CSVs.
-    /// Qwen2.5 = `9f4b3b9a`, Llama3 = `d29f0375`.
+    /// Legacy MD5(config_str)[..8] of the model from Modified_vidur.
+    /// Kept for CLI/config compatibility; VidurRfPredictor CSV paths no
+    /// longer include this value.
     pub model_hash: String,
-    /// Directory containing `{op_name}_{model_hash}_predictions.csv` files.
+    /// Directory containing `{op_name}_predictions.csv` files.
     pub cache_dir: PathBuf,
     pub model_kind: ModelKind,
 

@@ -128,10 +128,11 @@ struct Args {
     #[clap(long, env, default_value_t = false)]
     enable_simulator: bool,
     /// Directory containing precomputed Vidur prediction grids
-    /// ({op}_{model_hash}_predictions.csv).
+    /// ({op}_predictions.csv).
     #[clap(long, env, default_value = "/nvme/zkx/Modified_vidur/cache")]
     simulator_cache_dir: String,
-    /// Vidur model hash. Qwen2.5: 9f4b3b9a, Llama3: d29f0375.
+    /// Legacy Vidur model hash. Kept for config compatibility; CSV filenames
+    /// no longer include it.
     #[clap(long, env, default_value = "9f4b3b9a")]
     simulator_model_hash: String,
     /// Number of transformer layers in the served model.
