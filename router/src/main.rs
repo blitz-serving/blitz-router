@@ -71,7 +71,7 @@ struct Args {
     /// PolyServe TTFT SLO in milliseconds
     /// (only consulted when policy `polyserve-q` or `polyserve2-q` is selected).
     #[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
-    #[clap(default_value_t = 5000.0, long, env)]
+    #[clap(default_value_t = 3000.0, long, env)]
     polyserve_ttft_slo_ms: f32,
     /// PolyServe TPOT SLO in milliseconds. The current implementation
     /// uses simulator `in_decode_tbt_ms` as a TPOT approximation.

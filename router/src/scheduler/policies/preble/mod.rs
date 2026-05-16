@@ -38,10 +38,8 @@ impl PrebleGCtx {
     /// Initialize the histogram if not yet present. Idempotent.
     pub(crate) fn ensure_init(&mut self, num_replicas: usize) -> &mut SlidingWindowHistogram {
         if self.histogram.is_none() {
-            self.histogram = Some(SlidingWindowHistogram::new(
-                num_replicas,
-                cost_model::TargetGpu::default(),
-            ));
+            self.histogram =
+                Some(SlidingWindowHistogram::new(num_replicas, cost_model::TargetGpu::default()));
         }
         self.histogram.as_mut().unwrap()
     }
@@ -73,13 +71,7 @@ pub(crate) fn update_histogram_into(
     let context_length = hit_nblks * block_size;
     let num_tokens = input_len.saturating_sub(context_length);
     let decoding_length = histogram.default_decoding_length();
-    histogram.update(
-        node_key,
-        num_tokens,
-        context_length,
-        replica_id,
-        decoding_length,
-    );
+    histogram.update(node_key, num_tokens, context_length, replica_id, decoding_length);
 }
 
 // =========================================================================
@@ -112,4 +104,3 @@ policy! {
         preble_update_after(entry, &observations[chosen], count, gctx);
     }
 }
-

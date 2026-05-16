@@ -38,8 +38,8 @@ use std::collections::HashMap;
 
 use crate::engine::EngineStepOutput;
 
-use radixtree::RadixTreeReqIdHash;
 use super::sched::SchedSnapshot;
+use radixtree::RadixTreeReqIdHash;
 
 pub struct IncrementalMirror {
     tree: RadixTreeReqIdHash,
@@ -93,10 +93,7 @@ impl IncrementalMirror {
             // default-hash-algo feature this is the first u64 of the
             // BackendBlockHash array.
             let key = backend_hash_to_key(evicted_hash);
-            let still_in_flight = self
-                .tree
-                .owners_of(key)
-                .any(|rid| sched.is_in_flight(rid));
+            let still_in_flight = self.tree.owners_of(key).any(|rid| sched.is_in_flight(rid));
             if !still_in_flight {
                 self.tree.evict_orphan_hash(key);
             }
@@ -272,8 +269,8 @@ mod tests {
         let mut m = IncrementalMirror::new();
         m.insert_request(1, &[10, 20]);
         let s = sched_with(&[1]); // 1 still in flight
-        // Rare per Group B Point 1, but if the SSE claims to evict
-        // hash 10 of an in-flight request, v1 swallows.
+                                  // Rare per Group B Point 1, but if the SSE claims to evict
+                                  // hash 10 of an in-flight request, v1 swallows.
         let step = step(vec![], vec![bh(10)], vec![], vec![]);
         m.apply_sse(&step, &s);
         // Mirror untouched.

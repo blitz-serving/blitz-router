@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::scheduler::kvcache::BlockHash;
 use super::Entry;
 use crate::gateway::validation::ValidGenerateRequest;
+use crate::scheduler::kvcache::BlockHash;
 use crate::{LMetricInc, ScheduleContext};
 
 /// Per-replica snapshot captured under a single `sctx.lock().await`.
@@ -71,8 +71,7 @@ pub(crate) async fn capture_observations(
 /// New (uncached) prefill tokens contributed by `req` if routed to `sctx`.
 #[inline]
 pub(crate) fn new_tokens(req: &ValidGenerateRequest, sctx: &Observation) -> usize {
-    req.input_tokens.len()
-        .saturating_sub(sctx.hit_blocks * sctx.block_size)
+    req.input_tokens.len().saturating_sub(sctx.hit_blocks * sctx.block_size)
 }
 
 /// New (uncached) blocks `req` would allocate at `sctx`. Equals
@@ -84,9 +83,7 @@ pub(crate) fn new_blocks(req: &ValidGenerateRequest, sctx: &Observation) -> usiz
     if sctx.block_size == 0 {
         return 0;
     }
-    req.input_tokens.len()
-        .div_ceil(sctx.block_size)
-        .saturating_sub(sctx.hit_blocks)
+    req.input_tokens.len().div_ceil(sctx.block_size).saturating_sub(sctx.hit_blocks)
 }
 
 /// Already-queued prefill tokens at this replica, request-independent.
@@ -220,11 +217,7 @@ where
 {
     target
         .iter()
-        .min_by(|a, b| {
-            score(a)
-                .partial_cmp(&score(b))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .min_by(|a, b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal))
         .map(|o| o.idx)
 }
 
@@ -236,11 +229,7 @@ where
 {
     target
         .iter()
-        .max_by(|a, b| {
-            score(a)
-                .partial_cmp(&score(b))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .max_by(|a, b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal))
         .map(|o| o.idx)
 }
 
@@ -274,17 +263,29 @@ pub(crate) fn root_target(observations: &[Observation]) -> Vec<&Observation> {
 
 #[inline]
 pub(crate) fn mean_of_usize(obs: &[Observation], proj: impl Fn(&Observation) -> usize) -> f32 {
-    if obs.is_empty() { return 0.0; }
+    if obs.is_empty() {
+        return 0.0;
+    }
     obs.iter().map(|o| proj(o) as f32).sum::<f32>() / obs.len() as f32
 }
 
 #[inline]
-pub(crate) fn std_of_usize(obs: &[Observation], proj: impl Fn(&Observation) -> usize + Copy) -> f32 {
-    if obs.len() <= 1 { return 0.0; }
+pub(crate) fn std_of_usize(
+    obs: &[Observation],
+    proj: impl Fn(&Observation) -> usize + Copy,
+) -> f32 {
+    if obs.len() <= 1 {
+        return 0.0;
+    }
     let m = mean_of_usize(obs, proj);
-    let var: f32 = obs.iter()
-        .map(|o| { let x = proj(o) as f32 - m; x * x })
-        .sum::<f32>() / (obs.len() - 1) as f32;
+    let var: f32 = obs
+        .iter()
+        .map(|o| {
+            let x = proj(o) as f32 - m;
+            x * x
+        })
+        .sum::<f32>()
+        / (obs.len() - 1) as f32;
     var.sqrt()
 }
 
@@ -309,18 +310,27 @@ pub(crate) fn sum_of_usize(obs: &[Observation], proj: impl Fn(&Observation) -> u
 #[inline]
 #[allow(dead_code)] // closed reducer vocabulary; kept for future policies
 pub(crate) fn mean_of_f32(obs: &[Observation], proj: impl Fn(&Observation) -> f32) -> f32 {
-    if obs.is_empty() { return 0.0; }
+    if obs.is_empty() {
+        return 0.0;
+    }
     obs.iter().map(proj).sum::<f32>() / obs.len() as f32
 }
 
 #[inline]
 #[allow(dead_code)] // closed reducer vocabulary; kept for future policies
 pub(crate) fn std_of_f32(obs: &[Observation], proj: impl Fn(&Observation) -> f32 + Copy) -> f32 {
-    if obs.len() <= 1 { return 0.0; }
+    if obs.len() <= 1 {
+        return 0.0;
+    }
     let m = mean_of_f32(obs, proj);
-    let var: f32 = obs.iter()
-        .map(|o| { let x = proj(o) - m; x * x })
-        .sum::<f32>() / (obs.len() - 1) as f32;
+    let var: f32 = obs
+        .iter()
+        .map(|o| {
+            let x = proj(o) - m;
+            x * x
+        })
+        .sum::<f32>()
+        / (obs.len() - 1) as f32;
     var.sqrt()
 }
 
@@ -374,8 +384,7 @@ pub(crate) async fn apply_default_after(
     cached: &Observation,
 ) {
     let request = &entry.request;
-    let ScheduleContext { lmetric, block_hash } =
-        &mut *all_sctx[chosen].lock().await;
+    let ScheduleContext { lmetric, block_hash } = &mut *all_sctx[chosen].lock().await;
     let current_epoch = block_hash.epoch();
     let hit_nblks = if cached.epoch == current_epoch {
         cached.hit_blocks
@@ -384,7 +393,9 @@ pub(crate) async fn apply_default_after(
     };
     entry.block_hash_state.set_pred_block_hits(hit_nblks);
     entry.block_hash_state.set_decision_epoch(current_epoch);
-    let new_ntkns = request.input_tokens.len()
+    let new_ntkns = request
+        .input_tokens
+        .len()
         .saturating_sub(hit_nblks * entry.block_hash_state.get_block_size());
 
     tracing::info!(

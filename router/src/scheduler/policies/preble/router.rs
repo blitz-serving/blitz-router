@@ -10,8 +10,8 @@
 // Stage 2 (cost-model fallback): If no prefix match or ratio <= 50%,
 //   route to the replica with minimum total allocation cost.
 
-use super::histogram::SlidingWindowHistogram;
 use super::super::Entry;
+use super::histogram::SlidingWindowHistogram;
 
 /// Prefix routing threshold (Go line 477):
 /// ```go
@@ -121,10 +121,8 @@ pub(crate) fn route(
         let longest_match_tokens = best_match.match_tokens;
 
         // Collect all replicas with the same longest match
-        let candidates: Vec<&PrefixMatch> = prefix_matches
-            .iter()
-            .filter(|m| m.match_tokens == longest_match_tokens)
-            .collect();
+        let candidates: Vec<&PrefixMatch> =
+            prefix_matches.iter().filter(|m| m.match_tokens == longest_match_tokens).collect();
 
         if !candidates.is_empty() {
             // Tie-break by load (Go: getPodLoad)
@@ -179,11 +177,7 @@ pub(crate) fn route(
     let mut selected_hit = 0;
 
     for &(replica_id, hit_nblks, _all_tokens) in all_sctx_snapshots {
-        let cost = if replica_id < replica_costs.len() {
-            replica_costs[replica_id]
-        } else {
-            0.0
-        };
+        let cost = if replica_id < replica_costs.len() { replica_costs[replica_id] } else { 0.0 };
 
         if cost < min_cost {
             min_cost = cost;
@@ -208,8 +202,8 @@ pub(crate) fn route(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::cost_model::TargetGpu;
+    use super::*;
 
     #[test]
     fn test_route_cost_model_fallback() {
@@ -226,10 +220,7 @@ mod tests {
         assert_eq!(costs.len(), 3);
         // All costs should be zero since histogram is empty
         for c in &costs {
-            assert!(
-                *c == 0.0,
-                "Empty histogram should yield zero cost, got {c}"
-            );
+            assert!(*c == 0.0, "Empty histogram should yield zero cost, got {c}");
         }
     }
 

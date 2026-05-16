@@ -1,7 +1,7 @@
-use std::sync::OnceLock;
-use std::time::Duration;
 use std::collections::VecDeque;
 use std::ops::{AddAssign, SubAssign};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use super::kvcache::PrefixBlockHash;
 
@@ -27,7 +27,9 @@ pub(crate) static BAILIAN_GAMMA: OnceLock<f32> = OnceLock::new();
 /// PolyServe SLO thresholds (set once from CLI in `main.rs` via
 /// [`init_polyserve_params`]). The policy consumes both thresholds as
 /// milliseconds and compares them against simulator projections.
+#[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
 pub(crate) static POLYSERVE_TTFT_SLO_MS: OnceLock<f32> = OnceLock::new();
+#[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
 pub(crate) static POLYSERVE_TPOT_SLO_MS: OnceLock<f32> = OnceLock::new();
 
 /// Install the Bailian scoring weights from CLI flags. Called once at

@@ -32,14 +32,18 @@ pub(crate) mod aibrix;
 pub(crate) mod bailian;
 pub(crate) mod dsl_runtime;
 pub(crate) mod dynamo;
+#[cfg(feature = "least-ttft-q")]
 pub(crate) mod least_ttft;
 pub(crate) mod llm_d;
 pub(crate) mod lmetric;
 pub(crate) mod policy_runner;
 pub(crate) mod policy_trait;
+#[cfg(feature = "polyserve-q")]
 pub(crate) mod polyserve;
+#[cfg(feature = "polyserve2-q")]
 pub(crate) mod polyserve2;
 pub(crate) mod preble;
+#[cfg(any(feature = "polyserve-q", feature = "polyserve2-q"))]
 mod recent_exclusion;
 pub(crate) mod simple;
 pub(crate) mod vllm;
@@ -53,6 +57,7 @@ pub(crate) use aibrix::AibrixQ;
 pub(crate) use bailian::BailianImplQ;
 #[allow(unused_imports)]
 pub(crate) use dynamo::{DynamoPoQ, DynamoQ};
+#[cfg(feature = "least-ttft-q")]
 #[allow(unused_imports)]
 pub(crate) use least_ttft::LeastTtftQ;
 #[allow(unused_imports)]
@@ -62,8 +67,10 @@ pub(crate) use llm_d::{
 };
 #[allow(unused_imports)]
 pub(crate) use lmetric::LmetricQ;
+#[cfg(feature = "polyserve-q")]
 #[allow(unused_imports)]
 pub(crate) use polyserve::PolyserveQ;
+#[cfg(feature = "polyserve2-q")]
 #[allow(unused_imports)]
 pub(crate) use polyserve2::Polyserve2Q;
 #[allow(unused_imports)]
@@ -117,6 +124,8 @@ pub(crate) struct Entry {
     pub prev_token_time: Option<Instant>,
     /// Averaged TPOT, set after first decoding
     pub time_of_per_token: Option<Duration>,
+    /// TBT of the first pure-decode step this request appears in.
+    pub first_tbt_time: Option<Duration>,
     /// Max TBT
     pub max_time_between_tokens: Duration,
 }

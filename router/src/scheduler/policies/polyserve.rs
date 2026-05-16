@@ -81,13 +81,20 @@ impl Policy for PolyserveQ {
                             &hashes,
                             sctx_hits,
                         );
-                        (idx, sctx_hits, gist)
+                        let ttft_ms = gist.and_then(|g| g.ttft_ms);
+                        let chunked_prefill_steps = gist.and_then(|g| g.chunked_prefill_steps);
+                        let tpot_ms = gist.and_then(|g| g.in_decode_tbt_ms);
+                        let max_avg_tpot_ms = gist.and_then(|g| g.max_avg_tpot_ms);
+
+                        (idx, sctx_hits, ttft_ms, chunked_prefill_steps, tpot_ms, max_avg_tpot_ms)
                     })
                 })
                 .collect();
 
             for task in query_tasks {
-                let Ok((idx, sctx_hits, gist)) = task.await else {
+                let Ok((idx, sctx_hits, ttft_ms, chunked_prefill_steps, tpot_ms, max_avg_tpot_ms)) =
+                    task.await
+                else {
                     tracing::warn!(
                         target: "policy.polyserve-q",
                         request_id = candidate_id,
@@ -95,10 +102,6 @@ impl Policy for PolyserveQ {
                     );
                     continue;
                 };
-                let ttft_ms = gist.and_then(|g| g.ttft_ms);
-                let chunked_prefill_steps = gist.and_then(|g| g.chunked_prefill_steps);
-                let tpot_ms = gist.and_then(|g| g.in_decode_tbt_ms);
-                let max_avg_tpot_ms = gist.and_then(|g| g.max_avg_tpot_ms);
                 let slo_ok = matches!(
                     (ttft_ms, tpot_ms),
                     (Some(ttft), Some(tpot)) if ttft <= ttft_slo_ms && tpot <= tpot_slo_ms

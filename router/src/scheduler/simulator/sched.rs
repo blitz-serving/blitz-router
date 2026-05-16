@@ -165,8 +165,8 @@ impl SchedSnapshot {
                         // prev_computed_tokens is the KV size BEFORE this
                         // step ran, so the post-step processed count is
                         // exactly that plus this step's chunk.
-                        req.processed_tokens = (o.prev_computed_tokens + chunk as u32)
-                            .min(req.input_length.max(1));
+                        req.processed_tokens =
+                            (o.prev_computed_tokens + chunk as u32).min(req.input_length.max(1));
                     }
                 }
                 "DECODE" | "RUNNING" => {

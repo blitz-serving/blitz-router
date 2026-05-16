@@ -158,9 +158,7 @@ impl SlidingWindowHistogram {
         Self {
             window_duration: DEFAULT_WINDOW_DURATION,
             nodes: HashMap::new(),
-            replicas: (0..num_replicas)
-                .map(|_| ReplicaStats::default())
-                .collect(),
+            replicas: (0..num_replicas).map(|_| ReplicaStats::default()).collect(),
             timestamps: Vec::new(),
             num_replicas,
             target_gpu,
@@ -264,12 +262,11 @@ impl SlidingWindowHistogram {
             } else {
                 // Decrement node stats
                 if let Some(stats) = self.nodes.get_mut(&entry.node_key) {
-                    stats.histogram =
-                        stats.histogram.saturating_sub(entry.leaf_context_length);
+                    stats.histogram = stats.histogram.saturating_sub(entry.leaf_context_length);
                     stats.node_to_count = stats.node_to_count.saturating_sub(1);
-                    stats.hit_tokens = stats
-                        .hit_tokens
-                        .saturating_sub(entry.leaf_context_length.saturating_sub(entry.leaf_num_tokens));
+                    stats.hit_tokens = stats.hit_tokens.saturating_sub(
+                        entry.leaf_context_length.saturating_sub(entry.leaf_num_tokens),
+                    );
                     stats.prompt_tokens =
                         stats.prompt_tokens.saturating_sub(entry.leaf_context_length);
 
@@ -405,11 +402,8 @@ impl SlidingWindowHistogram {
                 // We approximate num_tokens and context_length from the stats.
                 // In the Go code, these come from the TreeNode object directly.
                 // Here, we derive them from the histogram data.
-                let avg_context = if stats.node_to_count > 0 {
-                    stats.histogram / stats.node_to_count
-                } else {
-                    0
-                };
+                let avg_context =
+                    if stats.node_to_count > 0 { stats.histogram / stats.node_to_count } else { 0 };
                 let avg_num_tokens = if stats.node_to_count > 0 && stats.prompt_tokens > 0 {
                     let avg_hit = stats.hit_tokens / stats.node_to_count;
                     avg_context.saturating_sub(avg_hit)
@@ -422,8 +416,7 @@ impl SlidingWindowHistogram {
 
         for (node_key, num_tokens, context_length) in node_entries {
             for replica_id in 0..self.num_replicas {
-                let cost =
-                    self.get_node_cost(node_key, num_tokens, context_length, replica_id);
+                let cost = self.get_node_cost(node_key, num_tokens, context_length, replica_id);
                 costs[replica_id] += cost / self.num_replicas as f64;
             }
         }

@@ -76,11 +76,7 @@ fn mistral7b_a6000_attention_time(
     total_context: usize,
     num_unique_kv: usize,
 ) -> f64 {
-    let num_unique_kv = if num_unique_kv == 0 {
-        total_context
-    } else {
-        num_unique_kv
-    };
+    let num_unique_kv = if num_unique_kv == 0 { total_context } else { num_unique_kv };
 
     let forward_time = if total_context <= 1024 {
         0.32
@@ -139,11 +135,7 @@ fn mistral7b_v100_attention_time(
     total_context: usize,
     num_unique_kv: usize,
 ) -> f64 {
-    let num_unique_kv = if num_unique_kv == 0 {
-        total_context
-    } else {
-        num_unique_kv
-    };
+    let num_unique_kv = if num_unique_kv == 0 { total_context } else { num_unique_kv };
 
     let forward_time = if total_context <= 1024 {
         0.80
@@ -294,11 +286,7 @@ fn calculate_attn_quad_a800(num_tokens: usize, seq_len: Option<usize>) -> f64 {
 ///     baseTime = mistral7BV100LinearTime(numTokens) + mistral7BV100AttentionTime(1, contextLength, numTokens)
 /// }
 /// ```
-pub(crate) fn base_prefill_time(
-    gpu: TargetGpu,
-    num_tokens: usize,
-    context_length: usize,
-) -> f64 {
+pub(crate) fn base_prefill_time(gpu: TargetGpu, num_tokens: usize, context_length: usize) -> f64 {
     match gpu {
         TargetGpu::A6000 => {
             mistral7b_a6000_linear_time(num_tokens)
@@ -326,11 +314,7 @@ pub(crate) fn base_prefill_time(
 ///     attnQuad = calculateAttnQuadV100(numTokens, nil)
 /// }
 /// ```
-pub(crate) fn attn_quad_time(
-    gpu: TargetGpu,
-    num_tokens: usize,
-    seq_len: Option<usize>,
-) -> f64 {
+pub(crate) fn attn_quad_time(gpu: TargetGpu, num_tokens: usize, seq_len: Option<usize>) -> f64 {
     match gpu {
         TargetGpu::A6000 => calculate_attn_quad_a6000(num_tokens, seq_len),
         TargetGpu::V100 => calculate_attn_quad_v100(num_tokens, seq_len),

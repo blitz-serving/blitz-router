@@ -39,10 +39,7 @@ pub(crate) struct PolicyRunner<P: Policy> {
 
 impl<P: Policy> Clone for PolicyRunner<P> {
     fn clone(&self) -> Self {
-        Self {
-            queue_sender: self.queue_sender.clone(),
-            _marker: PhantomData,
-        }
+        Self { queue_sender: self.queue_sender.clone(), _marker: PhantomData }
     }
 }
 
@@ -56,16 +53,9 @@ where
     ) -> Self {
         let (queue_sender, queue_receiver) = mpsc::unbounded_channel();
 
-        tokio::spawn(Self::queue_task(
-            num_replicas,
-            queue_receiver,
-            all_schedule_context,
-        ));
+        tokio::spawn(Self::queue_task(num_replicas, queue_receiver, all_schedule_context));
 
-        Self {
-            queue_sender,
-            _marker: PhantomData,
-        }
+        Self { queue_sender, _marker: PhantomData }
     }
 
     async fn queue_task(
@@ -91,8 +81,7 @@ where
                         let request_id = entry.request.request_id;
                         #[cfg(feature = "simulator")]
                         super::super::simulator::on_admit(replica_idx, &entry);
-                        all_commit_req_buffers[replica_idx]
-                            .push_back((request_id, entry));
+                        all_commit_req_buffers[replica_idx].push_back((request_id, entry));
                     }
                 }
                 PolicyCommand::NextRequest(replica_idx, response_sender) => {
@@ -118,9 +107,7 @@ where
                         }
                     }
 
-                    if let Some((id, mut entry)) =
-                        all_commit_req_buffers[replica_idx].pop_front()
-                    {
+                    if let Some((id, mut entry)) = all_commit_req_buffers[replica_idx].pop_front() {
                         entry.batch_time = Some(Instant::now());
                         response_sender.send(Some((id, entry))).unwrap();
                     } else {
@@ -138,17 +125,13 @@ where
 {
     #[instrument(skip_all)]
     fn append(&self, entry: Entry) {
-        self.queue_sender
-            .send(PolicyCommand::Append(Box::new(entry), Span::current()))
-            .unwrap();
+        self.queue_sender.send(PolicyCommand::Append(Box::new(entry), Span::current())).unwrap();
     }
 
     #[instrument(skip_all)]
     async fn next_request(&self, replica_id: usize) -> Option<NextRequest> {
         let (tx, rx) = oneshot::channel();
-        self.queue_sender
-            .send(PolicyCommand::NextRequest(replica_id, tx))
-            .unwrap();
+        self.queue_sender.send(PolicyCommand::NextRequest(replica_id, tx)).unwrap();
         rx.await.unwrap()
     }
 }

@@ -129,9 +129,7 @@ impl<P: Predictor + ?Sized, C: Corrector> RegressionalPredictor<P, C> {
     }
 }
 
-impl<P: Predictor + ?Sized, C: Corrector> TrainedPredictor
-    for RegressionalPredictor<P, C>
-{
+impl<P: Predictor + ?Sized, C: Corrector> TrainedPredictor for RegressionalPredictor<P, C> {
     fn predict(&self, batch: &BatchForPredictor) -> f32 {
         self.corrector.correct(self.inner.predict(batch))
     }
@@ -191,8 +189,7 @@ mod tests {
         cfg.linreg_outlier_threshold_ms = 100.0;
 
         let inner = Arc::new(MockPredictor(2.0));
-        let mut wrapped =
-            RegressionalPredictor::new(inner.clone(), LinregCorrector::new(&cfg));
+        let mut wrapped = RegressionalPredictor::new(inner.clone(), LinregCorrector::new(&cfg));
         let batch = BatchForPredictor::default();
 
         // Inner says 2.0; truth is 4.0. After many calibration steps the

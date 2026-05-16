@@ -71,13 +71,9 @@ impl RolloutBuffer {
     /// (`prefill_begin_step` is None) or in-decode steady-state was
     /// not reached within the rollout horizon.
     pub fn gist(&self) -> RolloutGist {
-        let ttft_ms = self.prefill_end_step.map(|i| {
-            self.slots
-                .iter()
-                .take(i + 1)
-                .map(|s| s.predicted_lat_ms)
-                .sum()
-        });
+        let ttft_ms = self
+            .prefill_end_step
+            .map(|i| self.slots.iter().take(i + 1).map(|s| s.predicted_lat_ms).sum());
         let chunked_prefill_steps = match (self.prefill_begin_step, self.prefill_end_step) {
             (Some(begin), Some(end)) if end >= begin => Some(end - begin + 1),
             _ => None,
@@ -106,8 +102,8 @@ pub struct RolloutGist {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::BatchForPredictor;
+    use super::*;
 
     fn slot(latency: f32) -> RolloutSlot {
         RolloutSlot {

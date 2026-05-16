@@ -6,15 +6,13 @@
 // © 2022-present Hugging Face Inc. – Apache-2.0.
 #![allow(unused)]
 
-use crate::engine::EngineClient;
 use super::kvcache::{BlockHash, BlockHashState, PrefixBlockHash};
 use super::queue::{QueuePro, TaskAssigner};
 use super::statistic::statistic;
+use crate::engine::EngineClient;
 use crate::gateway::validation::{Validation, ValidationError};
 use crate::{
-    start_vllm_colocation_event_loop,
-    ColocationController, Entry, LMetric,
-    ScheduleContext, Token,
+    start_vllm_colocation_event_loop, ColocationController, Entry, LMetric, ScheduleContext, Token,
 };
 
 use crate::GenerateRequest;
@@ -22,9 +20,9 @@ use crate::GenerateRequest;
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Duration;
 
+use crate::types::GeneratedText;
 use futures::future::try_join_all;
 use nohash_hasher::IntMap;
-use crate::types::GeneratedText;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
@@ -136,6 +134,7 @@ impl Infer {
             generated_token_cnt: 0,
             prev_token_time: None,
             time_of_per_token: None,
+            first_tbt_time: None,
             max_time_between_tokens: Duration::from_micros(0),
         });
 

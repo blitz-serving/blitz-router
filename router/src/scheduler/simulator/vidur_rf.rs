@@ -40,7 +40,10 @@ fn fallback_ms(op: &str) -> f32 {
         "sampler_e2e" => 80.0,
         "attn_pre_proj" | "attn_post_proj" => 40.0,
         "moe_linear" => 100.0,
-        "input_layernorm" | "post_attention_layernorm" | "add" | "attn_rope"
+        "input_layernorm"
+        | "post_attention_layernorm"
+        | "add"
+        | "attn_rope"
         | "attn_kv_cache_save" => 10.0,
         _ => 0.0,
     }
@@ -234,11 +237,8 @@ impl VidurRfPredictor {
         let kv_avg = kv_sum / n;
         let kv_avg_r = self.round_up(kv_avg, self.config.kv_cache_prediction_granularity);
         let base = self.lookup("attn_decode", (n, kv_avg_r));
-        let overhead = if n > 1 {
-            self.config.attention_decode_batching_overhead_fraction
-        } else {
-            0.0
-        };
+        let overhead =
+            if n > 1 { self.config.attention_decode_batching_overhead_fraction } else { 0.0 };
         base * (1.0 + overhead)
     }
 
@@ -395,7 +395,11 @@ mod tests {
 
     fn build_minimal_grids(dir: &std::path::Path, hash: &str) {
         // 2D grids
-        write_csv(dir, &format!("attn_decode_{hash}_predictions.csv"), &[(1, 1024, 0.5), (2, 1024, 0.7)]);
+        write_csv(
+            dir,
+            &format!("attn_decode_{hash}_predictions.csv"),
+            &[(1, 1024, 0.5), (2, 1024, 0.7)],
+        );
         write_csv(dir, &format!("attn_prefill_{hash}_predictions.csv"), &[(0, 1024, 1.0)]);
         // 1D-only grids (k2=0 is implied, both 2-col and 3-col formats supported)
         for op in [

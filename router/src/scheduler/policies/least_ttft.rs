@@ -59,7 +59,6 @@ impl Policy for LeastTtftQ {
                     g.block_hash.get(hashes)
                 };
 
-                #[cfg(feature = "simulator")]
                 let gist = crate::scheduler::simulator::query(
                     idx,
                     candidate_id,
@@ -68,11 +67,7 @@ impl Policy for LeastTtftQ {
                     sctx_hits,
                 );
 
-                #[cfg(feature = "simulator")]
                 let ttft = gist.and_then(|g| g.ttft_ms);
-
-                #[cfg(not(feature = "simulator"))]
-                let ttft: Option<f32> = None;
 
                 tracing::info!(
                     target: "policy.least-ttft-q",
@@ -122,7 +117,10 @@ impl Policy for LeastTtftQ {
                 let hit_nblks = g.block_hash.get(hashes);
                 entry.block_hash_state.set_pred_block_hits(hit_nblks);
                 entry.block_hash_state.set_decision_epoch(current_epoch);
-                let new_ntkns = entry.request.input_tokens.len()
+                let new_ntkns = entry
+                    .request
+                    .input_tokens
+                    .len()
                     .saturating_sub(hit_nblks * entry.block_hash_state.get_block_size());
                 g.lmetric += LMetricInc {
                     bs_inc: 1,

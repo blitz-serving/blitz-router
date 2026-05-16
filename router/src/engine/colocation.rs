@@ -1,8 +1,5 @@
-use crate::{
-    scheduler::queue::TaskAssigner,
-    ScheduleContext,
-};
 use super::client::EngineClient;
+use crate::{scheduler::queue::TaskAssigner, ScheduleContext};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -45,8 +42,8 @@ pub(crate) fn start_vllm_colocation_event_loop(
 }
 
 mod task_assignment {
-    use nohash_hasher::{BuildNoHashHasher, IntMap};
     use crate::types as proto;
+    use nohash_hasher::{BuildNoHashHasher, IntMap};
     use tokio::sync::mpsc::{self, channel, error::SendError, Receiver};
     use tokio::sync::Mutex;
     use tokio::task::yield_now;
@@ -55,6 +52,7 @@ mod task_assignment {
     use core::panic;
     use std::sync::Arc;
 
+    use super::super::client::{EngineClient, EngineStepReceiver, RequestStepOutput};
     use super::except_management::{ExtContext, ExtState};
     use super::ScheduleContext;
     use crate::{
@@ -63,7 +61,6 @@ mod task_assignment {
         scheduler::queue::{Entry, QueuePro},
         ExtExcept, LMetricDec, Token,
     };
-    use super::super::client::{EngineClient, EngineStepReceiver, RequestStepOutput};
 
     /// Tracks the lifecycle phase of each request within the event loop.
     ///
@@ -113,7 +110,11 @@ mod task_assignment {
             match (self, sse_state) {
                 // Waiting -> Prefilling (first SSE report)
                 (RequestPhase::Waiting, "PREFILL") => {
-                    if is_finished { RequestPhase::Prefilling } else { RequestPhase::Prefilling }
+                    if is_finished {
+                        RequestPhase::Prefilling
+                    } else {
+                        RequestPhase::Prefilling
+                    }
                 }
                 // Prefilling -> Prefilling (continued prefill, e.g. chunked prefill)
                 (RequestPhase::Prefilling, "PREFILL") => RequestPhase::Prefilling,
@@ -130,10 +131,7 @@ mod task_assignment {
                 (RequestPhase::Decoding, "DECODE") => RequestPhase::Decoding,
                 // Invalid: Decoding -> Prefilling (should never happen)
                 (RequestPhase::Decoding, "PREFILL") => {
-                    debug_assert!(
-                        false,
-                        "Invalid phase transition: Decoding -> Prefilling"
-                    );
+                    debug_assert!(false, "Invalid phase transition: Decoding -> Prefilling");
                     // In release builds, tolerate gracefully
                     RequestPhase::Prefilling
                 }
@@ -310,7 +308,8 @@ mod task_assignment {
                 .send(Ok(InferStreamResponse::Intermediate {
                     token: Token {
                         id: t,
-                        text: shared_tokenizer.as_ref()
+                        text: shared_tokenizer
+                            .as_ref()
                             .and_then(|tok| tok.decode(&[t], false).ok())
                             .unwrap_or_default(),
                         logprob: 0.0,
@@ -340,7 +339,8 @@ mod task_assignment {
                 .send(Ok(InferStreamResponse::Intermediate {
                     token: Token {
                         id: t,
-                        text: shared_tokenizer.as_ref()
+                        text: shared_tokenizer
+                            .as_ref()
                             .and_then(|tok| tok.decode(&[t], false).ok())
                             .unwrap_or_default(),
                         logprob: 0.0,
@@ -359,11 +359,7 @@ mod task_assignment {
     /// With the trait-based EngineClient, completion is detected via
     /// `recv_step()` reporting `is_finished=true`. No HTTP response
     /// JoinHandle is needed.
-    fn on_finish_request(
-        replica_index: usize,
-        entry: Entry,
-        request_id: u64,
-    ) {
+    fn on_finish_request(replica_index: usize, entry: Entry, request_id: u64) {
         let id = request_id;
         tracing::info!(
             target: "lifecycle",
@@ -459,6 +455,9 @@ mod task_assignment {
             // NOTE: `prefill_tokens` doesn't count hit tokens, while
             //       `all_tokens` does count hit tokens
             metric_delta.prefill_tokens_dec = m.prefill_tokens as isize;
+            let is_pure_decode_step =
+                !m.outputs.is_empty() && m.outputs.iter().all(|o| o.state == "DECODE");
+            let mut first_tbt_request_ids = Vec::new();
             for request_status in &m.outputs {
                 let RequestStepOutput {
                     request_id,
@@ -468,6 +467,17 @@ mod task_assignment {
                     hit_token_cnt,
                     prev_computed_tokens: _,
                 } = *request_status;
+                if is_pure_decode_step {
+                    let entry_opt = entries
+                        .get_mut(&request_id)
+                        .or_else(|| except_context.entries.get_mut(&request_id));
+                    if let Some(entry) = entry_opt {
+                        if entry.first_tbt_time.is_none() {
+                            entry.first_tbt_time = Some(tbt);
+                            first_tbt_request_ids.push(request_id);
+                        }
+                    }
+                }
                 match state.as_str() {
                     "PREFILL" => {
                         // Only count waiting_reqs_dec if we actually know this request
@@ -482,8 +492,7 @@ mod task_assignment {
                                 metric_delta.bs_dec += 1;
                                 metric_delta.all_tokens_inc -= input_length as isize;
                             } else if let Some(entry) =
-                                except_context
-                                    .put(ExtState::Exit(request_id))
+                                except_context.put(ExtState::Exit(request_id))
                             {
                                 let input_length = entry.request.input_length as isize;
                                 metric_delta.bs_dec += 1;
@@ -500,27 +509,28 @@ mod task_assignment {
                             }
                         } else {
                             metric_delta.all_tokens_inc += new_tokens.len() as isize;
-                            let entry_opt = entries.get_mut(&request_id)
+                            let entry_opt = entries
+                                .get_mut(&request_id)
                                 .or_else(|| except_context.entries.get_mut(&request_id));
                             if let Some(entry) = entry_opt {
                                 let inc_hit_nblks = entry
-                                .block_hash_state
-                                .set_real_token_hits_get_diff(hit_token_cnt);
-                            let bs = entry.block_hash_state.get_block_size();
-                            tracing::info!(
-                                target: "correction",
-                                request_id = request_id,
-                                engine = replica_index,
-                                predicted = entry.block_hash_state.pred_hit_tokens(),
-                                actual = hit_token_cnt,
-                                diff = inc_hit_nblks * bs as isize,
-                                decision_epoch = entry.block_hash_state.decision_epoch(),
-                                current_epoch = current_epoch,
-                                "CORRECTION"
-                            );
-                            metric_delta.prefill_tokens_dec += inc_hit_nblks
-                                * entry.block_hash_state.get_block_size() as isize;
-                            entry.append_state(new_tokens, &tbt);
+                                    .block_hash_state
+                                    .set_real_token_hits_get_diff(hit_token_cnt);
+                                let bs = entry.block_hash_state.get_block_size();
+                                tracing::info!(
+                                    target: "correction",
+                                    request_id = request_id,
+                                    engine = replica_index,
+                                    predicted = entry.block_hash_state.pred_hit_tokens(),
+                                    actual = hit_token_cnt,
+                                    diff = inc_hit_nblks * bs as isize,
+                                    decision_epoch = entry.block_hash_state.decision_epoch(),
+                                    current_epoch = current_epoch,
+                                    "CORRECTION"
+                                );
+                                metric_delta.prefill_tokens_dec += inc_hit_nblks
+                                    * entry.block_hash_state.get_block_size() as isize;
+                                entry.append_state(new_tokens, &tbt);
                             } else {
                                 tracing::warn!(
                                     target: "lifecycle",
@@ -538,19 +548,16 @@ mod task_assignment {
                                 let request = &entry.request;
                                 metric_delta.bs_dec += 1;
                                 // NOTE: `generated_token_cnt` has not been appended, so just make decrement
-                                metric_delta.all_tokens_inc -= request.input_length
-                                    as isize
+                                metric_delta.all_tokens_inc -= request.input_length as isize
                                     + entry.generated_token_cnt as isize;
                             } else if let Some(entry) =
                                 // `unwrap` inside, `entry` must be either in `entries` or `except_context`
-                                except_context
-                                    .put(ExtState::Exit(request_id))
+                                except_context.put(ExtState::Exit(request_id))
                             {
                                 let request = &entry.request;
                                 metric_delta.bs_dec += 1;
                                 // NOTE: `generated_token_cnt` has not been appended, so just make decrement
-                                metric_delta.all_tokens_inc -= request.input_length
-                                    as isize
+                                metric_delta.all_tokens_inc -= request.input_length as isize
                                     + entry.generated_token_cnt as isize;
                                 // NOTE:
                                 temp_leaving_entries.0.push(request_id);
@@ -567,13 +574,12 @@ mod task_assignment {
                                 entry.append_state(new_tokens, &tbt);
                                 // postcond: `Some(entry.tpot)`
                                 metric_delta.all_tokens_inc += new_tokens.len() as isize;
-                                metric_delta.tpot +=
-                                    entry.time_of_per_token.unwrap().as_secs_f32();
-                            } else if let Some(entry) = except_context.entries.get_mut(&request_id) {
+                                metric_delta.tpot += entry.time_of_per_token.unwrap().as_secs_f32();
+                            } else if let Some(entry) = except_context.entries.get_mut(&request_id)
+                            {
                                 entry.append_state(new_tokens, &tbt);
                                 metric_delta.all_tokens_inc += new_tokens.len() as isize;
-                                metric_delta.tpot +=
-                                    entry.time_of_per_token.unwrap().as_secs_f32();
+                                metric_delta.tpot += entry.time_of_per_token.unwrap().as_secs_f32();
                             } else {
                                 // Stale SSE event for unknown request (e.g., from a
                                 // previous router session). Skip gracefully.
@@ -590,6 +596,16 @@ mod task_assignment {
                         panic!("engine#{replica_index}::step erroneous output {:?}", m);
                     }
                 }
+            }
+            if !first_tbt_request_ids.is_empty() {
+                tracing::info!(
+                    target: "lifecycle",
+                    engine = replica_index,
+                    step_id = m.step_id,
+                    request_ids = ?first_tbt_request_ids,
+                    first_tbt_ms = m.latency,
+                    "FIRST_PURE_DECODE_TBT"
+                );
             }
             let mut sctx = schedule_context.lock().await;
 
@@ -611,11 +627,7 @@ mod task_assignment {
                 // Total backend bids
                 let entry = entries.get_mut(rid).unwrap_or_else(|| {
                     except_context.entries.get_mut(rid).unwrap_or_else(|| {
-                        let i = temp_leaving_entries
-                            .0
-                            .iter()
-                            .position(|&eid| *rid == eid)
-                            .unwrap();
+                        let i = temp_leaving_entries.0.iter().position(|&eid| *rid == eid).unwrap();
                         temp_leaving_entries.1.get_mut(i).unwrap()
                     })
                 });
@@ -634,11 +646,7 @@ mod task_assignment {
                 }
                 let entry = entries.get_mut(rid).unwrap_or_else(|| {
                     except_context.entries.get_mut(rid).unwrap_or_else(|| {
-                        let i = temp_leaving_entries
-                            .0
-                            .iter()
-                            .position(|&eid| *rid == eid)
-                            .unwrap();
+                        let i = temp_leaving_entries.0.iter().position(|&eid| *rid == eid).unwrap();
                         temp_leaving_entries.1.get_mut(i).unwrap()
                     })
                 });
@@ -723,39 +731,32 @@ mod task_assignment {
                         if is_finished {
                             let entry = entries.remove(&request_id).unwrap();
                             request_phases.remove(&request_id);
-                            on_finish_request(
-                                replica_index,
-                                entry,
-                                request_id,
-                            );
+                            on_finish_request(replica_index, entry, request_id);
                             // NOTE: revokes FrontendAbort, since both channels are terminated
-                            if request_id
-                                == cancel_req_ids.last().copied().unwrap_or(!request_id)
-                            {
+                            if request_id == cancel_req_ids.last().copied().unwrap_or(!request_id) {
                                 cancel_req_ids.pop();
                             }
                         }
                     }
                     "DECODE" if entries.get(&request_id).is_some() => {
                         let entry = entries.get_mut(&request_id).unwrap();
-                        if let Err(ExtExcept::FrontendAbort) =
-                            on_decode(replica_index, entry, request_id, &new_token_ids, &shared_tokenizer)
-                                .await
+                        if let Err(ExtExcept::FrontendAbort) = on_decode(
+                            replica_index,
+                            entry,
+                            request_id,
+                            &new_token_ids,
+                            &shared_tokenizer,
+                        )
+                        .await
                         {
                             cancel_req_ids.push(request_id);
                         }
                         if is_finished {
                             let entry = entries.remove(&request_id).unwrap();
                             request_phases.remove(&request_id);
-                            on_finish_request(
-                                replica_index,
-                                entry,
-                                request_id,
-                            );
+                            on_finish_request(replica_index, entry, request_id);
                             // NOTE: revokes FrontendAbort, since both channels are terminated
-                            if request_id
-                                == cancel_req_ids.last().copied().unwrap_or(!request_id)
-                            {
+                            if request_id == cancel_req_ids.last().copied().unwrap_or(!request_id) {
                                 cancel_req_ids.pop();
                             }
                         }
@@ -1076,7 +1077,11 @@ mod except_management {
                         tracing::debug!(target: "lifecycle", request_id = id, "EXCEPTION_TERM_AFTER_EXIT");
                     }
                     self.states.remove(i);
-                    if has_entry { self.entries.remove(&id) } else { None }
+                    if has_entry {
+                        self.entries.remove(&id)
+                    } else {
+                        None
+                    }
                 }
             }
         }

@@ -25,8 +25,7 @@ pub use config::{ModelKind, SimulatorConfig};
 pub use mirror::IncrementalMirror;
 pub use pctx::PCtx;
 pub use predictor::{
-    Corrector, LinregCorrector, NullCorrector, Predictor, RegressionalPredictor,
-    TrainedPredictor,
+    Corrector, LinregCorrector, NullCorrector, Predictor, RegressionalPredictor, TrainedPredictor,
 };
 pub use radixtree::RadixTreeReqIdHash;
 pub use rollout::{RolloutBuffer, RolloutGist, RolloutSlot};
@@ -57,10 +56,8 @@ pub fn init_with_predictor(
 ) -> Result<(), &'static str> {
     let mut pctxs = Vec::with_capacity(num_replicas);
     for _ in 0..num_replicas {
-        let trained: Box<dyn TrainedPredictor> = Box::new(RegressionalPredictor::new(
-            inner.clone(),
-            LinregCorrector::new(config),
-        ));
+        let trained: Box<dyn TrainedPredictor> =
+            Box::new(RegressionalPredictor::new(inner.clone(), LinregCorrector::new(config)));
         pctxs.push(Arc::new(PCtx::new(
             trained,
             config.block_size as u32,
@@ -75,10 +72,7 @@ pub fn init_with_predictor(
 
 /// Production path: build a `VidurRfPredictor` from CSV grids on disk and
 /// install it as the simulator backend.
-pub fn init_vidur_rf(
-    num_replicas: usize,
-    config: SimulatorConfig,
-) -> std::io::Result<()> {
+pub fn init_vidur_rf(num_replicas: usize, config: SimulatorConfig) -> std::io::Result<()> {
     let cfg_arc = Arc::new(config.clone());
     let inner: Arc<dyn Predictor> = Arc::new(VidurRfPredictor::new(cfg_arc)?);
     init_with_predictor(num_replicas, &config, inner)
@@ -110,12 +104,26 @@ pub(crate) fn on_sse(replica_index: usize, m: &EngineStepOutput) {
     let signed = actual - predicted;
     metrics::histogram!("simulator_signed_error_ms", signed as f64);
     metrics::histogram!("simulator_abs_error_ms", signed.abs() as f64);
-    if actual > 1e-3 {
-        metrics::histogram!(
-            "simulator_relative_error",
-            (signed.abs() / actual) as f64
+    if is_decode_only_step(m) {
+        tracing::info!(
+            target: "simulator",
+            step_id = m.step_id,
+            predicted_tbt_ms = predicted,
+            actual_tbt_ms = actual,
+            signed_error_ms = signed,
+            abs_error_ms = signed.abs(),
+            "SIMULATOR_TBT"
         );
     }
+    if actual > 1e-3 {
+        metrics::histogram!("simulator_relative_error", (signed.abs() / actual) as f64);
+    }
+}
+
+fn is_decode_only_step(m: &EngineStepOutput) -> bool {
+    m.prefill_tokens == 0
+        && !m.outputs.is_empty()
+        && m.outputs.iter().all(|o| matches!(o.state.as_str(), "DECODE" | "RUNNING"))
 }
 
 /// Admission-time hook (piggyback). Called by `policy_runner`
@@ -218,7 +226,11 @@ mod tests {
     use crate::engine::RequestStepOutput;
     use nohash_hasher::{BuildNoHashHasher, IntMap};
 
-    fn empty_step(prefill_tokens: usize, latency_ms: u64, outputs: Vec<RequestStepOutput>) -> EngineStepOutput {
+    fn empty_step(
+        prefill_tokens: usize,
+        latency_ms: u64,
+        outputs: Vec<RequestStepOutput>,
+    ) -> EngineStepOutput {
         EngineStepOutput {
             prefill_tokens,
             prefill_token_budget: 1024,

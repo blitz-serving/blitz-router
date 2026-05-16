@@ -154,10 +154,7 @@ impl PCtx {
     /// L1 INSERT (low-level, public for unit tests). Production call
     /// site is `on_admit`.
     pub fn insert_in_flight(&self, request_id: u64, hashes: &[u64]) {
-        self.mirror
-            .lock()
-            .expect("PCtx mirror poisoned")
-            .insert_request(request_id, hashes);
+        self.mirror.lock().expect("PCtx mirror poisoned").insert_request(request_id, hashes);
     }
 
     /// L1 REMOVE (low-level). Used by `on_sse` via `apply_sse`; kept
@@ -230,38 +227,33 @@ impl PCtx {
         sctx_prefix_hits: usize,
     ) -> RolloutGist {
         // Composite cache hit blocks → max-merge per A2.
-        let mirror_hits = self
-            .mirror
-            .lock()
-            .expect("PCtx mirror poisoned")
-            .prefix_match(candidate_hashes);
+        let mirror_hits =
+            self.mirror.lock().expect("PCtx mirror poisoned").prefix_match(candidate_hashes);
         let composite_hits = sctx_prefix_hits.max(mirror_hits);
 
         // Three-way recovery on the cached ephemeral.
-        let baseline = self
-            .ephemeral
-            .lock()
-            .expect("PCtx ephemeral poisoned")
-            .take()
-            .and_then(|e| match e.candidate_id {
-                None => {
-                    // Clean baseline — reuse buffer + tail directly.
-                    Some((e.buffer, e.sse_anchor_step_id, e.tail_sched))
-                }
-                Some(_) => {
-                    // Stale candidate-bound. Try savepoint recovery.
-                    match e.savepoint {
-                        Some((idx, saved_tail)) if idx > 0 => {
-                            let mut buf = e.buffer;
-                            buf.slots.truncate(idx);
-                            buf.candidate_id = None;
-                            buf.prefill_begin_step = None;
-                            buf.prefill_end_step = None;
-                            buf.in_decode_step = None;
-                            buf.max_avg_tpot_ms = None;
-                            Some((buf, e.sse_anchor_step_id, saved_tail))
+        let baseline =
+            self.ephemeral.lock().expect("PCtx ephemeral poisoned").take().and_then(|e| {
+                match e.candidate_id {
+                    None => {
+                        // Clean baseline — reuse buffer + tail directly.
+                        Some((e.buffer, e.sse_anchor_step_id, e.tail_sched))
+                    }
+                    Some(_) => {
+                        // Stale candidate-bound. Try savepoint recovery.
+                        match e.savepoint {
+                            Some((idx, saved_tail)) if idx > 0 => {
+                                let mut buf = e.buffer;
+                                buf.slots.truncate(idx);
+                                buf.candidate_id = None;
+                                buf.prefill_begin_step = None;
+                                buf.prefill_end_step = None;
+                                buf.in_decode_step = None;
+                                buf.max_avg_tpot_ms = None;
+                                Some((buf, e.sse_anchor_step_id, saved_tail))
+                            }
+                            _ => None, // savepoint cleared or never set → scratch rebuild
                         }
-                        _ => None, // savepoint cleared or never set → scratch rebuild
                     }
                 }
             });
@@ -282,11 +274,8 @@ impl PCtx {
                 )
             }
             None => {
-                let (buf, tail) = self.run_schedule_loop_from_scratch(
-                    candidate_id,
-                    input_length,
-                    composite_hits,
-                );
+                let (buf, tail) =
+                    self.run_schedule_loop_from_scratch(candidate_id, input_length, composite_hits);
                 (buf, tail, None)
             }
         };
@@ -321,10 +310,7 @@ impl PCtx {
         candidate.processed_tokens = initial_processed;
         sched_local.admit(candidate);
 
-        let mut buffer = RolloutBuffer {
-            candidate_id: Some(candidate_id),
-            ..Default::default()
-        };
+        let mut buffer = RolloutBuffer { candidate_id: Some(candidate_id), ..Default::default() };
 
         const MAX_SLOTS: usize = 256;
         while buffer.slots.len() < MAX_SLOTS {
@@ -494,8 +480,7 @@ impl PCtx {
         }
 
         // Build BatchForPredictor for the regressor.
-        let num_tokens: usize =
-            num_prefill_tokens.iter().sum::<usize>() + decode_rids.len();
+        let num_tokens: usize = num_prefill_tokens.iter().sum::<usize>() + decode_rids.len();
         let bs_safe = self.block_size as usize;
         let num_tokens_rounded = ((num_tokens + bs_safe - 1) / bs_safe) * bs_safe;
         let batch = BatchForPredictor {
@@ -507,11 +492,8 @@ impl PCtx {
             size: prefill_rids.len() + decode_rids.len(),
         };
 
-        let predicted_lat_ms = self
-            .regressor
-            .lock()
-            .expect("PCtx regressor poisoned")
-            .predict(&batch);
+        let predicted_lat_ms =
+            self.regressor.lock().expect("PCtx regressor poisoned").predict(&batch);
 
         // Track candidate lifecycle on the shared buffer.
         let candidate_in_prefill = prefill_rids.iter().any(|r| *r == candidate_id);
@@ -528,22 +510,13 @@ impl PCtx {
         }
         if candidate_in_decode && buffer.in_decode_step.is_none() {
             buffer.in_decode_step = Some(slot_idx);
-            let rollout_elapsed_ms = buffer
-                .slots
-                .iter()
-                .map(|s| s.predicted_lat_ms)
-                .sum::<f32>()
-                + predicted_lat_ms;
+            let rollout_elapsed_ms =
+                buffer.slots.iter().map(|s| s.predicted_lat_ms).sum::<f32>() + predicted_lat_ms;
             buffer.max_avg_tpot_ms =
                 self.max_avg_tpot_ms(sched, predicted_lat_ms, rollout_elapsed_ms);
         }
 
-        Some(RolloutSlot {
-            batch,
-            predicted_lat_ms,
-            prefill_rids,
-            decode_rids,
-        })
+        Some(RolloutSlot { batch, predicted_lat_ms, prefill_rids, decode_rids })
     }
 
     fn max_avg_tpot_ms(
@@ -614,8 +587,7 @@ impl PCtx {
                     debug_assert!(
                         false,
                         "on_admit({}): protocol violation — cached ephemeral candidate_id={:?}",
-                        request_id,
-                        e.candidate_id
+                        request_id, e.candidate_id
                     );
                     *slot = None; // safety net in release
                 }
@@ -669,10 +641,7 @@ impl PCtx {
                         true // safety net in release: treat as drift, drop
                     }
                     None => {
-                        debug_assert!(
-                            false,
-                            "L3 invariant: ephemeral exists but has no slots"
-                        );
+                        debug_assert!(false, "L3 invariant: ephemeral exists but has no slots");
                         true
                     }
                 };
@@ -685,8 +654,7 @@ impl PCtx {
                         e.buffer.prefill_begin_step.map(|i| i.saturating_sub(1));
                     e.buffer.prefill_end_step =
                         e.buffer.prefill_end_step.map(|i| i.saturating_sub(1));
-                    e.buffer.in_decode_step =
-                        e.buffer.in_decode_step.map(|i| i.saturating_sub(1));
+                    e.buffer.in_decode_step = e.buffer.in_decode_step.map(|i| i.saturating_sub(1));
                     e.sse_anchor_step_id = m.step_id;
                     // Decrement savepoint's baseline-split index in
                     // lock-step with the buffer pop. When it hits 0,
@@ -752,10 +720,7 @@ fn step_has_prefill(m: &EngineStepOutput) -> bool {
 /// sets the engine reports in `m.outputs`? Set-equality on both
 /// PREFILL and DECODE buckets. Caller is expected to have verified
 /// `slot.composition_known()` first.
-fn rid_sets_match(
-    slot: &super::rollout::RolloutSlot,
-    m: &EngineStepOutput,
-) -> bool {
+fn rid_sets_match(slot: &super::rollout::RolloutSlot, m: &EngineStepOutput) -> bool {
     use std::collections::HashSet;
     let pred_pref: HashSet<u64> = slot.prefill_rids.iter().copied().collect();
     let pred_dec: HashSet<u64> = slot.decode_rids.iter().copied().collect();
@@ -779,10 +744,10 @@ fn rid_sets_match(
 mod tests {
     use std::sync::Arc;
 
-    use super::*;
-    use crate::engine::RequestStepOutput;
     use super::super::config::SimulatorConfig;
     use super::super::predictor::{LinregCorrector, Predictor, RegressionalPredictor};
+    use super::*;
+    use crate::engine::RequestStepOutput;
     use nohash_hasher::{BuildNoHashHasher, IntMap};
 
     struct ConstPredictor(f32);
@@ -843,12 +808,7 @@ mod tests {
 
         let inner = Arc::new(ConstPredictor(2.0));
         let trained = Box::new(RegressionalPredictor::new(inner, LinregCorrector::new(&cfg)));
-        let pctx = PCtx::new(
-            trained,
-            cfg.block_size as u32,
-            cfg.token_budget,
-            cfg.avg_output_len,
-        );
+        let pctx = PCtx::new(trained, cfg.block_size as u32, cfg.token_budget, cfg.avg_output_len);
 
         let batch = BatchForPredictor::default();
         let mut last_pred = 0.0f32;
@@ -1203,11 +1163,7 @@ mod tests {
         let s = step(
             5,
             32,
-            vec![
-                out(7, "PREFILL", false),
-                out(1, "DECODE", false),
-                out(2, "DECODE", false),
-            ],
+            vec![out(7, "PREFILL", false), out(1, "DECODE", false), out(2, "DECODE", false)],
         );
         let _ = pctx.on_sse(&BatchForPredictor::default(), &s);
 
@@ -1218,8 +1174,8 @@ mod tests {
         assert_eq!(e.buffer.slots.len(), 1, "head slot should be popped");
         assert_eq!(e.buffer.slots[0].predicted_lat_ms, 2.0);
         assert_eq!(e.buffer.prefill_begin_step, Some(0)); // saturating_sub clamps at 0
-        assert_eq!(e.buffer.prefill_end_step, Some(0));   // saturating_sub clamps at 0
-        assert_eq!(e.buffer.in_decode_step, Some(0));     // 1 - 1
+        assert_eq!(e.buffer.prefill_end_step, Some(0)); // saturating_sub clamps at 0
+        assert_eq!(e.buffer.in_decode_step, Some(0)); // 1 - 1
         assert_eq!(e.sse_anchor_step_id, 5);
     }
 
@@ -1481,10 +1437,7 @@ mod tests {
         let _ = pctx.query(20, 500, &[], 0);
         {
             let slot = pctx.ephemeral.lock().unwrap();
-            assert!(
-                slot.as_ref().unwrap().savepoint.is_some(),
-                "savepoint expected after extend"
-            );
+            assert!(slot.as_ref().unwrap().savepoint.is_some(), "savepoint expected after extend");
         }
 
         // on_admit(A=20) — promote. Savepoint must clear even though
@@ -1494,10 +1447,7 @@ mod tests {
         let slot = pctx.ephemeral.lock().unwrap();
         let e = slot.as_ref().unwrap();
         assert_eq!(e.candidate_id, None, "promote sets cid to None");
-        assert!(
-            !e.buffer.slots.is_empty(),
-            "buffer is non-empty (whole buffer is baseline)"
-        );
+        assert!(!e.buffer.slots.is_empty(), "buffer is non-empty (whole buffer is baseline)");
         assert!(e.savepoint.is_none(), "promote must clear savepoint");
     }
 
