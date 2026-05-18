@@ -36,9 +36,8 @@ fn fallback_ms(op: &str) -> f32 {
         _ => 0.0,
     }
 }
-
 const TOKEN_OPS: &[&str] = &["piecegraph", "prepare_inputs"];
-const BATCH_OPS: &[&str] = &["schedule", "update_from_output", "norm", "compute_logits", "sampler"];
+const BATCH_OPS: &[&str] = &["schedule", "update_from_outputs", "compute_logits", "sampler"];
 
 impl VidurRfPredictor {
     pub fn new(config: Arc<SimulatorConfig>) -> std::io::Result<Self> {
@@ -63,6 +62,7 @@ impl VidurRfPredictor {
 
     fn load_csv(&self, op: &str) -> std::io::Result<Grid> {
         let path = self.config.cache_dir.join(format!("{op}_predictions.csv"));
+        tracing::info!("path: {}", path.display());
         let file = File::open(&path).map_err(|e| {
             tracing::error!(target: "simulator", "failed to open {}: {}", path.display(), e);
             e
@@ -142,13 +142,16 @@ impl VidurRfPredictor {
     }
 
     fn attn_decode_ms(&self, batch: &BatchForPredictor) -> f32 {
-        let n = batch.num_decode_computed_tokens.len();
+        let mut n = batch.num_decode_computed_tokens.len();
         if n == 0 {
             return 0.0;
         }
         let kv_sum: usize = batch.num_decode_computed_tokens.iter().sum();
         let kv_avg = kv_sum / n;
         let kv_avg_r = self.round_up(kv_avg, self.config.kv_cache_prediction_granularity);
+        if n > 128 {
+            n = 128;
+        }
         let base = self.lookup("attn_decode", (n, kv_avg_r));
         let overhead =
             if n > 1 { self.config.attention_decode_batching_overhead_fraction } else { 0.0 };
