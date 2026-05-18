@@ -1,0 +1,131 @@
+{
+  "run_dir": "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8",
+  "attempt_dir": "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1",
+  "router_logs": [
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node1/router_v2.log"
+  ],
+  "vllm_logs": [
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node1/vllm1.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node1/vllm2.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node1/vllm3.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node1/vllm4.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node1/vllm5.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node1/vllm6.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node1/vllm7.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node1/vllm8.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node2/vllm1.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node2/vllm2.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node2/vllm3.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node2/vllm4.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node2/vllm5.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node2/vllm6.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node2/vllm7.log",
+    "/home/admin/cpfs/xmetric/logs-simulator-polyserve-updated2/20260517-035105_traceA_polyserve2-q_sc6.8/attempt1/node2/vllm8.log"
+  ],
+  "plot_filters": {
+    "actual_tbt_max_ms": 200.0,
+    "simulator_tbt_records_after_filter": 569242,
+    "first_tbt_matches_after_filter": 41770
+  },
+  "router_parse_stats": {
+    "router_log_files": 1,
+    "simulator_tbt_lines": 569247,
+    "first_pure_decode_tbt_lines": 7926,
+    "first_pure_decode_tbt_request_records": 41923,
+    "first_pure_decode_tbt_duplicate_request_ids": 0,
+    "query_result_records": 550790,
+    "query_result_duplicate_request_replica": 0,
+    "router_unparsed_candidate_lines": 0
+  },
+  "vllm_parse_stats": {
+    "vllm_log_files": 16,
+    "vllm_sse_lines": 597232,
+    "vllm_outputs_seen": 18235501,
+    "vllm_ttft_records": 42368,
+    "vllm_ttft_duplicate_request_ids": 0,
+    "vllm_ttft_records_without_engine": 0,
+    "vllm_malformed_sse_payloads": 0
+  },
+  "first_tbt_match_stats": {
+    "first_tbt_actual_records": 41923,
+    "missing_first_tbt_query_same_engine": 0,
+    "missing_first_tbt_prediction": 0,
+    "matched_first_tbt_records": 41923
+  },
+  "ttft_match_stats": {
+    "vllm_ttft_actual_records": 42368,
+    "missing_vllm_engine": 0,
+    "missing_ttft_query_same_engine": 0,
+    "missing_ttft_prediction": 9,
+    "matched_ttft_records": 42359
+  },
+  "error_summaries": {
+    "simulator_tbt_abs_error_ms": {
+      "count": 569247,
+      "mean": 4.980147667870943,
+      "p50": 3.9957094192504883,
+      "p90": 10.162673950195312,
+      "p95": 12.314789772033617,
+      "p99": 18.074793930053797,
+      "max": 508.470947265625
+    },
+    "simulator_tbt_abs_error_ratio": {
+      "count": 569247,
+      "mean": 0.3417214707909454,
+      "p50": 0.2839927673339844,
+      "p90": 0.7533071835835775,
+      "p95": 0.7670087814331055,
+      "p99": 0.7862396240234375,
+      "max": 0.9760731061299642
+    },
+    "first_tbt_abs_error_ms": {
+      "count": 41923,
+      "mean": 13.692954783126206,
+      "p50": 9.870192,
+      "p90": 25.818642,
+      "p95": 30.241136800000007,
+      "p99": 37.315131099999995,
+      "max": 500.00529
+    },
+    "first_tbt_abs_error_ratio": {
+      "count": 41923,
+      "mean": 0.2885771250685073,
+      "p50": 0.2636859756097561,
+      "p90": 0.5631206572199731,
+      "p95": 0.6301282205692805,
+      "p99": 0.7250442389999996,
+      "max": 12.235489999999999
+    },
+    "ttft_abs_error_ms": {
+      "count": 42359,
+      "mean": 9124.201975980686,
+      "p50": 1010.5852698852541,
+      "p90": 30115.15100753782,
+      "p95": 42081.00012852172,
+      "p99": 68775.85366215328,
+      "max": 80047.38617501831
+    },
+    "ttft_abs_error_ratio": {
+      "count": 42359,
+      "mean": 1.5476282309714713,
+      "p50": 0.49974771494620374,
+      "p90": 3.30412330373527,
+      "p95": 8.133438501833156,
+      "p99": 20.913835673815477,
+      "max": 78.69137481708803
+    }
+  },
+  "csv_outputs": {
+    "simulator_tbt_steps_csv": "/home/admin/cpfs/zkx/code/MetricsTestRunner/simulator_accuracy_results/final_traceA_polyserve2_change/simulator_tbt_steps.csv",
+    "first_tbt_matches_csv": "/home/admin/cpfs/zkx/code/MetricsTestRunner/simulator_accuracy_results/final_traceA_polyserve2_change/first_tbt_matches.csv",
+    "ttft_matches_csv": "/home/admin/cpfs/zkx/code/MetricsTestRunner/simulator_accuracy_results/final_traceA_polyserve2_change/ttft_matches.csv"
+  },
+  "image_outputs": {
+    "simulator_tbt_gap_cdf": "/home/admin/cpfs/zkx/code/MetricsTestRunner/simulator_accuracy_results/final_traceA_polyserve2_change/simulator_tbt_gap_cdf.png",
+    "simulator_tbt_timeline": "/home/admin/cpfs/zkx/code/MetricsTestRunner/simulator_accuracy_results/final_traceA_polyserve2_change/simulator_tbt_timeline.png",
+    "first_tbt_error_cdf": "/home/admin/cpfs/zkx/code/MetricsTestRunner/simulator_accuracy_results/final_traceA_polyserve2_change/first_tbt_error_cdf.png",
+    "first_tbt_sorted_actual_vs_predicted": "/home/admin/cpfs/zkx/code/MetricsTestRunner/simulator_accuracy_results/final_traceA_polyserve2_change/first_tbt_sorted_actual_vs_predicted.png",
+    "ttft_error_cdf": "/home/admin/cpfs/zkx/code/MetricsTestRunner/simulator_accuracy_results/final_traceA_polyserve2_change/ttft_error_cdf.png",
+    "ttft_sorted_actual_vs_predicted": "/home/admin/cpfs/zkx/code/MetricsTestRunner/simulator_accuracy_results/final_traceA_polyserve2_change/ttft_sorted_actual_vs_predicted.png"
+  }
+}
