@@ -10,19 +10,21 @@
 //   Lines 585-610 (update)
 //
 // In blitz-router, "pod" maps to "replica" (replica_id: usize).
-// "TreeNode" maps to a node key derived from block hash prefix matching.
+// "TreeNode" — Go's prefix-cache trie node, identified by `*TreeNode`
+// pointer — maps to a path in our `Trie<u64, OwnedNodeStats>` keyed by
+// the matched-prefix block hashes.
+//
+// Per-replica observations of TPOT and load are NOT stored in this
+// struct. They live on `LMetric` in `ScheduleContext`, snapshotted into
+// `Observation.tpot` / `Observation.bs` etc. by the policy `schedule()`
+// path. See `dsl_runtime::capture_observations`.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::cost_model::{self, TargetGpu};
+use radixtree::{ReplicaSet, Trie};
+use smallvec::SmallVec;
 
-/// Unique identifier for a prefix node in the histogram.
-///
-/// In Go, this is `*prefixcacheindexer.TreeNode` (a pointer).
-/// In blitz-router, we use a stable hash of the matched prefix as key.
-/// This is derived from the block hash sequence of the prefix match.
-pub(crate) type NodeKey = u64;
+use super::cost_model::{self, TargetGpu};
 
 /// A single histogram entry, recording a request arrival.
 ///
@@ -34,19 +36,32 @@ pub(crate) type NodeKey = u64;
 ///     leafNode  *prefixcacheindexer.TreeNode
 /// }
 /// ```
+///
+/// In our port the "node identity" is the matched-prefix path itself
+/// (stored as `Box<[u64]>`); we need to remember it on the entry so
+/// `remove_old_entries` can navigate back to the right tree node when
+/// the entry expires. We also track the `replica_id` because Go's
+/// per-pod owner-set decay (`podAllocations`) requires per-(node, pod)
+/// counts: ownership ends only when the LAST recent entry for that
+/// (node, pod) pair leaves the window.
 #[derive(Debug, Clone)]
 struct HistogramEntry {
     timestamp: Instant,
-    node_key: NodeKey,
-    /// Number of tokens in this specific request's matched prefix node.
+    /// Path identifying the prefix node this entry was recorded under.
+    prefix: Box<[u64]>,
+    /// Number of new (uncached) tokens this request contributed.
     leaf_num_tokens: usize,
-    /// Context length (total tokens up to and including this node).
+    /// Total context length up to and including this prefix node.
     leaf_context_length: usize,
+    /// Replica that served this entry. Drives per-(node, replica)
+    /// owner-set expiry — see `remove_old_entries`.
+    replica_id: usize,
 }
 
-/// Per-node accumulated statistics within the sliding window.
+/// Per-node accumulated statistics within the sliding window. Lives on
+/// the trie node payload.
 #[derive(Debug, Clone, Default)]
-struct NodeStats {
+pub(crate) struct NodeStats {
     /// Total context length tokens accumulated for this node.
     /// Go: `histogram map[*TreeNode]int`
     histogram: usize,
@@ -65,20 +80,55 @@ struct NodeStats {
     /// Total decode lengths accumulated.
     /// Go: `perNodeTotalDecodeLengths map[*TreeNode]int`
     total_decode_lengths: usize,
-    /// Number of replicas that have been assigned this node.
-    /// Used to approximate `node.GetModelToPodCount()` in Go.
-    num_assigned_replicas: usize,
+    /// Per-(node, replica) entry count within the sliding window. Drives
+    /// owner-set expiry — when the count for `replica_id` drops to zero,
+    /// the replica is removed from the trie node's owners. SmallVec
+    /// inline storage = 4 replicas covers the common "few replicas
+    /// touch any one node" case; spills to heap otherwise.
+    replica_entry_counts: SmallVec<[(usize, usize); 4]>,
 }
 
-/// Per-replica accumulated state.
-#[derive(Debug, Clone, Default)]
-struct ReplicaStats {
-    /// Total decode lengths assigned to this replica.
-    /// Go: `currentDecodeLengthsPerPod map[string]int`
-    current_decode_lengths: usize,
-    /// Rolling TPOT measurements for this replica.
-    /// Go: `avgTimePerTokenPerPod map[string][]float64`
-    avg_time_per_token: Vec<f64>,
+impl NodeStats {
+    fn replica_count_mut(&mut self, replica_id: usize) -> &mut usize {
+        if let Some(idx) = self
+            .replica_entry_counts
+            .iter()
+            .position(|(r, _)| *r == replica_id)
+        {
+            &mut self.replica_entry_counts[idx].1
+        } else {
+            self.replica_entry_counts.push((replica_id, 0));
+            let last = self.replica_entry_counts.len() - 1;
+            &mut self.replica_entry_counts[last].1
+        }
+    }
+
+    /// Decrement the count for `replica_id`, removing the entry if it
+    /// reaches zero. Returns `true` iff the count reached zero (caller
+    /// should drop `replica_id` from `owners`).
+    fn decrement_replica_count(&mut self, replica_id: usize) -> bool {
+        if let Some(idx) = self
+            .replica_entry_counts
+            .iter()
+            .position(|(r, _)| *r == replica_id)
+        {
+            let c = &mut self.replica_entry_counts[idx].1;
+            *c = c.saturating_sub(1);
+            if *c == 0 {
+                self.replica_entry_counts.swap_remove(idx);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Trie payload: per-node owner set + accumulated stats. Both live on
+/// the same node — owner-set membership and stats decay together.
+#[derive(Default, Debug, Clone)]
+pub(crate) struct OwnedNodeStats {
+    pub owners: ReplicaSet,
+    pub stats: NodeStats,
 }
 
 /// Sliding window histogram tracking request-to-node assignments.
@@ -101,21 +151,35 @@ struct ReplicaStats {
 ///     perNodeTotalDecodeLengths  map[*TreeNode]int
 /// }
 /// ```
+///
+/// In our port:
+///   * Per-node fields (`histogram`, `nodeToCount`, …) collapse into
+///     `NodeStats` and live on the trie node payload.
+///   * `podAllocations[*TreeNode]` becomes `OwnedNodeStats.owners:
+///     ReplicaSet` on the same payload — fixing the structural bug
+///     where the original port distributed cost evenly because it had
+///     no per-node owner info.
+///   * `avgTimePerTokenPerPod` is dropped: per-replica TPOT is
+///     `LMetric.tpot`, already maintained by the SSE loop and
+///     snapshotted into `Observation.tpot`. The caller passes it into
+///     `cost_for_replica`.
+///   * `currentDecodeLengthsPerPod` is dropped: not consumed by any
+///     read path in the original port, and the equivalent live signal
+///     lives on `LMetric` if a future caller needs it.
 pub(crate) struct SlidingWindowHistogram {
     /// Window duration for temporal decay.
     /// Go: `slidingWindowPeriod = 3 * time.Minute`
     window_duration: Duration,
 
-    /// Per-node statistics.
-    nodes: HashMap<NodeKey, NodeStats>,
-
-    /// Per-replica statistics.
-    replicas: Vec<ReplicaStats>,
+    /// Prefix trie keyed by block hash, payload = (owners, stats).
+    /// Replaces Go's per-node maps + `podAllocations`.
+    tree: Trie<u64, OwnedNodeStats>,
 
     /// Ordered list of entries for sliding window eviction.
     timestamps: Vec<HistogramEntry>,
 
-    /// Number of replicas.
+    /// Number of replicas — sizes the `ReplicaSet` bitsets created on
+    /// node insert.
     num_replicas: usize,
 
     /// Target GPU for cost model.
@@ -132,35 +196,18 @@ const DEFAULT_WINDOW_DURATION: Duration = Duration::from_secs(3 * 60);
 /// Default expected output length (Go: 45 tokens).
 const DEFAULT_DECODING_LENGTH: usize = 45;
 
-/// Default TPOT when no measurements available (Go: 0.15 seconds).
-const DEFAULT_TIME_PER_TOKEN: f64 = 0.15;
+/// Default TPOT when no measurements available (Go: 0.15 seconds = 150 ms).
+///
+/// Used when the caller passes a non-finite or zero `replica_tpot_ms`
+/// into `cost_for_replica`.
+const DEFAULT_TIME_PER_TOKEN_MS: f64 = 150.0;
 
 impl SlidingWindowHistogram {
     /// Create a new histogram.
-    ///
-    /// Go lines 233-247 (NewPrefixCacheAndLoadRouter):
-    /// ```go
-    /// histogram := &SlidingWindowHistogram{
-    ///     windowDuration:             slidingWindowPeriod,
-    ///     histogram:                  make(map[*TreeNode]int),
-    ///     nodeToCount:                make(map[*TreeNode]int),
-    ///     hitTokens:                  make(map[*TreeNode]int),
-    ///     promptTokens:               make(map[*TreeNode]int),
-    ///     decodingSize:               make(map[*TreeNode]int),
-    ///     numPods:                    numPods,
-    ///     podAllocations:             make(map[*TreeNode]map[int]bool),
-    ///     currentDecodeLengthsPerPod: make(map[string]int),
-    ///     perNodeTotalDecodeLengths:  make(map[*TreeNode]int),
-    ///     avgTimePerTokenPerPod:      make(map[string][]float64),
-    /// }
-    /// ```
     pub fn new(num_replicas: usize, target_gpu: TargetGpu) -> Self {
         Self {
             window_duration: DEFAULT_WINDOW_DURATION,
-            nodes: HashMap::new(),
-            replicas: (0..num_replicas)
-                .map(|_| ReplicaStats::default())
-                .collect(),
+            tree: Trie::new(),
             timestamps: Vec::new(),
             num_replicas,
             target_gpu,
@@ -173,8 +220,6 @@ impl SlidingWindowHistogram {
     /// Go lines 585-610:
     /// ```go
     /// func (h *SlidingWindowHistogram) update(timestamp time.Time, node, leafNode *TreeNode, podName string, decodingLength int) {
-    ///     h.mu.Lock()
-    ///     defer h.mu.Unlock()
     ///     h.timestamps = append(h.timestamps, histogramEntry{timestamp, node, leafNode})
     ///     h.histogram[node] += leafNode.ContextLength()
     ///     h.nodeToCount[node]++
@@ -183,39 +228,54 @@ impl SlidingWindowHistogram {
     ///     h.promptTokens[node] += leafNode.ContextLength()
     ///     h.currentDecodeLengthsPerPod[podName] += decodingLength
     ///     h.perNodeTotalDecodeLengths[node] += decodingLength
+    ///     // ... podAllocations[node][pod] = true ...
     /// }
     /// ```
+    ///
+    /// `prefix` is the matched-prefix block-hash path that identifies
+    /// the prefix node. If `prefix.is_empty()`, the call is a no-op
+    /// (no node to attach the entry to — Go uses the root sentinel for
+    /// no-prefix-match requests, but we elide it).
     pub fn update(
         &mut self,
-        node_key: NodeKey,
+        prefix: &[u64],
         num_tokens: usize,
         context_length: usize,
         replica_id: usize,
         decoding_length: usize,
     ) {
+        if prefix.is_empty() {
+            return;
+        }
         let now = Instant::now();
+        let num_replicas = self.num_replicas;
 
-        self.timestamps.push(HistogramEntry {
-            timestamp: now,
-            node_key,
-            leaf_num_tokens: num_tokens,
-            leaf_context_length: context_length,
-        });
+        // Materialise the path in the trie and update the payload.
+        let payload = self.tree.ensure_path(prefix);
+        if payload.owners.is_empty() && payload.stats.node_to_count == 0 {
+            // First time we touch this node — initialise the bitset
+            // with the current replica count. (ReplicaSet::new lazily
+            // sizes the bitvec.)
+            payload.owners = ReplicaSet::new(num_replicas);
+        }
+        payload.owners.insert(replica_id);
 
-        let stats = self.nodes.entry(node_key).or_default();
+        let stats = &mut payload.stats;
         stats.histogram += context_length;
         stats.node_to_count += 1;
         stats.decoding_size = decoding_length;
         stats.hit_tokens += context_length.saturating_sub(num_tokens);
         stats.prompt_tokens += context_length;
         stats.total_decode_lengths += decoding_length;
+        *stats.replica_count_mut(replica_id) += 1;
 
-        // Track replica assignment count for this node
-        stats.num_assigned_replicas = stats.num_assigned_replicas.max(1);
-
-        if replica_id < self.replicas.len() {
-            self.replicas[replica_id].current_decode_lengths += decoding_length;
-        }
+        self.timestamps.push(HistogramEntry {
+            timestamp: now,
+            prefix: prefix.into(),
+            leaf_num_tokens: num_tokens,
+            leaf_context_length: context_length,
+            replica_id,
+        });
 
         // Evict old entries
         self.remove_old_entries(now);
@@ -226,28 +286,14 @@ impl SlidingWindowHistogram {
     /// Go lines 292-318:
     /// ```go
     /// func (h *SlidingWindowHistogram) removeOldEntries(currentTime time.Time) {
-    ///     h.mu.Lock()
-    ///     defer h.mu.Unlock()
     ///     windowStart := currentTime.Add(-h.windowDuration)
     ///     newTimestamps := make([]histogramEntry, 0)
     ///     for _, entry := range h.timestamps {
     ///         if entry.timestamp.After(windowStart) {
     ///             newTimestamps = append(newTimestamps, entry)
     ///         } else {
-    ///             node := entry.node
-    ///             leafNode := entry.leafNode
-    ///             h.histogram[node] -= leafNode.ContextLength()
-    ///             h.nodeToCount[node]--
-    ///             h.hitTokens[node] -= leafNode.ContextLength() - leafNode.NumTokens()
-    ///             h.promptTokens[node] -= leafNode.ContextLength()
-    ///             if h.histogram[node] <= 0 {
-    ///                 delete(h.histogram, node)
-    ///                 delete(h.nodeToCount, node)
-    ///                 delete(h.hitTokens, node)
-    ///                 delete(h.promptTokens, node)
-    ///                 delete(h.decodingSize, node)
-    ///                 delete(h.podAllocations, node)
-    ///             }
+    ///             // decrement node stats and pod-allocation counts;
+    ///             // delete the node entirely if histogram[node] <= 0.
     ///         }
     ///     }
     ///     h.timestamps = newTimestamps
@@ -255,79 +301,78 @@ impl SlidingWindowHistogram {
     /// ```
     fn remove_old_entries(&mut self, current_time: Instant) {
         let window_start = current_time - self.window_duration;
+        let tree = &mut self.tree;
 
         let mut new_timestamps = Vec::with_capacity(self.timestamps.len());
-
         for entry in self.timestamps.drain(..) {
             if entry.timestamp > window_start {
                 new_timestamps.push(entry);
-            } else {
-                // Decrement node stats
-                if let Some(stats) = self.nodes.get_mut(&entry.node_key) {
-                    stats.histogram =
-                        stats.histogram.saturating_sub(entry.leaf_context_length);
-                    stats.node_to_count = stats.node_to_count.saturating_sub(1);
-                    stats.hit_tokens = stats
-                        .hit_tokens
-                        .saturating_sub(entry.leaf_context_length.saturating_sub(entry.leaf_num_tokens));
-                    stats.prompt_tokens =
-                        stats.prompt_tokens.saturating_sub(entry.leaf_context_length);
-
-                    if stats.histogram == 0 {
-                        self.nodes.remove(&entry.node_key);
-                    }
+                continue;
+            }
+            // Decrement node stats and per-(node, replica) count.
+            let mut should_drop = false;
+            if let Some((_, payload)) = tree.longest_match_mut(&entry.prefix) {
+                let stats = &mut payload.stats;
+                stats.histogram = stats.histogram.saturating_sub(entry.leaf_context_length);
+                stats.node_to_count = stats.node_to_count.saturating_sub(1);
+                stats.hit_tokens = stats.hit_tokens.saturating_sub(
+                    entry.leaf_context_length.saturating_sub(entry.leaf_num_tokens),
+                );
+                stats.prompt_tokens = stats.prompt_tokens.saturating_sub(entry.leaf_context_length);
+                if stats.decrement_replica_count(entry.replica_id) {
+                    payload.owners.remove(entry.replica_id);
                 }
+                should_drop = stats.node_to_count == 0;
+            }
+            if should_drop {
+                tree.remove_path_with(&entry.prefix, |p| {
+                    p.stats.node_to_count == 0 && p.owners.is_empty()
+                });
             }
         }
-
         self.timestamps = new_timestamps;
     }
 
-    /// Compute the prefill cost for a node.
+    /// Compute the prefill cost for a node's stats.
     ///
-    /// Go lines 201-231:
+    /// Go lines 201-231 (inside `getPrefillCost`):
     /// ```go
-    /// func (h *SlidingWindowHistogram) getPrefillCost(node *TreeNode) float64 {
-    ///     missRate := 1.0
-    ///     if h.promptTokens[node] > 0 {
-    ///         missRate = 1.0 - (float64(h.hitTokens[node]) / float64(h.promptTokens[node]))
-    ///     }
-    ///     numTokens := node.NumTokens()
-    ///     contextLength := node.ContextLength()
-    ///     // ... GPU-specific base time + attn quad ...
-    ///     prefillTime := (baseTime + attnQuad) / 0.9
-    ///     numPods := node.GetModelToPodCount()
-    ///     totalPrefillCost := missRate * float64(h.nodeToCount[node]) * prefillTime / float64(numPods)
-    ///     return totalPrefillCost
+    /// missRate := 1.0
+    /// if h.promptTokens[node] > 0 {
+    ///     missRate = 1.0 - (float64(h.hitTokens[node]) / float64(h.promptTokens[node]))
     /// }
+    /// // ... prefillTime := (baseTime + attnQuad) / 0.9 ...
+    /// numPods := node.GetModelToPodCount()
+    /// totalPrefillCost := missRate * float64(h.nodeToCount[node]) * prefillTime / float64(numPods)
     /// ```
-    fn get_prefill_cost(&self, node_key: NodeKey, num_tokens: usize, context_length: usize) -> f64 {
-        let stats = match self.nodes.get(&node_key) {
-            Some(s) => s,
-            None => return 0.0,
-        };
-
-        // Miss rate: fraction of tokens that are cache misses
+    fn prefill_cost_for(&self, stats: &NodeStats, num_owners: usize) -> f64 {
+        if stats.node_to_count == 0 {
+            return 0.0;
+        }
         let miss_rate = if stats.prompt_tokens > 0 {
             1.0 - (stats.hit_tokens as f64 / stats.prompt_tokens as f64)
         } else {
             1.0
         };
-
-        let prefill_t = cost_model::prefill_time(self.target_gpu, num_tokens, context_length);
-
-        let num_replicas = stats.num_assigned_replicas.max(1);
-
-        miss_rate * (stats.node_to_count as f64) * prefill_t / (num_replicas as f64)
+        // Approximate the node's per-request work: average context
+        // length and uncached-token count derived from the windowed
+        // accumulators.
+        let avg_context = stats.histogram / stats.node_to_count.max(1);
+        let avg_hit = stats.hit_tokens / stats.node_to_count.max(1);
+        let avg_num_tokens = avg_context.saturating_sub(avg_hit);
+        let prefill_t = cost_model::prefill_time(self.target_gpu, avg_num_tokens, avg_context);
+        let n_owners = num_owners.max(1) as f64;
+        miss_rate * (stats.node_to_count as f64) * prefill_t / n_owners
     }
 
-    /// Compute total cost (prefill + decode) for a node on a specific replica.
+    /// Compute total cost (prefill + decode) for a node on a specific
+    /// replica, given the replica's live TPOT.
     ///
     /// Go lines 341-353:
     /// ```go
     /// func (h *SlidingWindowHistogram) getNodeCost(node *TreeNode, podName string) float64 {
     ///     prefillCost := h.getPrefillCost(node)
-    ///     timePerToken := 0.15  // default
+    ///     timePerToken := 0.15  // seconds, default
     ///     if times, ok := h.avgTimePerTokenPerPod[podName]; ok && len(times) > 0 {
     ///         sort.Float64s(times)
     ///         timePerToken = times[len(times)/2]  // median
@@ -337,177 +382,91 @@ impl SlidingWindowHistogram {
     ///     return prefillCost + decodeCost
     /// }
     /// ```
-    fn get_node_cost(
-        &self,
-        node_key: NodeKey,
-        num_tokens: usize,
-        context_length: usize,
-        replica_id: usize,
-    ) -> f64 {
-        let prefill_cost = self.get_prefill_cost(node_key, num_tokens, context_length);
-
-        // Get median TPOT for this replica
-        let time_per_token = if replica_id < self.replicas.len() {
-            let times = &self.replicas[replica_id].avg_time_per_token;
-            if times.is_empty() {
-                DEFAULT_TIME_PER_TOKEN
-            } else {
-                let mut sorted = times.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                sorted[sorted.len() / 2]
-            }
+    ///
+    /// `replica_tpot_ms` comes from `LMetric.tpot` via
+    /// `Observation.tpot`. NaN / non-positive values fall back to
+    /// `DEFAULT_TIME_PER_TOKEN_MS`.
+    fn node_cost_for(&self, stats: &NodeStats, num_owners: usize, replica_tpot_ms: f64) -> f64 {
+        let prefill_cost = self.prefill_cost_for(stats, num_owners);
+        let tpt_ms = if replica_tpot_ms.is_finite() && replica_tpot_ms > 0.0 {
+            replica_tpot_ms
         } else {
-            DEFAULT_TIME_PER_TOKEN
+            DEFAULT_TIME_PER_TOKEN_MS
         };
-
-        let output_len = self
-            .nodes
-            .get(&node_key)
-            .map(|s| s.decoding_size)
-            .unwrap_or(self.default_decoding_length);
-
-        let decode_cost = output_len as f64 * time_per_token;
-
+        // Match Go's units: prefill_cost is in seconds (cost_model
+        // returns seconds), tpot is in ms there too (0.15 default), and
+        // outputLen * timePerToken is also in seconds. Our LMetric.tpot
+        // is in ms — divide by 1000 to align.
+        let output_len = if stats.decoding_size > 0 {
+            stats.decoding_size
+        } else {
+            self.default_decoding_length
+        };
+        let decode_cost = output_len as f64 * (tpt_ms / 1000.0);
         prefill_cost + decode_cost
     }
 
-    /// Compute total allocation cost per replica across all tracked nodes.
+    /// Total allocation cost for a single replica, summing
+    /// `node_cost_for` across all nodes that the replica currently
+    /// owns.
     ///
-    /// Go lines 355-369:
-    /// ```go
-    /// func (h *SlidingWindowHistogram) getCurrentAllocationCostPerPod() map[string]float64 {
-    ///     h.mu.RLock()
-    ///     defer h.mu.RUnlock()
-    ///     costs := make(map[string]float64)
-    ///     for node := range h.histogram {
-    ///         for _, modelPods := range node.GetModelToPods() {
-    ///             for podName := range modelPods {
-    ///                 costs[podName] += h.getNodeCost(node, podName)
-    ///             }
-    ///         }
-    ///     }
-    ///     return costs
-    /// }
-    /// ```
-    ///
-    /// NOTE: In blitz-router, we don't have per-node-to-replica mappings (no
-    /// `ModelToPods`). Instead, we distribute node cost evenly across all
-    /// replicas as an approximation: each replica's cost contribution from
-    /// a node is `getNodeCost(node, replica) / num_replicas`.
-    pub fn get_allocation_cost_per_replica(&self) -> Vec<f64> {
-        let mut costs = vec![0.0_f64; self.num_replicas];
-
-        // Collect node keys first to avoid borrow issues
-        let node_entries: Vec<(NodeKey, usize, usize)> = self
-            .nodes
-            .iter()
-            .map(|(&key, stats)| {
-                // We approximate num_tokens and context_length from the stats.
-                // In the Go code, these come from the TreeNode object directly.
-                // Here, we derive them from the histogram data.
-                let avg_context = if stats.node_to_count > 0 {
-                    stats.histogram / stats.node_to_count
-                } else {
-                    0
-                };
-                let avg_num_tokens = if stats.node_to_count > 0 && stats.prompt_tokens > 0 {
-                    let avg_hit = stats.hit_tokens / stats.node_to_count;
-                    avg_context.saturating_sub(avg_hit)
-                } else {
-                    avg_context
-                };
-                (key, avg_num_tokens, avg_context)
-            })
-            .collect();
-
-        for (node_key, num_tokens, context_length) in node_entries {
-            for replica_id in 0..self.num_replicas {
-                let cost =
-                    self.get_node_cost(node_key, num_tokens, context_length, replica_id);
-                costs[replica_id] += cost / self.num_replicas as f64;
+    /// Bijective to Go's `getCurrentAllocationCostPerPod` walk that
+    /// only considers `node.GetModelToPods()` — i.e. only nodes the
+    /// pod actually serves contribute.
+    pub fn cost_for_replica(&self, replica_id: usize, replica_tpot_ms: f64) -> f64 {
+        let mut total = 0.0_f64;
+        self.tree.for_each_path(|_path, payload| {
+            if !payload.owners.contains(replica_id) {
+                return;
             }
-        }
-
-        costs
+            let n_owners = payload.owners.len();
+            total += self.node_cost_for(&payload.stats, n_owners, replica_tpot_ms);
+        });
+        total
     }
 
-    /// Get the load (number of requests) for a specific replica.
+    /// Number of in-window requests routed through nodes owned by
+    /// `replica_id`. Used for Stage 1 longest-match tie-break.
     ///
     /// Go lines 569-582:
     /// ```go
     /// func (h *SlidingWindowHistogram) getPodLoad(pod *v1.Pod) int {
-    ///     h.mu.RLock()
-    ///     defer h.mu.RUnlock()
     ///     load := 0
     ///     for node, count := range h.nodeToCount {
     ///         for _, podMap := range node.GetModelToPods() {
     ///             if _, exists := podMap[pod.Name]; exists {
-    ///                 load += count
-    ///                 break
+    ///                 load += count; break
     ///             }
     ///         }
     ///     }
     ///     return load
     /// }
     /// ```
-    ///
-    /// NOTE: Without per-node replica mapping, we approximate load as
-    /// total request count / num_replicas. When used for tie-breaking
-    /// among prefix-matched replicas, the relative ordering is what matters.
-    pub fn get_replica_load(&self, _replica_id: usize) -> usize {
-        // Sum all request counts across nodes
-        let total: usize = self.nodes.values().map(|s| s.node_to_count).sum();
-        total / self.num_replicas.max(1)
-    }
-
-    /// Record a TPOT measurement for a replica.
-    #[allow(dead_code)] // exposed by histogram API; no current caller in DSL runtime
-    pub fn record_tpot(&mut self, replica_id: usize, tpot: f64) {
-        if replica_id < self.replicas.len() {
-            let times = &mut self.replicas[replica_id].avg_time_per_token;
-            times.push(tpot);
-            // Keep bounded (last 100 measurements)
-            if times.len() > 100 {
-                times.drain(..times.len() - 100);
+    pub fn load_for_replica(&self, replica_id: usize) -> usize {
+        let mut total = 0usize;
+        self.tree.for_each_path(|_path, payload| {
+            if payload.owners.contains(replica_id) {
+                total += payload.stats.node_to_count;
             }
-        }
+        });
+        total
     }
 
-    /// Get number of tracked nodes.
-    #[allow(unused)]
+    /// Number of distinct trie nodes currently in the histogram.
     pub fn num_nodes(&self) -> usize {
-        self.nodes.len()
+        self.tree.len()
     }
 
-    /// Get number of replicas.
-    #[allow(dead_code)] // exposed by histogram API; no current caller in DSL runtime
+    /// Number of replicas configured at construction.
     pub fn num_replicas(&self) -> usize {
         self.num_replicas
     }
 
-    /// Get the default decoding length.
+    /// Default per-request decode length used when a node has no
+    /// recorded `decoding_size` yet.
     pub fn default_decoding_length(&self) -> usize {
         self.default_decoding_length
     }
-}
-
-/// Generate a stable NodeKey from a block hash prefix.
-///
-/// We use the first and last hash values combined with the length
-/// to produce a unique key for a given prefix sequence.
-pub(crate) fn node_key_from_prefix(block_hashes: &[u64], prefix_len: usize) -> NodeKey {
-    if prefix_len == 0 || block_hashes.is_empty() {
-        return 0;
-    }
-    let effective_len = prefix_len.min(block_hashes.len());
-    // Combine first hash, last hash, and length for uniqueness
-    let first = block_hashes[0];
-    let last = block_hashes[effective_len - 1];
-    first
-        .wrapping_mul(0x517cc1b727220a95)
-        .wrapping_add(last)
-        .wrapping_mul(0x6c62272e07bb0142)
-        .wrapping_add(effective_len as u64)
 }
 
 #[cfg(test)]
@@ -515,41 +474,119 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_histogram_update_and_evict() {
-        let mut hist = SlidingWindowHistogram::new(2, TargetGpu::V100);
-
-        // First update
-        hist.update(1, 100, 200, 0, 45);
-        assert_eq!(hist.nodes.len(), 1);
-
-        let stats = hist.nodes.get(&1).unwrap();
-        assert_eq!(stats.node_to_count, 1);
-        assert_eq!(stats.histogram, 200);
-        assert_eq!(stats.hit_tokens, 100); // context_length - num_tokens = 200 - 100
-        assert_eq!(stats.prompt_tokens, 200);
+    fn update_records_owner_and_stats() {
+        let mut h = SlidingWindowHistogram::new(4, TargetGpu::V100);
+        h.update(&[10, 20], 100, 200, 0, 45);
+        // The path [10, 20] should now exist; the deepest node is the
+        // one that holds owner=0 and the stats.
+        let payload = h.tree.exact(&[10, 20]).unwrap();
+        assert_eq!(payload.stats.node_to_count, 1);
+        assert_eq!(payload.stats.histogram, 200);
+        assert_eq!(payload.stats.hit_tokens, 100); // 200 - 100
+        assert_eq!(payload.stats.prompt_tokens, 200);
+        assert!(payload.owners.contains(0));
+        assert!(!payload.owners.contains(1));
     }
 
     #[test]
-    fn test_allocation_cost_positive() {
-        let mut hist = SlidingWindowHistogram::new(2, TargetGpu::V100);
-        hist.update(1, 256, 1024, 0, 45);
-        hist.update(2, 128, 512, 1, 45);
+    fn cost_differs_per_replica_when_owners_differ() {
+        // Replicas 0 and 2 each touch overlapping prefixes; replica 1
+        // touches none. cost_for_replica(1) should be 0; cost_for_replica(0)
+        // and (2) should be > 0 and roughly comparable (each owns its own
+        // path plus the shared prefix).
+        let mut h = SlidingWindowHistogram::new(4, TargetGpu::V100);
+        h.update(&[10, 20, 30], 256, 1024, 0, 45);
+        h.update(&[10, 20, 40], 256, 1024, 2, 45);
+        let c0 = h.cost_for_replica(0, 50.0);
+        let c1 = h.cost_for_replica(1, 50.0);
+        let c2 = h.cost_for_replica(2, 50.0);
+        assert!(c0 > 0.0, "replica 0 owns nodes; cost_for_replica(0) > 0");
+        assert!(c2 > 0.0, "replica 2 owns nodes; cost_for_replica(2) > 0");
+        assert_eq!(c1, 0.0, "replica 1 owns no nodes; cost_for_replica(1) == 0");
+    }
 
-        let costs = hist.get_allocation_cost_per_replica();
-        assert_eq!(costs.len(), 2);
-        for c in &costs {
-            assert!(*c >= 0.0, "Cost should be non-negative: {c}");
+    #[test]
+    fn load_per_replica_counts_owned_nodes() {
+        let mut h = SlidingWindowHistogram::new(4, TargetGpu::V100);
+        h.update(&[10, 20, 30], 256, 1024, 0, 45);
+        h.update(&[10, 20, 30], 256, 1024, 0, 45);
+        h.update(&[10, 20, 40], 256, 1024, 1, 45);
+        // Replica 0 served 2 requests; both pass through 3 nodes ([10],
+        // [10,20], [10,20,30]) — load = 2 * 3 = 6 (each node's
+        // node_to_count is summed for the replica's owned nodes).
+        // Replica 1 served 1 request; passes through 3 nodes too.
+        // BUT [10] and [10,20] are co-owned by 0 and 1, so each
+        // contributes to BOTH load counts.
+        let load0 = h.load_for_replica(0);
+        let load1 = h.load_for_replica(1);
+        assert!(load0 > 0);
+        assert!(load1 > 0);
+        assert!(load0 > load1, "replica 0 served more requests: {load0} vs {load1}");
+    }
+
+    #[test]
+    fn empty_load_for_unknown_replica() {
+        let mut h = SlidingWindowHistogram::new(4, TargetGpu::V100);
+        h.update(&[10, 20], 256, 1024, 0, 45);
+        assert_eq!(h.load_for_replica(2), 0);
+        assert_eq!(h.cost_for_replica(2, 50.0), 0.0);
+    }
+
+    #[test]
+    fn per_replica_eviction_drops_owner_when_count_zero() {
+        // Manually drive the eviction path without waiting for the wall
+        // clock by calling the inner `remove_old_entries` directly with
+        // a synthesised "now".
+        let mut h = SlidingWindowHistogram::new(4, TargetGpu::V100);
+        // Use the constructor but manually set the window to 0 so any
+        // future timestamp evicts everything.
+        h.window_duration = Duration::from_secs(0);
+        h.update(&[10, 20], 256, 1024, 0, 45);
+        // After the update, the (synthesised "later") instant should
+        // already be past window_start = (now - 0). Force eviction.
+        let later = Instant::now() + Duration::from_millis(1);
+        h.remove_old_entries(later);
+        // Path [10, 20] should be gone entirely (owner-set empty +
+        // node_to_count == 0 → remove_path_with fires).
+        assert!(h.tree.exact(&[10, 20]).is_none());
+        assert_eq!(h.load_for_replica(0), 0);
+        assert_eq!(h.cost_for_replica(0, 50.0), 0.0);
+    }
+
+    #[test]
+    fn per_replica_eviction_partial_keeps_other_owner() {
+        let mut h = SlidingWindowHistogram::new(4, TargetGpu::V100);
+        // Both replica 0 and replica 1 touch [10, 20] before the
+        // window opens. Then we evict one of them by manually crafting
+        // an old timestamp — a behaviour test that the per-(node,
+        // replica) decrement removes ONLY replica 0 from owners,
+        // keeping replica 1.
+        h.update(&[10, 20], 256, 1024, 0, 45);
+        h.update(&[10, 20], 256, 1024, 1, 45);
+        // Now make the first entry old by hand-rewriting its
+        // timestamp; the second stays fresh. Use a borrow scope so
+        // we can mutate `timestamps` without conflicting with the
+        // immutable read for the assertion afterwards.
+        {
+            let old = h.timestamps[0].timestamp - Duration::from_secs(10000);
+            h.timestamps[0].timestamp = old;
         }
+        // Sliding window is the default 3 minutes, so the rewritten
+        // entry will be considered expired.
+        let now = Instant::now();
+        h.remove_old_entries(now);
+        // Replica 0 lost its only entry on [10, 20] → no longer owner.
+        // Replica 1 still owns the node.
+        let payload = h.tree.exact(&[10, 20]).unwrap();
+        assert!(!payload.owners.contains(0));
+        assert!(payload.owners.contains(1));
+        assert_eq!(payload.stats.node_to_count, 1);
     }
 
     #[test]
-    fn test_node_key_determinism() {
-        let hashes = vec![100, 200, 300];
-        let k1 = node_key_from_prefix(&hashes, 2);
-        let k2 = node_key_from_prefix(&hashes, 2);
-        assert_eq!(k1, k2);
-
-        let k3 = node_key_from_prefix(&hashes, 3);
-        assert_ne!(k1, k3);
+    fn empty_prefix_update_is_noop() {
+        let mut h = SlidingWindowHistogram::new(4, TargetGpu::V100);
+        h.update(&[], 256, 1024, 0, 45);
+        assert_eq!(h.num_nodes(), 0);
     }
 }

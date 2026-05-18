@@ -41,6 +41,7 @@ const ALLOWED_FNS: &[&str] = &[
     "hit_pct",
     "decode_blocks",
     "preble_cost",
+    "preble_load",
     "preble_update_after",
     // Helpers
     "root_target",

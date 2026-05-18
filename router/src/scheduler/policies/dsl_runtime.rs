@@ -33,6 +33,13 @@ pub(crate) struct Observation {
     pub block_size: usize,
     pub hit_blocks: usize,
     pub epoch: u64,
+    /// Per-replica TPOT (averaged over running requests, ms),
+    /// snapshotted from `lmetric.tpot`. Used by Preble's
+    /// `cost_for_replica` for the decode-cost term — there is no
+    /// reason to maintain a parallel TPOT store inside the policy
+    /// since the SSE loop in `colocation.rs` already updates this
+    /// field per engine step.
+    pub tpot: f32,
 }
 
 /// Lock each sctx briefly, capture all fields needed by any policy.
@@ -59,6 +66,7 @@ pub(crate) async fn capture_observations(
             block_size,
             hit_blocks,
             epoch,
+            tpot: sctx.lmetric.tpot,
         }
     });
     join_all(captures).await
@@ -140,6 +148,10 @@ pub(crate) fn decode_blocks(sctx: &Observation) -> usize {
 /// Splitting out as a named pure fn lets the policy DSL stay a one-liner
 /// while concentrating the `match_ratio > 0.5` bonus + the histogram
 /// cost lookup in one auditable place.
+///
+/// The per-replica TPOT comes from `sctx.tpot` (snapshotted from
+/// `lmetric.tpot`, which the SSE loop maintains per engine step) —
+/// not from any policy-internal TPOT history.
 pub(crate) fn preble_cost(
     req: &ValidGenerateRequest,
     sctx: &Observation,
@@ -156,12 +168,22 @@ pub(crate) fn preble_cost(
         score -= bonus;
     }
     if let Some(histogram) = gctx.histogram() {
-        let costs = histogram.get_allocation_cost_per_replica();
-        if sctx.idx < costs.len() {
-            score += (costs[sctx.idx] * 1000.0) as i64;
-        }
+        let cost = histogram.cost_for_replica(sctx.idx, sctx.tpot as f64);
+        score += (cost * 1000.0) as i64;
     }
     score
+}
+
+/// Per-replica histogram load for Preble's Stage 1 tie-break (longest
+/// match → lowest load). Returns 0 if the histogram has not yet been
+/// initialized (first-touch case).
+pub(crate) fn preble_load(
+    sctx: &Observation,
+    gctx: &super::preble::PrebleGCtx,
+) -> usize {
+    gctx.histogram()
+        .map(|h| h.load_for_replica(sctx.idx))
+        .unwrap_or(0)
 }
 
 /// `after_extra` hook for PrebleQ: updates the sliding-window histogram

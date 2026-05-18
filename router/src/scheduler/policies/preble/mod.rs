@@ -6,16 +6,13 @@
 //! previous module-static `OnceLock` per the user's "state is a first-class
 //! scope, not a backdoor" framing.
 //!
-//! Submodules `cost_model`, `histogram`, `router` are unchanged
-//! utility modules used by `preble_cost` / `preble_update_after`
-//! runtime helpers.
+//! Submodules `cost_model` and `histogram` are utility modules used by
+//! `preble_cost` / `preble_load` / `preble_update_after` runtime helpers.
 
 pub(crate) mod cost_model;
 pub(crate) mod histogram;
-#[allow(dead_code)]
-pub(crate) mod router;
 
-use histogram::{node_key_from_prefix, SlidingWindowHistogram};
+use histogram::SlidingWindowHistogram;
 
 use policy_dsl::policy;
 
@@ -46,10 +43,10 @@ impl PrebleGCtx {
         self.histogram.as_mut().unwrap()
     }
 
-    /// Read-only access for `preble_cost`. Returns `None` if not yet
-    /// initialized (in which case `preble_cost` falls back to the
-    /// no-cost-adjustment path, equivalent to the OnceLock-uninitialized
-    /// branch in the previous implementation).
+    /// Read-only access for `preble_cost` / `preble_load`. Returns
+    /// `None` if not yet initialized (callers fall back to a
+    /// no-cost-adjustment / zero-load path, equivalent to the
+    /// OnceLock-uninitialized branch in the previous implementation).
     pub(crate) fn histogram(&self) -> Option<&SlidingWindowHistogram> {
         self.histogram.as_ref()
     }
@@ -69,12 +66,22 @@ pub(crate) fn update_histogram_into(
     num_replicas: usize,
 ) {
     let histogram = gctx.ensure_init(num_replicas);
-    let node_key = node_key_from_prefix(block_hashes, hit_nblks);
-    let context_length = hit_nblks * block_size;
+    // The "node" identity in the original AIBrix Go is the longest
+    // matched prefix path (TreeNode pointer). In our port that's a
+    // slice of the request's block hashes truncated to the matched
+    // length.
+    let prefix_len = hit_nblks.min(block_hashes.len());
+    if prefix_len == 0 {
+        // Go uses the root sentinel for no-prefix-match requests; we
+        // elide it (it has no per-node cost contribution).
+        return;
+    }
+    let prefix = &block_hashes[..prefix_len];
+    let context_length = prefix_len * block_size;
     let num_tokens = input_len.saturating_sub(context_length);
     let decoding_length = histogram.default_decoding_length();
     histogram.update(
-        node_key,
+        prefix,
         num_tokens,
         context_length,
         replica_id,
@@ -89,12 +96,15 @@ pub(crate) fn update_histogram_into(
 // Spec-form DSL (`docs/dsl/policies.md` §2):
 //
 //   Filter (match_blocks(req, sctx) / req.input_tokens > 0.5)
-//     (Select max by match_blocks(req, sctx))
+//     (Select max by (match_blocks(req, sctx), -load(sctx)))
 //     (Select min by preble_cost(req, sctx))
 //   after default; preble_update_after(...)
 //
 // Stage 1 picks the longest-matching replica when prefix-match ratio
-// > 50%, else stage 2 picks the lowest cost.
+// > 50%; ties on match_blocks are broken by lower per-replica load
+// (`preble_load`), bijective with AIBrix Go's `getPodLoad` tie-break.
+// Stage 2 picks the lowest-cost replica via the per-(node, replica)
+// histogram cost.
 
 policy! {
     name: PrebleQ,
@@ -103,7 +113,7 @@ policy! {
         filter_then(
             &root_target(&observations),
             |o| (o.hit_blocks * o.block_size) as f64 / req.input_tokens.len().max(1) as f64 > 0.5,
-            |t| select_max_by(t, |o| match_blocks(req, o)),
+            |t| select_max_by(t, |o| (match_blocks(req, o), -(preble_load(o, gctx) as i64))),
             |t| select_min_by(t, |o| preble_cost(req, o, gctx)),
         )
     },
@@ -112,4 +122,3 @@ policy! {
         preble_update_after(entry, &observations[chosen], count, gctx);
     }
 }
-
