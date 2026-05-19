@@ -204,12 +204,12 @@ const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// Default expected output length (Go: 45 tokens).
 const DEFAULT_DECODING_LENGTH: usize = 45;
 
-/// Default per-token decode time when the caller passes a non-finite
-/// or zero `replica_tpot_ms` (in milliseconds — matches `LMetric.tpot`
-/// units). Go uses a hardcoded 0.15 s (`prefix_cache_preble.go:345`);
-/// keeping the per-replica TPOT parameter and falling back to this
-/// default is a deviation from Go (D6) — deferred for user discussion.
-const DEFAULT_TIME_PER_TOKEN_MS: f64 = 150.0;
+/// Per-token decode time used by Stage 2 cost. Go uses a hardcoded
+/// 0.15 s at `prefix_cache_preble.go:345`; the `avgTimePerTokenPerPod`
+/// lookup branch is dead code in production (the map is never written
+/// outside tests). This branch removes the live-TPOT signal entirely
+/// (D6), matching Go's blind-to-execution-state Stage 2.
+const TIME_PER_TOKEN_S: f64 = 0.15;
 
 impl SlidingWindowHistogram {
     /// Create a new histogram.
@@ -406,41 +406,27 @@ impl SlidingWindowHistogram {
         miss_rate * (stats.node_to_count as f64) * prefill_t / n_owners
     }
 
-    /// Compute total cost (prefill + decode) for a node, using a
-    /// per-replica TPOT signal for the decode term.
+    /// Compute total cost (prefill + decode) for a node using Go's
+    /// hardcoded 0.15 s/tok decode time.
     ///
     /// Go lines 341-353:
     /// ```go
     /// func (h *SlidingWindowHistogram) getNodeCost(node *TreeNode, podName string) float64 {
     ///     prefillCost := h.getPrefillCost(node)
-    ///     timePerToken := 0.15
-    ///     if times, ok := h.avgTimePerTokenPerPod[podName]; ok && len(times) > 0 {
-    ///         sort.Float64s(times)
-    ///         timePerToken = times[len(times)/2]
-    ///     }
+    ///     timePerToken := 0.15  // default; avgTimePerTokenPerPod is dead
     ///     outputLen := h.decodingSize[node]
     ///     decodeCost := float64(outputLen) * timePerToken
     ///     return prefillCost + decodeCost
     /// }
     /// ```
-    ///
-    /// `replica_tpot_ms` comes from `LMetric.tpot` (already snapshot
-    /// per-replica into `Observation.tpot`); NaN / non-positive falls
-    /// back to `DEFAULT_TIME_PER_TOKEN_MS`. Note this is a deviation
-    /// from Go's hardcoded 0.15 s — deferred for user discussion (D6).
-    fn node_cost_for(&self, stats: &NodeStats, num_owners: usize, replica_tpot_ms: f64) -> f64 {
+    fn node_cost_for(&self, stats: &NodeStats, num_owners: usize) -> f64 {
         let prefill_cost = self.prefill_cost_for(stats, num_owners);
-        let tpt_ms = if replica_tpot_ms.is_finite() && replica_tpot_ms > 0.0 {
-            replica_tpot_ms
-        } else {
-            DEFAULT_TIME_PER_TOKEN_MS
-        };
         let output_len = if stats.decoding_size > 0 {
             stats.decoding_size
         } else {
             self.default_decoding_length
         };
-        let decode_cost = output_len as f64 * (tpt_ms / 1000.0);
+        let decode_cost = output_len as f64 * TIME_PER_TOKEN_S;
         prefill_cost + decode_cost
     }
 
@@ -451,15 +437,16 @@ impl SlidingWindowHistogram {
     /// Bijective to Go's `getCurrentAllocationCostPerPod` walk that
     /// iterates `h.histogram` and adds `getNodeCost` for each
     /// (node, pod) where the pod owns the node —
-    /// `prefix_cache_preble.go:355-369`.
-    pub fn cost_for_replica(&self, replica_id: usize, replica_tpot_ms: f64) -> f64 {
+    /// `prefix_cache_preble.go:355-369`. No per-replica live signal
+    /// enters the computation (D6 fix).
+    pub fn cost_for_replica(&self, replica_id: usize) -> f64 {
         let mut total = 0.0_f64;
         self.tree.for_each_path(|_path, payload| {
             if !payload.owners.contains(replica_id) {
                 return;
             }
             let n_owners = payload.owners.len();
-            total += self.node_cost_for(&payload.stats, n_owners, replica_tpot_ms);
+            total += self.node_cost_for(&payload.stats, n_owners);
         });
         total
     }
@@ -606,7 +593,7 @@ mod tests {
         // [10], [10,20], [10,30] all evicted — 3 nodes.
         assert_eq!(removed, 3);
         assert_eq!(h.num_nodes(), 0);
-        assert_eq!(h.cost_for_replica(0, 50.0), 0.0);
+        assert_eq!(h.cost_for_replica(0), 0.0);
         assert_eq!(h.load_for_replica(0), 0);
     }
 
@@ -617,9 +604,9 @@ mod tests {
         let mut h = SlidingWindowHistogram::new(4, TargetGpu::V100);
         h.update(&[10, 20, 30], 256, 1024, 0, 45);
         h.update(&[10, 20, 40], 256, 1024, 2, 45);
-        let c0 = h.cost_for_replica(0, 50.0);
-        let c1 = h.cost_for_replica(1, 50.0);
-        let c2 = h.cost_for_replica(2, 50.0);
+        let c0 = h.cost_for_replica(0);
+        let c1 = h.cost_for_replica(1);
+        let c2 = h.cost_for_replica(2);
         assert!(c0 > 0.0, "replica 0 owns nodes; cost_for_replica(0) > 0");
         assert!(c2 > 0.0, "replica 2 owns nodes; cost_for_replica(2) > 0");
         assert_eq!(c1, 0.0, "replica 1 owns no nodes; cost_for_replica(1) == 0");

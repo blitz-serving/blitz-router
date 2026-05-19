@@ -126,9 +126,10 @@ pub(crate) fn update_histogram_into(
 //     match — Go's `getPodLoad` pick at
 //     `prefix_cache_preble.go:511-520`.
 //
-// Stage 2 (otherwise) uses `preble_cost` — currently retains the
-// `(new_tokens + all_tokens) - bonus` overlay on top of
-// `histogram.cost_for_replica` (D5, deferred for user discussion).
+// Stage 2 (otherwise) uses `preble_cost` — bare histogram cost (D5
+// applied, no `(new_tokens + all_tokens)` overlay) with constant
+// 0.15 s/tok decode (D6 applied, no live `LMetric.tpot`). Stage 2 is
+// intentionally blind to live execution state, matching Go.
 
 policy! {
     name: PrebleQ,
@@ -149,7 +150,7 @@ policy! {
                     -(preble_load(o, gctx) as i64),
                 ),
             ),
-            |t| select_min_by(t, |o| preble_cost(req, o, gctx)),
+            |t| select_min_by(t, |o| preble_cost(o, gctx)),
         )
     },
     after_extra: {

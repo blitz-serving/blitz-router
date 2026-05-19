@@ -140,38 +140,30 @@ pub(crate) fn decode_blocks(sctx: &Observation) -> usize {
     }
 }
 
-/// Preble cost model query. Reads the `SlidingWindowHistogram` out of
-/// `gctx` (the policy's `GlobalContext` — see `policies::preble::PrebleGCtx`)
-/// and adds the per-replica score adjustment that PrebleQ overlays on
-/// top of `(new_tokens + all_tokens)`.
+/// Preble Stage 2 cost — bare per-replica histogram cost, scaled to
+/// integer milliseconds for `select_min_by`.
 ///
-/// Splitting out as a named pure fn lets the policy DSL stay a one-liner
-/// while concentrating the `match_ratio > 0.5` bonus + the histogram
-/// cost lookup in one auditable place.
+/// Bijective with Go's `getCurrentAllocationCostPerPod()[podName]`
+/// pick at `prefix_cache_preble.go:533-548`: a single global walk
+/// over owned nodes, summing `getNodeCost` per node. No queue-aware
+/// term, no match-ratio bonus, no live-load signal — Go's Stage 2
+/// is intentionally blind to current execution state, reading only
+/// sliding-window aggregates and constants.
 ///
-/// The per-replica TPOT comes from `sctx.tpot` (snapshotted from
-/// `lmetric.tpot`, which the SSE loop maintains per engine step) —
-/// not from any policy-internal TPOT history.
+/// This branch (lmetric/preble-stage2-bare) strips D5 (the
+/// `(new_tokens + all_tokens)` overlay) and D6 (live `LMetric.tpot`)
+/// for max Go fidelity. Compare with `lmetric/camera-ready` which
+/// keeps both live signals.
 pub(crate) fn preble_cost(
-    req: &ValidGenerateRequest,
     sctx: &Observation,
     gctx: &super::preble::PrebleGCtx,
 ) -> i64 {
-    let new_pre = new_tokens(req, sctx);
-    let all = sctx.all_tokens;
-    let mut score = (new_pre + all) as i64;
-    let input_len = req.input_tokens.len();
-    let match_tokens = sctx.hit_blocks * sctx.block_size;
-    let match_ratio = match_tokens as f64 / input_len.max(1) as f64;
-    if match_ratio > 0.5 {
-        let bonus = (match_ratio * input_len as f64 * 0.5) as i64;
-        score -= bonus;
-    }
     if let Some(histogram) = gctx.histogram() {
-        let cost = histogram.cost_for_replica(sctx.idx, sctx.tpot as f64);
-        score += (cost * 1000.0) as i64;
+        let cost = histogram.cost_for_replica(sctx.idx);
+        (cost * 1000.0) as i64
+    } else {
+        0
     }
-    score
 }
 
 /// Per-replica histogram load for Preble's Stage 1 tie-break (longest
