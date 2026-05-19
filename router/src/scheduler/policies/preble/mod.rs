@@ -66,19 +66,26 @@ pub(crate) fn update_histogram_into(
     num_replicas: usize,
 ) {
     let histogram = gctx.ensure_init(num_replicas);
-    // The "node" identity in the original AIBrix Go is the longest
-    // matched prefix path (TreeNode pointer). In our port that's a
-    // slice of the request's block hashes truncated to the matched
-    // length.
-    let prefix_len = hit_nblks.min(block_hashes.len());
-    if prefix_len == 0 {
-        // Go uses the root sentinel for no-prefix-match requests; we
-        // elide it (it has no per-node cost contribution).
+    // Go's "node" identity from `cache.AddPrefix(tokens, ctx.Model, "")`
+    // is the leaf created at the FULL input depth — every request
+    // creates/touches a leaf there, regardless of how much of the
+    // prefix already existed. `prefix_cache_preble.go:459, 562`.
+    //
+    // For the blockified port, the tree path is `block_hashes` in full
+    // (the request's BlockHashState produces one hash per full block of
+    // the input). The leaf's `context_length` is the FULL input token
+    // count — Go's `leafNode.ContextLength()`.
+    if block_hashes.is_empty() {
+        // Root sentinel — Go: the node returned by AddPrefix for an
+        // empty input would be root, never recorded in `histogram`.
         return;
     }
-    let prefix = &block_hashes[..prefix_len];
-    let context_length = prefix_len * block_size;
-    let num_tokens = input_len.saturating_sub(context_length);
+    let prefix = block_hashes;
+    let context_length = input_len;
+    // Cached tokens at the leaf = number of matched blocks × block_size
+    // (clamped to input_len for the partial-tail-block case).
+    let cached_tokens = (hit_nblks.saturating_mul(block_size)).min(input_len);
+    let num_tokens = input_len.saturating_sub(cached_tokens);
     let decoding_length = histogram.default_decoding_length();
     histogram.update(
         prefix,
@@ -87,6 +94,10 @@ pub(crate) fn update_histogram_into(
         replica_id,
         decoding_length,
     );
+    // Mirror Go's `evictionLoop` (1Hz): lazy in-path eviction
+    // throttled to once per second. We run AFTER `update` so the
+    // freshly-inserted entry isn't immediately considered for decay.
+    histogram.evict_if_due(std::time::Instant::now());
 }
 
 // =========================================================================
@@ -95,25 +106,49 @@ pub(crate) fn update_histogram_into(
 //
 // Spec-form DSL (`docs/dsl/policies.md` §2):
 //
-//   Filter (match_blocks(req, sctx) / req.input_tokens > 0.5)
-//     (Select max by (match_blocks(req, sctx), -load(sctx)))
+//   Filter (preble_global_match_blocks * block_size / |req| > 0.5)
+//     (Select max by (preble_owned_match_blocks(req, sctx, gctx),
+//                     -preble_load(sctx, gctx)))
 //     (Select min by preble_cost(req, sctx))
 //   after default; preble_update_after(...)
 //
-// Stage 1 picks the longest-matching replica when prefix-match ratio
-// > 50%; ties on match_blocks are broken by lower per-replica load
-// (`preble_load`), bijective with AIBrix Go's `getPodLoad` tie-break.
-// Stage 2 picks the lowest-cost replica via the per-(node, replica)
-// histogram cost.
+// The threshold uses the SHARED Preble tree's longest match
+// (`preble_global_match_blocks` — single global value across all
+// replicas) so the >0.5 entry decision is bijective with Go's
+// `matchRatio := len(matchedTokens) / len(tokens)` at
+// `prefix_cache_preble.go:476`.
+//
+// Stage 1 (when ratio > 0.5) selects max by (owned_match, -load):
+//   * `owned_match`: depth of the deepest Preble-tree ancestor of the
+//     request prefix that this replica owns — Go's
+//     `prefixMatches[i].matchLength` after the ancestor walk.
+//   * `-load`: lower-load tiebreaker among replicas with equal owned
+//     match — Go's `getPodLoad` pick at
+//     `prefix_cache_preble.go:511-520`.
+//
+// Stage 2 (otherwise) uses `preble_cost` — currently retains the
+// `(new_tokens + all_tokens) - bonus` overlay on top of
+// `histogram.cost_for_replica` (D5, deferred for user discussion).
 
 policy! {
     name: PrebleQ,
     gctx: PrebleGCtx,
     body: {
+        let prefix = entry.block_hash_state.get_hashes();
+        let block_size = entry.block_hash_state.get_block_size();
+        let global_match_blocks = preble_global_match_blocks(gctx, prefix);
         filter_then(
             &root_target(&observations),
-            |o| (o.hit_blocks * o.block_size) as f64 / req.input_tokens.len().max(1) as f64 > 0.5,
-            |t| select_max_by(t, |o| (match_blocks(req, o), -(preble_load(o, gctx) as i64))),
+            |_o| (global_match_blocks * block_size) as f64
+                / req.input_tokens.len().max(1) as f64
+                > 0.5,
+            |t| select_max_by(
+                t,
+                |o| (
+                    preble_owned_match_blocks(o, gctx, prefix),
+                    -(preble_load(o, gctx) as i64),
+                ),
+            ),
             |t| select_min_by(t, |o| preble_cost(req, o, gctx)),
         )
     },

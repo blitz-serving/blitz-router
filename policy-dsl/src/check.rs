@@ -42,6 +42,8 @@ const ALLOWED_FNS: &[&str] = &[
     "decode_blocks",
     "preble_cost",
     "preble_load",
+    "preble_global_match_blocks",
+    "preble_owned_match_blocks",
     "preble_update_after",
     // Helpers
     "root_target",

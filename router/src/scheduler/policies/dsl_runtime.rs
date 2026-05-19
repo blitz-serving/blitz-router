@@ -186,6 +186,42 @@ pub(crate) fn preble_load(
         .unwrap_or(0)
 }
 
+/// Longest prefix of `prefix` that exists in the shared Preble tree,
+/// regardless of owners. Returns 0 if the histogram is uninitialised
+/// or the request shares no block hashes with the tree.
+///
+/// Bijective with `len(matchedTokens)` from Go's
+/// `cache.AddPrefix(tokens, ctx.Model, "")` at
+/// `prefix_cache_preble.go:459` — drives Stage 1's >0.5 threshold
+/// check (a SINGLE global decision in Go, not per-replica).
+pub(crate) fn preble_global_match_blocks(
+    gctx: &super::preble::PrebleGCtx,
+    prefix: &[u64],
+) -> usize {
+    gctx.histogram()
+        .map(|h| h.global_match_blocks(prefix))
+        .unwrap_or(0)
+}
+
+/// Longest prefix of `prefix` whose matched tree node has `sctx.idx`
+/// as an owner. Bijective with Go's Stage 1 ancestor walk at
+/// `prefix_cache_preble.go:484-509`: the per-replica `matchLength`
+/// from `prefixMatches[0]` for this candidate replica.
+///
+/// This is what Stage 1's winner selector must compare across replicas
+/// — NOT the per-replica `RadixTreeBlockHash.get(...)` count, which is
+/// the block-cache sidecar's view (drifts from the shared Preble tree
+/// owner state, breaking the Go-faithful tie-break semantics — D3).
+pub(crate) fn preble_owned_match_blocks(
+    sctx: &Observation,
+    gctx: &super::preble::PrebleGCtx,
+    prefix: &[u64],
+) -> usize {
+    gctx.histogram()
+        .map(|h| h.owned_match_blocks(prefix, sctx.idx))
+        .unwrap_or(0)
+}
+
 /// `after_extra` hook for PrebleQ: updates the sliding-window histogram
 /// in `gctx` with the routing decision so future `preble_cost` calls
 /// reflect it. Lazy-initializes the histogram on first call.
