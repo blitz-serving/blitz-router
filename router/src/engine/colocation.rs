@@ -673,7 +673,17 @@ mod task_assignment {
                 "SSE_EVENT"
             );
             // Publishes updated instance-level metric state
+            // Preble-BS / Preble-TPS: per-forward-step push into the
+            // per-replica 3-min sliding window. Sample BS BEFORE the
+            // subassign so it reflects the batch the engine actually
+            // ran this step (post-subassign BS would under-count
+            // completed-this-step requests — a one-step request
+            // would record 0).
+            #[cfg(any(feature = "preble-bs-q", feature = "preble-tps-q"))]
+            let pre_step_bs = sctx.lmetric.bs;
             sctx.lmetric -= metric_delta;
+            #[cfg(any(feature = "preble-bs-q", feature = "preble-tps-q"))]
+            sctx.block_hash.update_with_step(pre_step_bs, std::time::Instant::now());
             drop(sctx);
 
             // Notify simulator AFTER the SCtx prefix-cache update completes.

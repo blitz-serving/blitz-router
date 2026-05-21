@@ -68,6 +68,14 @@ struct Args {
     #[cfg(feature = "bailian-impl-q")]
     #[clap(default_value_t = 0.15, long, env)]
     bailian_gamma: f32,
+    /// Preble branch-split threshold on the global match-blocks /
+    /// |req| ratio (paper §QUERY uses 0.5). Lowering it routes more
+    /// requests through the KV$-aware branch (longest match + load
+    /// tie-break); raising it pushes more requests through the
+    /// load-balancing branch (cost-only).
+    #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
+    #[clap(default_value_t = 0.5, long, env)]
+    preble_match_ratio_threshold: f32,
     #[clap(default_value = "0.0.0.0", long, env)]
     hostname: String,
     #[clap(default_value = "3000", long, short, env)]
@@ -158,6 +166,8 @@ fn main() -> Result<(), RouterError> {
         bailian_beta,
         #[cfg(feature = "bailian-impl-q")]
         bailian_gamma,
+        #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
+        preble_match_ratio_threshold,
         kvcache_block_size,
         hostname,
         port,
@@ -196,6 +206,13 @@ fn main() -> Result<(), RouterError> {
     // process so the policy body can read them via `OnceLock::get()`.
     #[cfg(feature = "bailian-impl-q")]
     router::init_bailian_params(bailian_alpha, bailian_beta, bailian_gamma);
+
+    // Preble match-ratio threshold is CLI-tunable; install once at
+    // startup so the policy body can read it via `OnceLock::get()`.
+    // Shared by all three Preble flavours (preble-q / preble-bs-q /
+    // preble-tps-q) since they share the KV$-aware-branch filter.
+    #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
+    router::init_preble_params(preble_match_ratio_threshold);
 
     // CORS allowed origins
     let cors_allow_origin: Option<AllowOrigin> = cors_allow_origin.map(|cors_allow_origin| {

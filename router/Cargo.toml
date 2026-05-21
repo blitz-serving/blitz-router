@@ -129,6 +129,17 @@ lmetric-q = []
 
 # preble/ — Preble baseline
 preble-q = []
+# preble-bs / preble-tps — Single-metric ablations of Preble.
+# Same KV$-aware-branch prefix-match filter, but the load-balancing
+# branch replaces the (PT_r + DT_r) cost-min with a single windowed
+# metric:
+#   preble-bs-q  : load-balancing branch = min Σ BS samples over
+#                  past 3 min (higher BS sample sum ⇒ more loaded)
+#   preble-tps-q : load-balancing branch = max forward-step count
+#                  over past 3 min (higher count ⇒ more throughput)
+# Mutually exclusive with preble-q (single TaskAssigner alias picks).
+preble-bs-q = []
+preble-tps-q = []
 
 # llm_d/ — llm-d baselines (single-scorer ablations + multi-scorer combos)
 most-hit-q = []

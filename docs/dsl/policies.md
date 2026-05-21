@@ -91,11 +91,27 @@ policy aibrix-q (gctx: ()):
          (Select min by (-hit_pct(req, sctx), sctx.bs))
          (Select max by (-hit_pct(req, sctx), sctx.bs)))
 
-policy preble-q (gctx: PrebleGCtx):
-    Filter (match_blocks(req, sctx) / req.tokens > 0.5)
-      (Select max by match_blocks(req, sctx))
-      (Select min by preble_cost(req, sctx, gctx.H))
-    after: default; gctx.H <- gctx.H.insert(chosen, req)
+policy preble-q (gctx: ()):
+    Filter (preble_global_match_blocks(observations, prefix) * block_size / req.tokens > T)
+      (Select max by (preble_owned_match_blocks(sctx), -preble_load(sctx)))
+      (Select min by preble_cost(sctx))
+    after: default; preble_update_after(entry, chosen, all_sctx)
+
+policy preble-bs-q (gctx: ()):                            # single-metric ablation: BS
+    Filter (preble_global_match_blocks(observations, prefix) * block_size / req.tokens > T)
+      (Select max by (preble_owned_match_blocks(sctx), -preble_bs_sum(sctx)))
+      (Select min by preble_bs_sum(sctx))
+    after: default
+
+policy preble-tps-q (gctx: ()):                           # single-metric ablation: TPS
+    Filter (preble_global_match_blocks(observations, prefix) * block_size / req.tokens > T)
+      (Select max by (preble_owned_match_blocks(sctx), preble_tps_count(sctx)))
+      (Select max by preble_tps_count(sctx))
+    after: default
+
+# T defaults to 0.5 (paper §QUERY); CLI-tunable via --preble-match-ratio-threshold.
+# Per-replica state lives inside the PrefixBlockHash alias (PrebleBlockHash /
+# PrebleBsBlockHash / PrebleTpsBlockHash) — see docs/preble-design.md.
 
 policy most-hit-q (gctx: ()):                            # llm-d kvcache baseline
     Select max by hit_blocks(req, sctx)                  # see most_hit.rs header

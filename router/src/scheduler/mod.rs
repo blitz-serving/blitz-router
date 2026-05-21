@@ -30,8 +30,10 @@ pub(crate) use queue::TaskAssigner;
 pub(crate) use state::{
     BAILIAN_ALPHA, BAILIAN_BETA, BAILIAN_GAMMA, LMetric, LMetricDec, LMetricInc,
     LOAD_AWARE_QUEUE_T, MOST_HIT_LOAD_ACTIVE_W_HIT, MOST_HIT_LOAD_ACTIVE_W_KV,
-    MOST_HIT_LOAD_ACTIVE_W_LOAD, MOST_HIT_LOAD_W_HIT, MOST_HIT_LOAD_W_LOAD, ScheduleContext,
-    WAITINGT_PREFILL_TOKEN_BOUND,
+    MOST_HIT_LOAD_ACTIVE_W_LOAD, MOST_HIT_LOAD_W_HIT, MOST_HIT_LOAD_W_LOAD,
+    PREBLE_MATCH_RATIO_T, ScheduleContext, WAITINGT_PREFILL_TOKEN_BOUND,
 };
 #[cfg(feature = "bailian-impl-q")]
 pub use state::init_bailian_params;
+#[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
+pub use state::init_preble_params;

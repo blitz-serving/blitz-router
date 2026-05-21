@@ -44,6 +44,18 @@ pub(crate) struct Observation {
     /// `sctx.block_hash.cost(now)` only under `--features preble-q`.
     #[cfg(feature = "preble-q")]
     pub preble_cost: f64,
+    /// Preble-BS: sum of batch-size samples in the per-replica 3-min
+    /// window. Lower = less loaded. Captured from
+    /// `sctx.block_hash.bs_sum(now)` only under `--features
+    /// preble-bs-q`.
+    #[cfg(feature = "preble-bs-q")]
+    pub preble_bs_sum: f64,
+    /// Preble-TPS: count of forward steps in the per-replica 3-min
+    /// window. Higher = more throughput, less loaded. Captured from
+    /// `sctx.block_hash.tps_count(now)` only under `--features
+    /// preble-tps-q`.
+    #[cfg(feature = "preble-tps-q")]
+    pub preble_tps_count: usize,
 }
 
 /// Lock each sctx briefly, capture all fields needed by any policy.
@@ -66,7 +78,7 @@ pub(crate) async fn capture_observations(
         let mut sctx = arc.lock().await;
         let hit_blocks = sctx.block_hash.get(hashes);
         let epoch = sctx.block_hash.epoch();
-        #[cfg(feature = "preble-q")]
+        #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
         let now = std::time::Instant::now();
         Observation {
             idx,
@@ -81,6 +93,10 @@ pub(crate) async fn capture_observations(
             preble_load: sctx.block_hash.load(now),
             #[cfg(feature = "preble-q")]
             preble_cost: sctx.block_hash.cost(now),
+            #[cfg(feature = "preble-bs-q")]
+            preble_bs_sum: sctx.block_hash.bs_sum(now),
+            #[cfg(feature = "preble-tps-q")]
+            preble_tps_count: sctx.block_hash.tps_count(now),
         }
     });
     join_all(captures).await
@@ -154,10 +170,10 @@ pub(crate) fn decode_blocks(sctx: &Observation) -> usize {
     }
 }
 
-/// Preble Stage 2 cost: per-replica `pod_cost` from the 3-min sliding
-/// window snapshotted into `Observation` at `capture_observations`
-/// time. Scaled by 1000 to integer for `select_min_by` stability;
-/// matches the previous helper's units.
+/// Preble load-balancing-branch cost: per-replica `pod_cost` from
+/// the 3-min sliding window snapshotted into `Observation` at
+/// `capture_observations` time. Scaled by 1000 to integer for
+/// `select_min_by` stability; matches the previous helper's units.
 ///
 /// The Preble paper's `L_i = Σ_{r ∈ W_i}(PT_r + DT_r)` is exactly this
 /// — per-request prefill+decode contributions over the window,
@@ -173,8 +189,8 @@ pub(crate) fn preble_cost(sctx: &Observation) -> i64 {
     (sctx.preble_cost * 1000.0) as i64
 }
 
-/// Per-replica `pod_load` for Preble's Stage 1 tie-break (longest
-/// match → lowest load). Reads the snapshot captured at
+/// Per-replica `pod_load` for Preble's KV$-aware-branch tie-break
+/// (longest match → lowest load). Reads the snapshot captured at
 /// `capture_observations` time. O(1).
 ///
 /// Equivalent to `|W_P|` — the count of recent requests routed to this
@@ -186,11 +202,12 @@ pub(crate) fn preble_load(sctx: &Observation) -> usize {
 }
 
 /// Longest prefix-match length (in blocks) across ALL replicas — used
-/// only for Stage 1's `>0.5` entry threshold. Each replica's tree is
-/// engine-driven (faithful to actually-cached state), so the max over
-/// replicas is the cluster-wide deepest prefix. Bijective with Go's
-/// global `len(matchedTokens) / len(tokens)` gating decision.
-#[cfg(feature = "preble-q")]
+/// only for the KV$-aware-vs-load-balancing branch-split threshold.
+/// Each replica's tree is engine-driven (faithful to actually-cached
+/// state), so the max over replicas is the cluster-wide deepest
+/// prefix. Bijective with Go's global `len(matchedTokens) /
+/// len(tokens)` gating decision.
+#[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
 pub(crate) fn preble_global_match_blocks(
     observations: &[Observation],
     _prefix: &[u64],
@@ -205,9 +222,26 @@ pub(crate) fn preble_global_match_blocks(
 /// replica's engine-driven tree caches the request's prefix. With
 /// per-replica trees, "owned" = "in this replica's tree", so this is
 /// just `o.hit_blocks`.
-#[cfg(feature = "preble-q")]
+#[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
 pub(crate) fn preble_owned_match_blocks(sctx: &Observation) -> usize {
     sctx.hit_blocks
+}
+
+/// Preble-BS load-balancing branch: sum of batch-size samples in
+/// the per-replica 3-min window. Engine-step-driven (one push per
+/// forward step from the colocation loop). Higher = more loaded;
+/// the policy minimizes.
+#[cfg(feature = "preble-bs-q")]
+pub(crate) fn preble_bs_sum(sctx: &Observation) -> f64 {
+    sctx.preble_bs_sum
+}
+
+/// Preble-TPS load-balancing branch: count of forward steps in the
+/// per-replica 3-min window. Higher = more throughput, less loaded;
+/// the policy maximizes.
+#[cfg(feature = "preble-tps-q")]
+pub(crate) fn preble_tps_count(sctx: &Observation) -> usize {
+    sctx.preble_tps_count
 }
 
 /// `after_extra` hook for PrebleQ: pushes a per-request cost

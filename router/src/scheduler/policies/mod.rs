@@ -37,7 +37,7 @@ pub(crate) mod llm_d;
 pub(crate) mod lmetric;
 pub(crate) mod policy_runner;
 pub(crate) mod policy_trait;
-#[cfg(feature = "preble-q")]
+#[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
 pub(crate) mod preble;
 pub(crate) mod simple;
 pub(crate) mod vllm;
@@ -63,6 +63,12 @@ pub(crate) use lmetric::LmetricQ;
 #[cfg(feature = "preble-q")]
 #[allow(unused_imports)]
 pub(crate) use preble::PrebleQ;
+#[cfg(feature = "preble-bs-q")]
+#[allow(unused_imports)]
+pub(crate) use preble::PrebleBsQ;
+#[cfg(feature = "preble-tps-q")]
+#[allow(unused_imports)]
+pub(crate) use preble::PrebleTpsQ;
 #[allow(unused_imports)]
 pub(crate) use simple::{JBoundMostHitQ2, JLeastWaitTokenQ, RandomQ, RoundRobinQ};
 #[allow(unused_imports)]
@@ -173,6 +179,10 @@ pub(crate) type TaskAssigner = PolicyRunner<DynamoPoQ>;
 pub(crate) type TaskAssigner = PolicyRunner<LmetricQ>;
 #[cfg(feature = "preble-q")]
 pub(crate) type TaskAssigner = PolicyRunner<PrebleQ>;
+#[cfg(feature = "preble-bs-q")]
+pub(crate) type TaskAssigner = PolicyRunner<PrebleBsQ>;
+#[cfg(feature = "preble-tps-q")]
+pub(crate) type TaskAssigner = PolicyRunner<PrebleTpsQ>;
 #[cfg(feature = "most-hit-q")]
 pub(crate) type TaskAssigner = PolicyRunner<MostHitQ>;
 #[cfg(feature = "most-hit-load-q")]
@@ -206,6 +216,8 @@ pub(crate) type TaskAssigner = PolicyRunner<LeastTtftQ>;
         feature = "dynamo-po-q",
         feature = "lmetric-q",
         feature = "preble-q",
+        feature = "preble-bs-q",
+        feature = "preble-tps-q",
         feature = "most-hit-q",
         feature = "most-hit-load-q",
         feature = "most-hit-load-active-q",

@@ -77,7 +77,8 @@ Two key consequences:
   prefix of τ. So `count(σ) > 0` iff σ was the full input of at least
   one recent request.
 - P is added to `owners(σ)` for every prefix σ of τ — every level of
-  granularity. This is what makes Stage 1's ancestor walk meaningful.
+  granularity. This is what makes the KV$-aware branch's ancestor
+  walk meaningful.
 
 ---
 
@@ -118,19 +119,21 @@ Inputs: full token sequence τ of a new request awaiting routing.
 1. **Descend.** Find the deepest existing prefix M of τ in T. If T is
    empty along τ from depth 1, M = empty.
 
-2. **Filter.** Let m = |M|. If `m / |τ| > 0.5`, go to Stage 1; else
-   go to Stage 2.
+2. **Branch-split.** Let m = |M|. If `m / |τ| > 0.5`, go to the
+   KV$-aware branch; else go to the load-balancing branch.
 
-3. **Stage 1.** Walk the chain `M, parent(M), ..., root`. Let M\* be
+3. **KV$-aware branch.** Walk the chain `M, parent(M), ..., root`.
+   Let M\* be
    the deepest prefix in this chain with `owners(M*) ≠ ∅`. Among the
    pods in `owners(M*)`, select the one minimizing `LOAD`. Ties broken
    arbitrarily.
 
-4. **Stage 2.** Among all pods, select the one minimizing `COST`.
+4. **Load-balancing branch.** Among all pods, select the one
+   minimizing `COST`.
 
 ---
 
-## LOAD(P) — Stage 1's tie-break metric
+## LOAD(P) — KV$-aware branch's tie-break metric
 
 Sum, over all prefixes σ in T such that `count(σ) > 0` AND
 `P ∈ owners(σ)`, of `count(σ)`.
@@ -166,11 +169,13 @@ abstract spec's owner-set design, not a correctness requirement.
 
 ---
 
-## COST(P) — Stage 2's selection metric
+## COST(P) — load-balancing branch's selection metric
+
+### Abstract spec (Go reference, node-level aggregate)
 
 For each prefix σ with `count(σ) > 0`:
 
-- `prefill_cost(σ) ≈ miss_rate(σ) × count(σ) × prefill_time_polynomial(tdepth(σ))`
+- `prefill_cost(σ) ≈ miss_rate(σ) × count(σ) × prefill_time_polynomial(segment_len(σ), tdepth(σ))`
 - `decode_cost(σ) = output_len(σ) × time_per_token`
 
 where `prefill_time_polynomial` is a static cost model (Mistral-7B
@@ -178,6 +183,14 @@ coefficients on V100/A6000, hardcoded — not calibrated for the deployed
 model/hardware), and `time_per_token` is the hardcoded constant
 0.15 s. The `avgTimePerTokenPerPod` lookup in the AIBrix Go reference
 is dead code in production (the map is only written by tests).
+
+In the Go reference, `segment_len(σ) = node.NumTokens()` is the
+**edge-label length** of the radix-tree node — the segment of tokens
+this node owns relative to its parent, NOT the missed-token count.
+`miss_rate(σ)` is averaged over recent requests at the node
+(`1 − hit_tokens / prompt_tokens`). The product
+`miss_rate × count × prefill_time(segment_len, tdepth)` is the
+aggregated prefill work attributed to recent requests at node σ.
 
 For a pod P:
 
@@ -187,6 +200,48 @@ of `(prefill_cost(σ) / |owners(σ)| + decode_cost(σ))`.
 Same iteration structure as `LOAD` but with per-owner amortization on
 the prefill term (divides by `|owners(σ)|`). Decode is not amortized —
 the same value contributes to every owner.
+
+### blitz-router (per-request, no node-level aggregate)
+
+The per-replica refactor pushes one entry into the cost window per
+admitted request, not per radix-tree node. The per-request
+contribution is:
+
+- `prefill_contrib(r) = prefill_time_polynomial(missed_tokens(r), context_length(r))` if `missed_tokens(r) > 0`, else 0
+- `decode_contrib(r) = output_len(r) × time_per_token`
+
+where `missed_tokens(r) = context_length(r) − hit_blocks(r) × block_size`.
+
+Two deliberate departures from the Go reference:
+
+1. **No `miss_rate ×` factor.** `prefill_time(missed, context)` already
+   prices the missed-token prefill cost — the linear MLP term scales
+   with `missed`, the attention term with `context_length`. The Go
+   reference's `miss_rate ×` was multiplying the
+   `prefill_time(segment_len, ...)` (a node-aggregate-level cost)
+   by the average miss rate at the node. With per-request push, the
+   missed count is already in the `prefill_time` input; multiplying
+   again would double-discount the linear part of the cost. The
+   `missed_tokens > 0` gate preserves the "full cache hit ⇒ zero
+   prefill contribution" semantic (the cost model has a nonzero
+   noise-floor baseline at zero tokens; that baseline is artifact,
+   not real prefill work).
+2. **No `/|owners|` amortization.** Per-replica trees make
+   `|owners| = 1` by construction for the routed replica. The
+   Go-reference amortization was a side-effect of the global-tree
+   design where multiple pods could share `owners(σ)`. With
+   per-replica trees there is no over-attribution to amortize away;
+   per-request prefill cost is billed in full to the chosen replica.
+
+The cost window push is a **query-side staleness** point: it reads
+`hit_blocks` from the scheduling-time snapshot (`Observation`),
+not under the apply-time lock. The bias is bounded by the
+microsecond gap between capture and apply, monotonically conservative
+(stale `hit_blocks ≤ current` ⇒ over-estimated `missed_tokens` ⇒
+over-estimated cost ⇒ routing pushes away from a replica that's
+actually MORE cached), and washes out across the ~1800-entry window.
+Unlike `colocation.rs:645-664` (accounting-side TOCTOU defended by
+the sctx lock + epoch counter), no invariant is at stake here.
 
 ---
 

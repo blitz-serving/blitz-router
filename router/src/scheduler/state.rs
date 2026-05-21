@@ -30,6 +30,24 @@ pub fn init_bailian_params(alpha: f32, beta: f32, gamma: f32) {
     let _ = BAILIAN_BETA.set(beta);
     let _ = BAILIAN_GAMMA.set(gamma);
 }
+/// Preble branch-split threshold on
+/// `(global_match_blocks * block_size) / |req|`. Set once from CLI
+/// in `main.rs` via [`init_preble_params`]; default `0.5` if unset
+/// (the abstract spec value, `docs/preble-design.md` §QUERY).
+/// The static itself is unconditional so `policies/preble/mod.rs`
+/// can read it; only the `init_preble_params` setter and the
+/// `--preble-match-ratio-threshold` CLI surface are gated by
+/// `feature = "preble-q"`.
+pub(crate) static PREBLE_MATCH_RATIO_T: OnceLock<f32> = OnceLock::new();
+
+/// Install the Preble branch-split match-ratio threshold from a CLI
+/// flag. Called once at startup; subsequent calls are no-ops.
+/// Shared by all three Preble flavours (`preble-q` / `preble-bs-q` /
+/// `preble-tps-q`) since they share the KV$-aware-branch filter.
+#[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
+pub fn init_preble_params(match_ratio_threshold: f32) {
+    let _ = PREBLE_MATCH_RATIO_T.set(match_ratio_threshold);
+}
 /// llm-d load-aware-scorer's queue-depth threshold (default in upstream)
 pub(crate) static LOAD_AWARE_QUEUE_T: f32 = 128.0;
 /// most-hit-load-q (llm-d precise-prefix-cache + load-aware combo)

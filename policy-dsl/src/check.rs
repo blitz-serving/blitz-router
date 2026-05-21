@@ -42,6 +42,8 @@ const ALLOWED_FNS: &[&str] = &[
     "decode_blocks",
     "preble_cost",
     "preble_load",
+    "preble_bs_sum",
+    "preble_tps_count",
     "preble_global_match_blocks",
     "preble_owned_match_blocks",
     "preble_update_after",
