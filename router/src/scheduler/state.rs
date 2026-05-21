@@ -1,12 +1,10 @@
 use std::sync::OnceLock;
-use std::time::Duration;
-use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 use std::ops::{AddAssign, SubAssign};
 
 use super::kvcache::PrefixBlockHash;
 
 use serde::Serialize;
-use tokio::time::Instant;
 
 /// Parameter for prefill token/s EMA updation
 static PREFILL_TKN_FREQ_EMA_GAMMA: f32 = 0.75;
@@ -66,7 +64,7 @@ pub(crate) struct LMetric {
     /// Number of decoding times per second, conform with Bailian's terminology
     pub tps: usize,
     #[serde(skip_serializing)]
-    tps_timestamps: VecDeque<Instant>,
+    tps_window: radixtree::SlidingWindow<(), radixtree::Count>,
     /// TPOT averaged on all running requests within instance, in milisecond
     #[serde(serialize_with = "serialize_f32_3")]
     pub tpot: f32,
@@ -89,7 +87,10 @@ impl Default for LMetric {
             prefill_tokens: 0,
             all_tokens: 0,
             tps: 0,
-            tps_timestamps: VecDeque::with_capacity(32),
+            tps_window: radixtree::SlidingWindow::new(
+                Duration::from_secs(1),
+                radixtree::Count,
+            ),
             tpot: f32::NAN,
             tbt: 0.,
             time_of_left_prefill: f32::default(),
@@ -193,19 +194,12 @@ impl SubAssign<LMetricDec> for LMetric {
         // Replacements
         // TPOT
         self.tpot = rhs.tpot / self.bs as f32;
-        // TPS: wrap around new 1 second interval
-        let end = tokio::time::Instant::now();
-        let d = tokio::time::Duration::from_secs(1);
-        let begin = end - d;
-        self.tps_timestamps.push_back(end);
-        while let Some(&t) = self.tps_timestamps.front() {
-            if t < begin {
-                self.tps_timestamps.pop_front();
-            } else {
-                break;
-            }
-        }
-        self.tps = self.tps_timestamps.len();
+        // TPS: count of decoding ticks within a 1 s sliding window.
+        // `SlidingWindow::push` + `len_at` performs the same
+        // push-back-then-pop-old-front pattern; lazy expire on read.
+        let now = Instant::now();
+        self.tps_window.push(now, ());
+        self.tps = self.tps_window.len_at(now);
     }
 }
 

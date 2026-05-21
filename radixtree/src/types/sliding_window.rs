@@ -40,6 +40,19 @@ impl Aggregate for Sum {
     }
 }
 
+/// Zero-sized no-op aggregate for windows that only need
+/// [`SlidingWindow::len`] (i.e. count via deque length, not a
+/// maintained sum). Use as `SlidingWindow<(), Count>`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Count;
+
+impl Aggregate for Count {
+    type Item = ();
+    fn add(&mut self, _: &()) {}
+    fn sub(&mut self, _: &()) {}
+}
+
+#[derive(Debug)]
 pub struct SlidingWindow<T, A: Aggregate<Item = T>> {
     entries: VecDeque<(Instant, T)>,
     agg: A,

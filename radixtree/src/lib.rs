@@ -22,4 +22,4 @@ pub mod verified;
 
 pub use block_hash::{Bids, BlockHash, RadixTreeBlockHash};
 pub use req_id_hash::RadixTreeReqIdHash;
-pub use types::{Aggregate, SlidingWindow, Sum};
+pub use types::{Aggregate, Count, SlidingWindow, Sum};

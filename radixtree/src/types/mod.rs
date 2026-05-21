@@ -7,4 +7,4 @@
 
 mod sliding_window;
 
-pub use sliding_window::{Aggregate, SlidingWindow, Sum};
+pub use sliding_window::{Aggregate, Count, SlidingWindow, Sum};
