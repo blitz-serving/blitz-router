@@ -6,8 +6,6 @@ use super::kvcache::PrefixBlockHash;
 
 use serde::Serialize;
 
-/// Parameter for prefill token/s EMA updation
-static PREFILL_TKN_FREQ_EMA_GAMMA: f32 = 0.75;
 /// Parameter for TBT EMA updation
 static TBT_EMA_GAMMA: f32 = 0.5;
 /// Prefill token bound, used in JBSQ(1), set to 2⨉ CP size
@@ -71,12 +69,6 @@ pub(crate) struct LMetric {
     /// TBT, in milisecond
     #[serde(serialize_with = "serialize_f32_3")]
     pub tbt: f32,
-    /// Estimated waiting to prefill time, in milisecond
-    #[serde(skip_serializing)]
-    pub time_of_left_prefill: f32,
-    /// Number of token prefilled per milisecond, an estimation, just work around
-    #[serde(skip_serializing)]
-    pub prefill_token_freq: f32,
 }
 
 impl Default for LMetric {
@@ -93,8 +85,6 @@ impl Default for LMetric {
             ),
             tpot: f32::NAN,
             tbt: 0.,
-            time_of_left_prefill: f32::default(),
-            prefill_token_freq: f32::default(),
         }
     }
 }
@@ -176,20 +166,9 @@ impl SubAssign<LMetricDec> for LMetric {
             self.prefill_tokens = self.prefill_tokens.saturating_sub(rhs.prefill_tokens_dec);
         }
         self.all_tokens = (self.all_tokens as isize + rhs.all_tokens_inc) as usize;
-        // first-order estimation
-        self.time_of_left_prefill = self.time_of_left_prefill - rhs.tbt;
 
         // EMAs
         self.tbt = self.tbt * (1. - TBT_EMA_GAMMA) + rhs.tbt * TBT_EMA_GAMMA;
-        self.prefill_token_freq = if rhs.prefill_tokens_dec == 0 {
-            // Decoding only, keep prefill_token_freq estimation unchanged
-            self.prefill_token_freq
-        } else {
-            let mut prefill_token_freq = rhs.prefill_tokens_dec as f32 / rhs.tbt;
-            prefill_token_freq = self.prefill_token_freq * (1. - PREFILL_TKN_FREQ_EMA_GAMMA)
-                + prefill_token_freq * PREFILL_TKN_FREQ_EMA_GAMMA;
-            prefill_token_freq
-        };
 
         // Replacements
         // TPOT
@@ -217,7 +196,6 @@ impl AddAssign<LMetricInc> for LMetric {
         self.waiting_reqs += rhs.waiting_reqs_inc;
         self.prefill_tokens += rhs.prefill_tokens_inc as isize;
         self.all_tokens += rhs.all_tokens_inc;
-        self.time_of_left_prefill += self.prefill_token_freq * rhs.prefill_tokens_inc as f32;
     }
 }
 
