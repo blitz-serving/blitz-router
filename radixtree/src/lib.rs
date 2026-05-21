@@ -15,12 +15,15 @@
 //!   retrofitted on top of it.
 //! - [`ReplicaSet`] — compact bitset over replica indices, used as the
 //!   per-node owner set in Preble's specialization.
+//! - [`types`] — generic primitives the router/policy layer composes
+//!   ([`SlidingWindow`] etc.).
 
 mod core;
 mod block_hash;
 mod req_id_hash;
 mod trie;
 mod replica_set;
+pub mod types;
 
 #[cfg(feature = "verify")]
 pub mod verified;
@@ -29,3 +32,4 @@ pub use block_hash::{Bids, BlockHash, RadixTreeBlockHash};
 pub use req_id_hash::RadixTreeReqIdHash;
 pub use trie::Trie;
 pub use replica_set::{ReplicaSet, ReplicaSetIter};
+pub use types::{Aggregate, SlidingWindow, Sum};
