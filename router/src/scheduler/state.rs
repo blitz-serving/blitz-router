@@ -66,7 +66,7 @@ pub(crate) struct LMetric {
     /// TPOT averaged on all running requests within instance, in milisecond
     #[serde(serialize_with = "serialize_f32_3")]
     pub tpot: f32,
-    /// TBT, in milisecond
+    /// TBT, in seconds (set from `Duration::as_secs_f32`).
     #[serde(serialize_with = "serialize_f32_3")]
     pub tbt: f32,
 }
