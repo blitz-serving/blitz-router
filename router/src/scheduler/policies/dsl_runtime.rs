@@ -33,13 +33,17 @@ pub(crate) struct Observation {
     pub block_size: usize,
     pub hit_blocks: usize,
     pub epoch: u64,
-    /// Per-replica TPOT (averaged over running requests, ms),
-    /// snapshotted from `lmetric.tpot`. Used by Preble's
-    /// `cost_for_replica` for the decode-cost term — there is no
-    /// reason to maintain a parallel TPOT store inside the policy
-    /// since the SSE loop in `colocation.rs` already updates this
-    /// field per engine step.
-    pub tpot: f32,
+    /// Preble: per-replica `pod_load` snapshot (count of recent
+    /// requests routed to this replica in the 3-min window). Captured
+    /// from `sctx.block_hash.load(now)` only under `--features
+    /// preble-q`; zero under any other feature flag.
+    #[cfg(feature = "preble-q")]
+    pub preble_load: usize,
+    /// Preble: per-replica `pod_cost` snapshot (sum of
+    /// `(PT_r + DT_r)` over the 3-min window). Captured from
+    /// `sctx.block_hash.cost(now)` only under `--features preble-q`.
+    #[cfg(feature = "preble-q")]
+    pub preble_cost: f64,
 }
 
 /// Lock each sctx briefly, capture all fields needed by any policy.
@@ -54,9 +58,16 @@ pub(crate) async fn capture_observations(
     let block_size = entry.block_hash_state.get_block_size();
     let hashes = entry.block_hash_state.get_hashes();
     let captures = all_sctx.iter().enumerate().map(|(idx, arc)| async move {
-        let sctx = arc.lock().await;
+        // Need `&mut` under preble-q because `block_hash.load(now)` /
+        // `.cost(now)` lazily expire the sliding window. Under any
+        // other feature this is read-only and the `mut` binding is a
+        // harmless no-op.
+        #[allow(unused_mut)]
+        let mut sctx = arc.lock().await;
         let hit_blocks = sctx.block_hash.get(hashes);
         let epoch = sctx.block_hash.epoch();
+        #[cfg(feature = "preble-q")]
+        let now = std::time::Instant::now();
         Observation {
             idx,
             bs: sctx.lmetric.bs,
@@ -66,7 +77,10 @@ pub(crate) async fn capture_observations(
             block_size,
             hit_blocks,
             epoch,
-            tpot: sctx.lmetric.tpot,
+            #[cfg(feature = "preble-q")]
+            preble_load: sctx.block_hash.load(now),
+            #[cfg(feature = "preble-q")]
+            preble_cost: sctx.block_hash.cost(now),
         }
     });
     join_all(captures).await
@@ -140,105 +154,86 @@ pub(crate) fn decode_blocks(sctx: &Observation) -> usize {
     }
 }
 
-/// Preble cost model query. Reads the `SlidingWindowHistogram` out of
-/// `gctx` (the policy's `GlobalContext` — see `policies::preble::PrebleGCtx`)
-/// and adds the per-replica score adjustment that PrebleQ overlays on
-/// top of `(new_tokens + all_tokens)`.
+/// Preble Stage 2 cost: per-replica `pod_cost` from the 3-min sliding
+/// window snapshotted into `Observation` at `capture_observations`
+/// time. Scaled by 1000 to integer for `select_min_by` stability;
+/// matches the previous helper's units.
 ///
-/// Splitting out as a named pure fn lets the policy DSL stay a one-liner
-/// while concentrating the `match_ratio > 0.5` bonus + the histogram
-/// cost lookup in one auditable place.
+/// The Preble paper's `L_i = Σ_{r ∈ W_i}(PT_r + DT_r)` is exactly this
+/// — per-request prefill+decode contributions over the window,
+/// attributed to the replica that served each. Reading is O(1).
 ///
-/// The per-replica TPOT comes from `sctx.tpot` (snapshotted from
-/// `lmetric.tpot`, which the SSE loop maintains per engine step) —
-/// not from any policy-internal TPOT history.
-pub(crate) fn preble_cost(
-    req: &ValidGenerateRequest,
-    sctx: &Observation,
-    gctx: &super::preble::PrebleGCtx,
-) -> i64 {
-    let new_pre = new_tokens(req, sctx);
-    let all = sctx.all_tokens;
-    let mut score = (new_pre + all) as i64;
-    let input_len = req.input_tokens.len();
-    let match_tokens = sctx.hit_blocks * sctx.block_size;
-    let match_ratio = match_tokens as f64 / input_len.max(1) as f64;
-    if match_ratio > 0.5 {
-        let bonus = (match_ratio * input_len as f64 * 0.5) as i64;
-        score -= bonus;
-    }
-    if let Some(histogram) = gctx.histogram() {
-        let cost = histogram.cost_for_replica(sctx.idx, sctx.tpot as f64);
-        score += (cost * 1000.0) as i64;
-    }
-    score
+/// **Removed in the per-replica refactor:** the previous overlay
+/// `(new_tokens + all_tokens) - bonus` is gone. With per-replica trees
+/// and per-replica scalars, the bare `pod_cost` is the paper-faithful
+/// metric; the overlay was a workaround for the Go reference's
+/// over-counting LOAD that this refactor eliminated structurally.
+#[cfg(feature = "preble-q")]
+pub(crate) fn preble_cost(sctx: &Observation) -> i64 {
+    (sctx.preble_cost * 1000.0) as i64
 }
 
-/// Per-replica histogram load for Preble's Stage 1 tie-break (longest
-/// match → lowest load). Returns 0 if the histogram has not yet been
-/// initialized (first-touch case).
-pub(crate) fn preble_load(
-    sctx: &Observation,
-    gctx: &super::preble::PrebleGCtx,
-) -> usize {
-    gctx.histogram()
-        .map(|h| h.load_for_replica(sctx.idx))
-        .unwrap_or(0)
+/// Per-replica `pod_load` for Preble's Stage 1 tie-break (longest
+/// match → lowest load). Reads the snapshot captured at
+/// `capture_observations` time. O(1).
+///
+/// Equivalent to `|W_P|` — the count of recent requests routed to this
+/// replica in the 3-min window. Eliminates the LOAD over-counting
+/// (Property L2) that the global-tree-with-owners design suffered from.
+#[cfg(feature = "preble-q")]
+pub(crate) fn preble_load(sctx: &Observation) -> usize {
+    sctx.preble_load
 }
 
-/// Longest prefix of `prefix` that exists in the shared Preble tree,
-/// regardless of owners. Returns 0 if the histogram is uninitialised
-/// or the request shares no block hashes with the tree.
-///
-/// Bijective with `len(matchedTokens)` from Go's
-/// `cache.AddPrefix(tokens, ctx.Model, "")` at
-/// `prefix_cache_preble.go:459` — drives Stage 1's >0.5 threshold
-/// check (a SINGLE global decision in Go, not per-replica).
+/// Longest prefix-match length (in blocks) across ALL replicas — used
+/// only for Stage 1's `>0.5` entry threshold. Each replica's tree is
+/// engine-driven (faithful to actually-cached state), so the max over
+/// replicas is the cluster-wide deepest prefix. Bijective with Go's
+/// global `len(matchedTokens) / len(tokens)` gating decision.
+#[cfg(feature = "preble-q")]
 pub(crate) fn preble_global_match_blocks(
-    gctx: &super::preble::PrebleGCtx,
-    prefix: &[u64],
+    observations: &[Observation],
+    _prefix: &[u64],
 ) -> usize {
-    gctx.histogram()
-        .map(|h| h.global_match_blocks(prefix))
-        .unwrap_or(0)
+    // `observations[i].hit_blocks` was populated by
+    // `sctx.block_hash.get(prefix)` for each replica's tree. The max
+    // is the deepest prefix any replica currently caches.
+    observations.iter().map(|o| o.hit_blocks).max().unwrap_or(0)
 }
 
-/// Longest prefix of `prefix` whose matched tree node has `sctx.idx`
-/// as an owner. Bijective with Go's Stage 1 ancestor walk at
-/// `prefix_cache_preble.go:484-509`: the per-replica `matchLength`
-/// from `prefixMatches[0]` for this candidate replica.
-///
-/// This is what Stage 1's winner selector must compare across replicas
-/// — NOT the per-replica `RadixTreeBlockHash.get(...)` count, which is
-/// the block-cache sidecar's view (drifts from the shared Preble tree
-/// owner state, breaking the Go-faithful tie-break semantics — D3).
-pub(crate) fn preble_owned_match_blocks(
-    sctx: &Observation,
-    gctx: &super::preble::PrebleGCtx,
-    prefix: &[u64],
-) -> usize {
-    gctx.histogram()
-        .map(|h| h.owned_match_blocks(prefix, sctx.idx))
-        .unwrap_or(0)
+/// Per-replica longest-match depth (in blocks) — i.e. how deep this
+/// replica's engine-driven tree caches the request's prefix. With
+/// per-replica trees, "owned" = "in this replica's tree", so this is
+/// just `o.hit_blocks`.
+#[cfg(feature = "preble-q")]
+pub(crate) fn preble_owned_match_blocks(sctx: &Observation) -> usize {
+    sctx.hit_blocks
 }
 
-/// `after_extra` hook for PrebleQ: updates the sliding-window histogram
-/// in `gctx` with the routing decision so future `preble_cost` calls
-/// reflect it. Lazy-initializes the histogram on first call.
-pub(crate) fn preble_update_after(
+/// `after_extra` hook for PrebleQ: pushes a per-request cost
+/// contribution into the chosen replica's sliding window. Tree state
+/// is independently maintained by the colocation event loop's
+/// `BlockHash::insert` (engine-driven), so this helper does NOT touch
+/// the tree; it only updates Preble's per-replica aggregates.
+#[cfg(feature = "preble-q")]
+pub(crate) async fn preble_update_after(
     entry: &Entry,
     chosen: &Observation,
-    num_replicas: usize,
-    gctx: &mut super::preble::PrebleGCtx,
+    all_sctx: &[Arc<Mutex<ScheduleContext>>],
 ) {
-    super::preble::update_histogram_into(
-        gctx,
-        entry.block_hash_state.get_hashes(),
-        chosen.hit_blocks,
-        entry.request.input_tokens.len(),
-        chosen.block_size,
-        chosen.idx,
-        num_replicas,
+    let mut sctx = all_sctx[chosen.idx].lock().await;
+    let prefix = entry.block_hash_state.get_hashes();
+    let block_size = chosen.block_size;
+    let context_length = entry.request.input_tokens.len();
+    let cached_tokens = chosen.hit_blocks.saturating_mul(block_size).min(context_length);
+    let num_tokens = context_length.saturating_sub(cached_tokens);
+    let decoding_length = sctx.block_hash.default_decoding_length();
+    sctx.block_hash.update_with_cost(
+        prefix,
+        num_tokens,
+        context_length,
+        decoding_length,
+        std::time::Instant::now(),
     );
 }
 

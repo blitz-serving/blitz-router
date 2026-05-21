@@ -37,6 +37,7 @@ pub(crate) mod llm_d;
 pub(crate) mod lmetric;
 pub(crate) mod policy_runner;
 pub(crate) mod policy_trait;
+#[cfg(feature = "preble-q")]
 pub(crate) mod preble;
 pub(crate) mod simple;
 pub(crate) mod vllm;
@@ -59,6 +60,7 @@ pub(crate) use llm_d::{
 };
 #[allow(unused_imports)]
 pub(crate) use lmetric::LmetricQ;
+#[cfg(feature = "preble-q")]
 #[allow(unused_imports)]
 pub(crate) use preble::PrebleQ;
 #[allow(unused_imports)]

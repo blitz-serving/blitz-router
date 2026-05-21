@@ -322,8 +322,16 @@ impl BlockHashState {
 
 #[cfg(feature = "hashtable-blockhash")]
 pub(crate) use hashtable_block_hash::HashTableBlockHash as PrefixBlockHash;
-#[cfg(feature = "radixtree-blockhash")]
+#[cfg(all(feature = "radixtree-blockhash", not(feature = "preble-q")))]
 pub(crate) use RadixTreeBlockHash as PrefixBlockHash;
+// Under `--features preble-q`, the prefix matcher is Preble's richer
+// flavour: the existing `RadixTreeBlockHash` (engine-driven) plus a
+// per-replica sliding-window aggregator for `pod_load` / `pod_cost`.
+// The Preble policy reads the aggregates via inherent methods on the
+// concrete `PrebleBlockHash` type — those resolve cleanly because
+// `PrefixBlockHash` is a compile-time alias.
+#[cfg(feature = "preble-q")]
+pub(crate) use crate::scheduler::policies::preble::PrebleBlockHash as PrefixBlockHash;
 
 #[cfg(test)]
 mod tests {
