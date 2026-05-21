@@ -76,6 +76,24 @@ The macro **rejects** (with a compile error pointing to the offending source lin
 
 The lint is a `syn::visit::Visit` walk of the body's `syn::Expr` tree. Implementation lives in `policy-dsl/src/check.rs`.
 
+#### 2.2.1 Known gap: function items as path arguments
+
+The current lint overrides `visit_expr_call` only. That catches every `foo(args)` expression and checks `foo`'s last path segment against the allowlist. It does **not** catch function items passed as a *value* — i.e. as a path argument to a higher-order combinator:
+
+```rust
+// Both forms appear in real policies:
+select_min_by(t, preble_cost)                    // function ITEM passed as arg
+select_min_by(t, |o| preble_cost(o))             // function CALL inside closure
+```
+
+The first form (function item) is an `Expr::Path` in argument position, never visited by `visit_expr_call`. `preble_cost` is never checked against `ALLOWED_FNS`. The second form goes through `visit_expr_call` normally.
+
+In practice this is mitigated by Rust's type system: the function item must satisfy the combinator's higher-order parameter type (e.g. `Fn(&Observation) -> S: PartialOrd`), which sharply limits what can be passed. But the allowlist invariant ("any legal body mechanically maps back to a spec-form DSL expression") is weakened — a reviewer cannot assume that every named helper appearing in a body has been audited against `ALLOWED_FNS`. They must additionally check path-argument positions by hand.
+
+**Convention until this is fixed**: every helper that may be passed as a function item must also be added to `ALLOWED_FNS`. This is currently honored by `preble_cost`, `preble_load`, `preble_bs_sum`, `preble_tps_count`, `preble_owned_match_blocks` — all reachable as both call expressions and as path arguments to `select_*_by`. The convention is by author discipline, not by the linter.
+
+**Fix design (deferred)**: extend `Linter` with a `visit_expr` override that, when seeing an `Expr::Path` in argument position of a known higher-order combinator, applies the same allowlist check as `visit_expr_call`. The hard part is identifying which call-argument positions are "higher-order" — naive coverage (every path argument) would reject `preble_global_match_blocks(observations, prefix)` (where `prefix` is a path to a local binding). The cleanest carve-out is a per-combinator argument-position whitelist: e.g. `select_min_by`'s second argument is higher-order, `filter_then`'s arguments 2/3/4 are higher-order; everything else is data. This is mechanical but adds ~50 LOC to `check.rs`.
+
 ### 2.3 Reverse interchange (impl → DSL)
 
 A reviewer auditing a `policy!` invocation reads the Rust body, applies §2.1's table right-to-left mechanically, and recovers the spec-form DSL. The lint guarantees this is always well-defined: every legal body is built from table entries, and each entry has a unique spec form. There is no construct in the impl that "cannot be expressed in DSL" — the lint rejects such bodies at compile time.
