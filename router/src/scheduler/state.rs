@@ -10,15 +10,17 @@ use serde::Serialize;
 static TBT_EMA_GAMMA: f32 = 0.5;
 /// Prefill token bound, used in JBSQ(1), set to 2⨉ CP size
 pub(crate) static WAITINGT_PREFILL_TOKEN_BOUND: usize = 2048;
-/// Parameters for Bailian (set once from CLI in `main.rs` via
-/// [`init_bailian_params`]; defaults 0.7 / 0.15 / 0.15 if unset).
-/// The statics themselves are unconditional so `policies/bailian.rs` (which
-/// is compiled regardless of feature flags, like every other policy module)
-/// can read them; only the `init_bailian_params` setter and the
-/// `--bailian-{alpha,beta,gamma}` CLI surface are gated by
-/// `feature = "bailian-impl-q"`.
+
+// ---- Bailian scoring weights (only present under `bailian-impl-q`) ----
+/// Bailian scoring weights for `bailian-impl-q`. Set once from CLI in
+/// `main.rs` via [`init_bailian_params`]; defaults 0.7 / 0.15 / 0.15
+/// if unset. Gated on `feature = "bailian-impl-q"` together with the
+/// `policies/bailian.rs` module that reads them.
+#[cfg(feature = "bailian-impl-q")]
 pub(crate) static BAILIAN_ALPHA: OnceLock<f32> = OnceLock::new();
+#[cfg(feature = "bailian-impl-q")]
 pub(crate) static BAILIAN_BETA: OnceLock<f32> = OnceLock::new();
+#[cfg(feature = "bailian-impl-q")]
 pub(crate) static BAILIAN_GAMMA: OnceLock<f32> = OnceLock::new();
 
 /// Install the Bailian scoring weights from CLI flags. Called once at
@@ -30,56 +32,67 @@ pub fn init_bailian_params(alpha: f32, beta: f32, gamma: f32) {
     let _ = BAILIAN_BETA.set(beta);
     let _ = BAILIAN_GAMMA.set(gamma);
 }
+
+// ---- Preble shared hyperparameters (all 3 variants) ----
 /// Preble branch-split threshold on
 /// `(global_match_blocks * block_size) / |req|`. Set once from CLI
 /// in `main.rs` via [`init_preble_params`]; default `0.5` if unset
-/// (the abstract spec value, `docs/preble-design.md` §QUERY).
-/// The static itself is unconditional so `policies/preble/mod.rs`
-/// can read it; only the `init_preble_params` setter and the
-/// `--preble-match-ratio-threshold` CLI surface are gated by
-/// `feature = "preble-q"`.
-pub(crate) static PREBLE_MATCH_RATIO_T: OnceLock<f32> = OnceLock::new();
-
-/// Install the Preble branch-split match-ratio threshold from a CLI
-/// flag. Called once at startup; subsequent calls are no-ops.
-/// Shared by all three Preble flavours (`preble-q` / `preble-bs-q` /
+/// (the abstract spec value, `docs/preble-design.md` §QUERY). Shared
+/// by all three Preble flavours (`preble-q` / `preble-bs-q` /
 /// `preble-tps-q`) since they share the KV$-aware-branch filter.
 #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
-pub fn init_preble_params(match_ratio_threshold: f32) {
+pub(crate) static PREBLE_MATCH_RATIO_T: OnceLock<f32> = OnceLock::new();
+
+/// Preble sliding-window duration in seconds. CLI-tunable via
+/// `--preble-window-secs`; defaults to 180s (3 min) matching the
+/// paper. Shared by all three Preble flavours since they all maintain
+/// per-replica sliding-window aggregates of the same duration.
+#[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
+pub(crate) static PREBLE_WINDOW_SECS: OnceLock<u64> = OnceLock::new();
+
+/// Install Preble shared hyperparameters from CLI flags. Called once
+/// at startup; subsequent calls are no-ops.
+#[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
+pub fn init_preble_params(match_ratio_threshold: f32, window_secs: u64) {
     let _ = PREBLE_MATCH_RATIO_T.set(match_ratio_threshold);
+    let _ = PREBLE_WINDOW_SECS.set(window_secs);
 }
 
-/// Preble-TPS sliding-window duration in seconds. CLI-tunable via
-/// `--preble-tps-window-secs`; defaults to 180s (3 min) if unset.
-/// Shorter windows react faster to load shifts; longer windows give
-/// more statistical noise immunity.
-pub(crate) static PREBLE_TPS_WINDOW_SECS: OnceLock<u64> = OnceLock::new();
-
-/// Preble-TPS idle-period compensation rate in forward-steps per
-/// second. CLI-tunable via `--preble-tps-decode-fps`; defaults to 120
+// ---- Preble-TPS-only hyperparameter ----
+/// Preble-TPS idle-period compensation rate, in forward-steps per
+/// second. CLI-tunable via `--preble-idle-tps`; defaults to 120
 /// (pure-decode peak rate for a saturated engine). When an engine
 /// transitions from idle (bs=0) to busy (bs>0), the gap is
 /// retroactively credited as if the engine had been ticking at this
 /// rate — so a recently-idle engine looks competitive with a
 /// continuously-busy peer, instead of being penalised for having no
-/// real samples in its window.
-pub(crate) static PREBLE_TPS_DECODE_FPS: OnceLock<f32> = OnceLock::new();
-
-/// Install the Preble-TPS tunables from CLI flags. Called once at
-/// startup; subsequent calls are no-ops.
+/// real samples in its window. Only meaningful for `preble-tps-q`.
 #[cfg(feature = "preble-tps-q")]
-pub fn init_preble_tps_params(window_secs: u64, decode_fps: f32) {
-    let _ = PREBLE_TPS_WINDOW_SECS.set(window_secs);
-    let _ = PREBLE_TPS_DECODE_FPS.set(decode_fps);
+pub(crate) static PREBLE_IDLE_TPS: OnceLock<f32> = OnceLock::new();
+
+/// Install the Preble-TPS idle-compensation rate from a CLI flag.
+/// Called once at startup; subsequent calls are no-ops.
+#[cfg(feature = "preble-tps-q")]
+pub fn init_preble_idle_tps(idle_tps: f32) {
+    let _ = PREBLE_IDLE_TPS.set(idle_tps);
 }
-/// llm-d load-aware-scorer's queue-depth threshold (default in upstream)
+
+// ---- llm-d scoring weights (gated by their respective features) ----
+/// llm-d load-aware-scorer's queue-depth threshold (default in upstream).
+/// Used by both `most-hit-load-q` and `most-hit-load-active-q`.
+#[cfg(any(feature = "most-hit-load-q", feature = "most-hit-load-active-q"))]
 pub(crate) static LOAD_AWARE_QUEUE_T: f32 = 128.0;
 /// most-hit-load-q (llm-d precise-prefix-cache + load-aware combo)
+#[cfg(feature = "most-hit-load-q")]
 pub(crate) static MOST_HIT_LOAD_W_HIT: f32 = 10.0;
+#[cfg(feature = "most-hit-load-q")]
 pub(crate) static MOST_HIT_LOAD_W_LOAD: f32 = 1.0;
 /// most-hit-load-active-q (above + kv-cache-utilization)
+#[cfg(feature = "most-hit-load-active-q")]
 pub(crate) static MOST_HIT_LOAD_ACTIVE_W_HIT: f32 = 10.0;
+#[cfg(feature = "most-hit-load-active-q")]
 pub(crate) static MOST_HIT_LOAD_ACTIVE_W_LOAD: f32 = 1.0;
+#[cfg(feature = "most-hit-load-active-q")]
 pub(crate) static MOST_HIT_LOAD_ACTIVE_W_KV: f32 = 1.0;
 
 fn serialize_f32_3<S>(x: &f32, s: S) -> Result<S::Ok, S::Error>

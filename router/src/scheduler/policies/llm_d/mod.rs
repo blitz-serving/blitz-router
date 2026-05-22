@@ -17,25 +17,32 @@
 //! `scheduler_profile.go::runScorerPlugins` pipeline. llm-d policies that
 //! cannot be expressed in the DSL (e.g. session-aware) are NOT ported.
 
+#[cfg(feature = "least-active-q")]
 pub(crate) mod least_active;
+#[cfg(feature = "least-bs-q")]
 pub(crate) mod least_bs;
+#[cfg(feature = "least-token-load-q")]
 pub(crate) mod least_token_load;
+#[cfg(feature = "least-waiting-q")]
 pub(crate) mod least_waiting;
+#[cfg(feature = "most-hit-q")]
 pub(crate) mod most_hit;
+#[cfg(feature = "most-hit-load-q")]
 pub(crate) mod most_hit_load;
+#[cfg(feature = "most-hit-load-active-q")]
 pub(crate) mod most_hit_load_active;
 
-#[allow(unused_imports)]
+#[cfg(feature = "least-active-q")]
 pub(crate) use least_active::LeastActiveQ;
-#[allow(unused_imports)]
+#[cfg(feature = "least-bs-q")]
 pub(crate) use least_bs::LeastBsQ;
-#[allow(unused_imports)]
+#[cfg(feature = "least-token-load-q")]
 pub(crate) use least_token_load::LeastTokenLoadQ;
-#[allow(unused_imports)]
+#[cfg(feature = "least-waiting-q")]
 pub(crate) use least_waiting::LeastWaitingQ;
-#[allow(unused_imports)]
+#[cfg(feature = "most-hit-q")]
 pub(crate) use most_hit::MostHitQ;
-#[allow(unused_imports)]
+#[cfg(feature = "most-hit-load-q")]
 pub(crate) use most_hit_load::MostHitLoadQ;
-#[allow(unused_imports)]
+#[cfg(feature = "most-hit-load-active-q")]
 pub(crate) use most_hit_load_active::MostHitLoadActiveQ;

@@ -47,8 +47,17 @@ use radixtree::Count;
 #[cfg(feature = "preble-q")]
 use super::cost_model::{self, TargetGpu};
 
-/// 3 min, matching Go's `slidingWindowPeriod`.
-const WINDOW_DURATION: Duration = Duration::from_secs(3 * 60);
+/// Read the CLI-tunable Preble sliding-window duration, in seconds.
+/// Default 180s (3 min, paper-faithful). Shared by all three Preble
+/// flavours.
+fn preble_window_duration() -> Duration {
+    Duration::from_secs(
+        crate::scheduler::state::PREBLE_WINDOW_SECS
+            .get()
+            .copied()
+            .unwrap_or(180),
+    )
+}
 
 /// Hardcoded per-token decode time (seconds), matching Go's constant
 /// at `prefix_cache_preble.go:345`. The `avgTimePerTokenPerPod` Go map
@@ -81,7 +90,7 @@ impl BlockHash for PrebleBlockHash {
     fn new(num_blocks: usize) -> Self {
         Self {
             inner: RadixTreeBlockHash::new(num_blocks),
-            window: SlidingWindow::new(WINDOW_DURATION, Sum::default()),
+            window: SlidingWindow::new(preble_window_duration(), Sum::default()),
             cost_model: TargetGpu::default(),
         }
     }
@@ -210,7 +219,7 @@ impl BlockHash for PrebleBsBlockHash {
     fn new(num_blocks: usize) -> Self {
         Self {
             inner: RadixTreeBlockHash::new(num_blocks),
-            bs_window: SlidingWindow::new(WINDOW_DURATION, Sum::default()),
+            bs_window: SlidingWindow::new(preble_window_duration(), Sum::default()),
         }
     }
     fn len(&self) -> usize { self.inner.len() }
@@ -239,8 +248,8 @@ impl PrebleBsBlockHash {
 }
 
 /// Preble-TPS flavour. Per-step window of forward-step counts; load
-/// is *inversely* proportional to the count of steps in the past 3
-/// min (more steps = more throughput headroom = preferred).
+/// is *inversely* proportional to the count of steps in the past
+/// window (more steps = more throughput headroom = preferred).
 ///
 /// The `last_busy_at` scalar is **deliberately separate** from the
 /// sliding window: when an engine has been idle past the window
@@ -258,11 +267,11 @@ pub struct PrebleTpsBlockHash {
     /// the idle interval to backfill.
     last_busy_at: Option<Instant>,
     /// Window duration captured at construction time from
-    /// `PREBLE_TPS_WINDOW_SECS` (CLI-tunable; default 180s).
+    /// `PREBLE_WINDOW_SECS` (CLI-tunable; default 180s).
     window_duration: Duration,
     /// Idle-period compensation rate captured at construction time
-    /// from `PREBLE_TPS_DECODE_FPS` (CLI-tunable; default 120 fps).
-    decode_fps: f32,
+    /// from `PREBLE_IDLE_TPS` (CLI-tunable; default 120 fps).
+    idle_tps: f32,
 }
 
 #[cfg(feature = "preble-tps-q")]
@@ -273,13 +282,8 @@ unsafe impl Sync for PrebleTpsBlockHash {}
 #[cfg(feature = "preble-tps-q")]
 impl BlockHash for PrebleTpsBlockHash {
     fn new(num_blocks: usize) -> Self {
-        let window_duration = Duration::from_secs(
-            crate::scheduler::state::PREBLE_TPS_WINDOW_SECS
-                .get()
-                .copied()
-                .unwrap_or(180),
-        );
-        let decode_fps = crate::scheduler::state::PREBLE_TPS_DECODE_FPS
+        let window_duration = preble_window_duration();
+        let idle_tps = crate::scheduler::state::PREBLE_IDLE_TPS
             .get()
             .copied()
             .unwrap_or(120.0);
@@ -288,7 +292,7 @@ impl BlockHash for PrebleTpsBlockHash {
             tps_window: SlidingWindow::new(window_duration, Count),
             last_busy_at: None,
             window_duration,
-            decode_fps,
+            idle_tps,
         }
     }
     fn len(&self) -> usize { self.inner.len() }
@@ -316,7 +320,7 @@ impl PrebleTpsBlockHash {
     }
 
     /// Retroactively credit a now-elapsed idle interval as if the
-    /// engine had been ticking at `decode_fps`. Called exactly when
+    /// engine had been ticking at `idle_tps`. Called exactly when
     /// an admission lifts the engine from `bs=0` to `bs>0` — the
     /// edge of the `None ⇔ compensation` state-chain.
     ///
@@ -331,7 +335,7 @@ impl PrebleTpsBlockHash {
     pub fn compensate_idle_gap(&mut self, now: Instant) {
         if let Some(last) = self.last_busy_at {
             let idle_dur = now.saturating_duration_since(last).min(self.window_duration);
-            let count = (self.decode_fps * idle_dur.as_secs_f32()) as usize;
+            let count = (self.idle_tps * idle_dur.as_secs_f32()) as usize;
             if count > 0 {
                 let step = idle_dur / (count as u32);
                 for i in 1..=count {
@@ -539,9 +543,9 @@ mod tests {
 
     #[cfg(feature = "preble-tps-q")]
     #[test]
-    fn tps_compensate_after_idle_backfills_at_decode_fps() {
+    fn tps_compensate_after_idle_backfills_at_idle_tps() {
         // Engine ticks once at t, goes idle, comes back at t+10s.
-        // Default decode_fps = 120 ⇒ expect ~120*10 = 1200 synthetic
+        // Default idle_tps = 120 ⇒ expect ~120*10 = 1200 synthetic
         // samples added, plus the original 1 real sample, all within
         // the window when queried at t+10s.
         let mut p = PrebleTpsBlockHash::new(64);
@@ -550,7 +554,7 @@ mod tests {
         let returning = t + Duration::from_secs(10);
         p.compensate_idle_gap(returning);            // ~1200 synthetic
         let count = p.tps_count(1, returning).unwrap();
-        // Allow ±5 for integer truncation of decode_fps × dur.
+        // Allow ±5 for integer truncation of idle_tps × dur.
         assert!(
             (1200..=1205).contains(&(count - 1)),
             "expected ≈ 1201 samples (1 real + ~1200 synthetic), got {}",

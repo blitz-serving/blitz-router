@@ -28,50 +28,89 @@
 // the `Entry` queue type, the `QueuePro` public interface, and the
 // per-feature `TaskAssigner` aliases.
 
+#[cfg(feature = "aibrix-q")]
 pub(crate) mod aibrix;
+#[cfg(feature = "bailian-impl-q")]
 pub(crate) mod bailian;
 pub(crate) mod dsl_runtime;
+#[cfg(any(feature = "dynamo-q", feature = "dynamo-po-q"))]
 pub(crate) mod dynamo;
+#[cfg(feature = "least-ttft-q")]
 pub(crate) mod least_ttft;
+#[cfg(any(
+    feature = "most-hit-q",
+    feature = "most-hit-load-q",
+    feature = "most-hit-load-active-q",
+    feature = "least-waiting-q",
+    feature = "least-bs-q",
+    feature = "least-active-q",
+    feature = "least-token-load-q",
+))]
 pub(crate) mod llm_d;
+#[cfg(feature = "lmetric-q")]
 pub(crate) mod lmetric;
 pub(crate) mod policy_runner;
 pub(crate) mod policy_trait;
 #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
 pub(crate) mod preble;
+// `simple` houses random / round-robin / least-wait-token /
+// bounded-most-hit. Always compiled because at least one of those is
+// often in play, and the file is tiny.
 pub(crate) mod simple;
+// `vllm` is the catch-all default (`join-shortest-weight-q`), so
+// it is always compiled — the fallback alias at the bottom of this
+// module references `JShortestWeightQ` when no other policy feature
+// is selected.
 pub(crate) mod vllm;
 
 // Re-export concrete policy structs (each emitted by `policy!`).
-// `#[allow(unused_imports)]` because exactly one is referenced per
-// build via the cargo-feature-gated `TaskAssigner` alias below.
-#[allow(unused_imports)]
+// Each `pub(crate) use` is feature-gated identically to its `mod`,
+// so the unused-import warnings the older `#[allow(unused_imports)]`
+// blanket was suppressing simply do not arise.
+#[cfg(feature = "aibrix-q")]
 pub(crate) use aibrix::AibrixQ;
-#[allow(unused_imports)]
+#[cfg(feature = "bailian-impl-q")]
 pub(crate) use bailian::BailianImplQ;
-#[allow(unused_imports)]
-pub(crate) use dynamo::{DynamoPoQ, DynamoQ};
-#[allow(unused_imports)]
+#[cfg(feature = "dynamo-q")]
+pub(crate) use dynamo::DynamoQ;
+#[cfg(feature = "dynamo-po-q")]
+pub(crate) use dynamo::DynamoPoQ;
+#[cfg(feature = "least-ttft-q")]
 pub(crate) use least_ttft::LeastTtftQ;
-#[allow(unused_imports)]
-pub(crate) use llm_d::{
-    LeastActiveQ, LeastBsQ, LeastTokenLoadQ, LeastWaitingQ, MostHitLoadActiveQ, MostHitLoadQ,
-    MostHitQ,
-};
-#[allow(unused_imports)]
+#[cfg(feature = "least-active-q")]
+pub(crate) use llm_d::LeastActiveQ;
+#[cfg(feature = "least-bs-q")]
+pub(crate) use llm_d::LeastBsQ;
+#[cfg(feature = "least-token-load-q")]
+pub(crate) use llm_d::LeastTokenLoadQ;
+#[cfg(feature = "least-waiting-q")]
+pub(crate) use llm_d::LeastWaitingQ;
+#[cfg(feature = "most-hit-load-active-q")]
+pub(crate) use llm_d::MostHitLoadActiveQ;
+#[cfg(feature = "most-hit-load-q")]
+pub(crate) use llm_d::MostHitLoadQ;
+#[cfg(feature = "most-hit-q")]
+pub(crate) use llm_d::MostHitQ;
+#[cfg(feature = "lmetric-q")]
 pub(crate) use lmetric::LmetricQ;
 #[cfg(feature = "preble-q")]
-#[allow(unused_imports)]
 pub(crate) use preble::PrebleQ;
 #[cfg(feature = "preble-bs-q")]
-#[allow(unused_imports)]
 pub(crate) use preble::PrebleBsQ;
 #[cfg(feature = "preble-tps-q")]
-#[allow(unused_imports)]
 pub(crate) use preble::PrebleTpsQ;
-#[allow(unused_imports)]
-pub(crate) use simple::{JBoundMostHitQ2, JLeastWaitTokenQ, RandomQ, RoundRobinQ};
-#[allow(unused_imports)]
+#[cfg(feature = "bounded-most-hit-q")]
+pub(crate) use simple::JBoundMostHitQ2;
+#[cfg(feature = "least-wait-token-q")]
+pub(crate) use simple::JLeastWaitTokenQ;
+#[cfg(feature = "random-q")]
+pub(crate) use simple::RandomQ;
+#[cfg(feature = "round-robin-q")]
+pub(crate) use simple::RoundRobinQ;
+// `JShortestWeightQ` is the catch-all default — always compiled,
+// always re-exported. The corresponding TaskAssigner alias at the
+// bottom of this module picks it up when no other policy feature is
+// selected.
 pub(crate) use vllm::JShortestWeightQ;
 
 use super::kvcache::BlockHashState;

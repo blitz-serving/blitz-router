@@ -28,15 +28,29 @@ pub(crate) use kvcache::{
 pub(crate) use queue::TaskAssigner;
 #[allow(unused_imports)]
 pub(crate) use state::{
-    BAILIAN_ALPHA, BAILIAN_BETA, BAILIAN_GAMMA, LMetric, LMetricDec, LMetricInc,
-    LOAD_AWARE_QUEUE_T, MOST_HIT_LOAD_ACTIVE_W_HIT, MOST_HIT_LOAD_ACTIVE_W_KV,
-    MOST_HIT_LOAD_ACTIVE_W_LOAD, MOST_HIT_LOAD_W_HIT, MOST_HIT_LOAD_W_LOAD,
-    PREBLE_MATCH_RATIO_T, PREBLE_TPS_DECODE_FPS, PREBLE_TPS_WINDOW_SECS,
-    ScheduleContext, WAITINGT_PREFILL_TOKEN_BOUND,
+    LMetric, LMetricDec, LMetricInc, ScheduleContext, WAITINGT_PREFILL_TOKEN_BOUND,
 };
+
+#[cfg(feature = "bailian-impl-q")]
+pub(crate) use state::{BAILIAN_ALPHA, BAILIAN_BETA, BAILIAN_GAMMA};
 #[cfg(feature = "bailian-impl-q")]
 pub use state::init_bailian_params;
+
+#[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
+pub(crate) use state::{PREBLE_MATCH_RATIO_T, PREBLE_WINDOW_SECS};
 #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
 pub use state::init_preble_params;
+
 #[cfg(feature = "preble-tps-q")]
-pub use state::init_preble_tps_params;
+pub(crate) use state::PREBLE_IDLE_TPS;
+#[cfg(feature = "preble-tps-q")]
+pub use state::init_preble_idle_tps;
+
+#[cfg(any(feature = "most-hit-load-q", feature = "most-hit-load-active-q"))]
+pub(crate) use state::LOAD_AWARE_QUEUE_T;
+#[cfg(feature = "most-hit-load-q")]
+pub(crate) use state::{MOST_HIT_LOAD_W_HIT, MOST_HIT_LOAD_W_LOAD};
+#[cfg(feature = "most-hit-load-active-q")]
+pub(crate) use state::{
+    MOST_HIT_LOAD_ACTIVE_W_HIT, MOST_HIT_LOAD_ACTIVE_W_KV, MOST_HIT_LOAD_ACTIVE_W_LOAD,
+};
