@@ -191,18 +191,54 @@ impl PrebleBlockHash {
 //
 // Same prefix-match tree as `PrebleBlockHash` (delegated to
 // `inner: RadixTreeBlockHash`), but the per-pod aggregate is a single
-// engine-step-driven sliding window — no cost model, no per-request
-// hook. Pushed at every forward step from the colocation event loop
-// after `sctx.lmetric -= metric_delta`. See
-// `engine/colocation.rs`.
+// sliding window — no cost model. Push sites differ per flavour:
+//
+// - `PrebleBsBlockHash`: **push-both** — admission events (from
+//   `PrebleBsQ::after_extra`) AND SSE forward-step events (from the
+//   colocation loop). Both push the engine's current BS into the
+//   window; the combined samples approximate ∫ BS(t) dt × event_rate.
+//   Admission pushes give responsiveness before the next decision;
+//   SSE pushes capture runtime occupancy.
+// - `PrebleTpsBlockHash`: **SSE-only** — forward-step count window,
+//   with idle-engine sentinel + idle-period compensation hooks
+//   from `PrebleTpsQ`.
 //
 // Each type is gated behind its own feature flag so dead-code lints
 // stay quiet under non-matching builds. Mutually exclusive with each
 // other and with `PrebleBlockHash`; the alias chain in
 // `scheduler/kvcache.rs` enforces a single active flavour.
 
-/// Preble-BS flavour. Per-step window of batch-size samples; load is
-/// the sum of BS samples in the past 3 min (higher = more loaded).
+/// Preble-BS flavour. **Push-both** window of BS snapshots:
+///
+/// - Admission events: `PrebleBsQ::after_extra` pushes the
+///   post-`LMetricInc` BS once per admission. Makes the metric
+///   responsive *before the next routing decision* — the gap that
+///   broke the earlier engine-step-only design (ali-h20 `_1p` campaign
+///   measured max-burst 1094 under step-only vs 3 under preble-q's
+///   admission-driven cost).
+/// - SSE forward-step events: the colocation loop pushes pre-subassign
+///   BS once per engine tick. Captures runtime occupancy and prevents
+///   semantic drift toward "arrival-weighted queue pressure only" —
+///   a short burst that completes quickly is balanced by subsequent
+///   low-BS SSE samples.
+///
+/// Both push the engine's instantaneous BS at the event moment. The
+/// SlidingWindow `Sum` aggregate accumulates them; the combined
+/// samples approximate ∫ BS(t) dt over the window, scaled by event
+/// rate. Two regimes self-select:
+///
+/// - **Cold / idle replicas**: SSE doesn't tick (`bs=0` ⇒ no forward
+///   steps in vLLM/yaullm). Admission pushes dominate the window →
+///   strong admission-responsiveness drives cold-burst fan-out.
+/// - **Warm / busy replicas**: SSE (~120fps at peak decode) outnumbers
+///   admission rate by ~50×. SSE samples carry the load signal:
+///   `Σ BS_SSE` for a BS=10 engine is ~10× that of a BS=1 engine, so
+///   `min_by` strongly prefers the lighter engine.
+///
+/// Why the same `update_with_step` method for both call sites: the
+/// operation is identical (push current BS at the event timestamp).
+/// The method name follows the colocation convention; the after_extra
+/// caller is documented at `preble_bs_update_after`.
 #[cfg(feature = "preble-bs-q")]
 pub struct PrebleBsBlockHash {
     inner: RadixTreeBlockHash,
@@ -232,16 +268,31 @@ impl BlockHash for PrebleBsBlockHash {
 
 #[cfg(feature = "preble-bs-q")]
 impl PrebleBsBlockHash {
-    /// Push the current batch-size sample. Called once per forward
-    /// step from the colocation event loop, after `LMetric` has been
-    /// updated for that step (so `bs` reflects the post-step value).
+    /// Push a BS snapshot into the 3-min window. Called from TWO
+    /// sites in the push-both design:
+    ///
+    /// 1. **Colocation SSE loop** (`engine/colocation.rs`): once per
+    ///    forward step, with the pre-subassign BS — captures runtime
+    ///    occupancy.
+    /// 2. **`PrebleBsQ::after_extra`** (via `preble_bs_update_after`):
+    ///    once per admission, with the post-`LMetricInc` BS — keeps
+    ///    the metric responsive to routing decisions before the next
+    ///    decision is taken.
+    ///
+    /// Both call sites push the engine's instantaneous BS at the
+    /// event moment; the SlidingWindow Sum aggregate accumulates
+    /// them. Combined samples approximate ∫ BS(t) dt × event_rate
+    /// over the window.
+    ///
+    /// Tree state is independently maintained by the colocation event
+    /// loop's `BlockHash::insert`.
     pub fn update_with_step(&mut self, bs: usize, now: Instant) {
         self.bs_window.push(now, bs as f64);
     }
 
-    /// Sum of BS samples in the 3-min window. Higher = more loaded.
-    /// Load-balancing-branch selector for `PrebleBsQ` is
-    /// `select_min_by` over this.
+    /// Sum of BS snapshots (admission + SSE events) in the 3-min
+    /// window. Higher = more loaded. Load-balancing-branch selector
+    /// for `PrebleBsQ` is `select_min_by` over this.
     pub fn bs_sum(&mut self, now: Instant) -> f64 {
         self.bs_window.aggregate_at(now).0
     }
@@ -327,19 +378,26 @@ impl PrebleTpsBlockHash {
     /// The idle interval is `now - last_busy_at`, clamped to
     /// `window_duration` (we never compensate beyond the window's
     /// look-back). Synthetic samples are dated uniformly across the
-    /// interval so they age out at the same rate they would have if
-    /// real. If `last_busy_at` is `None` (cold-start engine, never
-    /// been busy), there is no idle interval to compensate — the
-    /// window stays empty; Design 1's `None` sentinel still ensures
-    /// idle engines win admissions.
+    /// RECENT window `[now - idle_dur, now]`, not from
+    /// `last_busy_at` forward — for long idle periods past the
+    /// window the latter would write samples already older than the
+    /// window and they'd be evicted on the next read. The intent is
+    /// "this engine has been productive for the past N seconds" with
+    /// N = min(real_idle, window).
+    ///
+    /// If `last_busy_at` is `None` (cold-start engine, never been
+    /// busy), there is no idle interval to compensate — the window
+    /// stays empty; Design 1's `None` sentinel still ensures idle
+    /// engines win admissions.
     pub fn compensate_idle_gap(&mut self, now: Instant) {
         if let Some(last) = self.last_busy_at {
             let idle_dur = now.saturating_duration_since(last).min(self.window_duration);
             let count = (self.idle_tps * idle_dur.as_secs_f32()) as usize;
             if count > 0 {
                 let step = idle_dur / (count as u32);
+                let start = now - idle_dur;
                 for i in 1..=count {
-                    self.tps_window.push(last + step * (i as u32), ());
+                    self.tps_window.push(start + step * (i as u32), ());
                 }
             }
         }
@@ -466,13 +524,23 @@ mod tests {
 
     #[cfg(feature = "preble-bs-q")]
     #[test]
-    fn bs_step_pushes_and_sums() {
+    fn bs_push_both_admission_and_sse_samples() {
+        // Push-both design: admission and SSE both call update_with_step
+        // with the engine's current BS at that moment. The Sum
+        // aggregate accumulates both.
         let mut p = PrebleBsBlockHash::new(64);
         let t = Instant::now();
-        p.update_with_step(8, t);
-        p.update_with_step(12, t);
-        p.update_with_step(4, t);
-        assert!((p.bs_sum(t) - 24.0).abs() < 1e-9);
+        // Three admissions to an initially-idle engine — bs becomes
+        // 1, 2, 3 post-LMetricInc. After-extra pushes those.
+        p.update_with_step(1, t);
+        p.update_with_step(2, t);
+        p.update_with_step(3, t);
+        // Two SSE forward steps at the same moment, recording pre-
+        // subassign BS = 3 (no completion this step).
+        p.update_with_step(3, t);
+        p.update_with_step(3, t);
+        // Sum = 1 + 2 + 3 + 3 + 3 = 12.
+        assert!((p.bs_sum(t) - 12.0).abs() < 1e-9);
     }
 
     #[cfg(feature = "preble-bs-q")]
@@ -565,23 +633,26 @@ mod tests {
     #[cfg(feature = "preble-tps-q")]
     #[test]
     fn tps_compensate_clamps_to_window_duration() {
-        // Idle 1 hour, window = 180s. Compensation must clamp to
-        // 120 fps × 180s = 21600 samples (not 120 × 3600).
+        // Idle 1 hour, window = 180s, idle_tps = 120 (default).
+        // Pre-fix: synthetic samples were dated [last_busy_at,
+        // last_busy_at + 180s] = [now-1h, now-57min], all expired at
+        // query time → 0 credit (clamped to nothing).
+        // Post-fix: dated [now - 180s, now] → all in-window →
+        // 21600 synthetic samples credit. Verifies (a) we don't
+        // overshoot 120*3600=432000 samples, AND (b) the recent
+        // window is actually populated.
         let mut p = PrebleTpsBlockHash::new(64);
         let t = Instant::now();
-        p.update_with_step(1, t);
+        p.update_with_step(1, t);                       // 1 real sample at t
         let returning = t + Duration::from_secs(3600);
         p.compensate_idle_gap(returning);
         let count = p.tps_count(1, returning).unwrap();
-        // 1 real sample is way out of window, so it expired. Synthetic
-        // samples were dated across (t, t+180s) — most are also
-        // out-of-window at returning = t+3600s. So actually 0 remain
-        // within window after the clamp. Re-querying earlier would show
-        // the synthetics; this assertion just verifies we didn't push
-        // 432_000 samples (120 × 3600).
+        // Real sample at t = returning - 3600s is well out of window.
+        // Synthetic samples are now dated in [returning-180s, returning].
+        // Expect ~120 * 180 = 21600, ±5 for integer truncation.
         assert!(
-            count <= 21_605,
-            "compensation must be clamped to window; got {} samples",
+            (21_595..=21_605).contains(&count),
+            "expected ≈ 21600 synthetic samples in recent window; got {}",
             count
         );
     }

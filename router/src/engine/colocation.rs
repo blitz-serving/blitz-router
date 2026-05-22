@@ -679,6 +679,15 @@ mod task_assignment {
             // ran this step (post-subassign BS would under-count
             // completed-this-step requests — a one-step request
             // would record 0).
+            //
+            // Preble-BS uses a *push-both* design: this SSE push
+            // captures runtime BS occupancy, and a separate admission
+            // push in `PrebleBsQ::after_extra` captures arrival-time
+            // BS. Together they approximate ∫ BS(t) dt over the
+            // window with samples at every BS change. SSE-only would
+            // lag routing decisions; admission-only loses runtime
+            // occupancy signal. See
+            // `exps/lmetric/ali-h20/preble-tuner/`.
             #[cfg(any(feature = "preble-bs-q", feature = "preble-tps-q"))]
             let pre_step_bs = sctx.lmetric.bs;
             sctx.lmetric -= metric_delta;

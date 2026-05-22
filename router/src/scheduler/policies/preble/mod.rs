@@ -84,15 +84,23 @@ policy! {
 // Same KV$-aware branch shape as PrebleQ — filter by match ratio,
 // then max owned match blocks with the load-balancing-branch metric
 // as the tie-break. Load-balancing branch replaces cost-min with
-// bs-sum-min: pick the replica whose accumulated batch-size samples
-// over the past 3 min are smallest, i.e. has been least loaded.
+// bs-sum-min: pick the replica whose accumulated BS samples over
+// the past 3 min are smallest, i.e. has been least loaded.
 //
 // The KV$-aware-branch tie-break (negated bs_sum) keeps the same
 // load metric in play across both branches, so that two replicas
 // with equal longest-match still resolve to the less-loaded one.
 //
-// No `after_extra` hook: the bs window is fed by the colocation loop
-// every forward step (one push per step), independent of admissions.
+// **Push-both window** (see `PrebleBsBlockHash` docs): admission
+// events from this `after_extra` hook ensure the metric is responsive
+// before the next routing decision; SSE forward-step events from the
+// colocation loop capture runtime BS occupancy. The combination
+// approximates ∫ BS(t) dt × event_rate. The earlier admission-only
+// variant of this fix addressed the burst-collapse from the original
+// step-only design but had semantic drift toward "arrival-weighted
+// queue pressure"; adding SSE samples back restores runtime occupancy
+// fidelity without re-opening the lag gap (admission push happens
+// before the next decision regardless of SSE timing).
 
 #[cfg(feature = "preble-bs-q")]
 policy! {
@@ -119,6 +127,9 @@ policy! {
             |t| select_min_by(t, preble_bs_sum),
         )
     },
+    after_extra: {
+        preble_bs_update_after(entry, &observations[chosen], all_sctx).await;
+    }
 }
 
 // =========================================================================
@@ -145,9 +156,21 @@ policy! {
 // otherwise the engine would lose admissions until it briefly went
 // idle again (yo-yo dynamic).
 //
-// The KV$-aware-branch tie-break is `+tps_count` (no negation:
-// higher tps_count ⇒ less loaded ⇒ preferred), keeping the same
-// load metric in play across both branches.
+// Design 3 (fallback tie-break on -bs): even with Designs 1+2, a
+// cold-burst cascade leaves engines at `bs > 0` with empty windows
+// (compensation is a no-op when `last_busy_at == None`, i.e. an
+// engine that has *never* ticked). Their `tps_count` reads
+// `Some(0)`, which under `max` selector's deterministic last-wins
+// re-concentrates admissions to the last engine. Appending
+// `-(o.bs as i64)` as a secondary score key keeps tps_count as the
+// primary signal in steady state and routes the cold-burst "all
+// Some(0)" window to whichever engine currently carries the fewest
+// running requests — converting the cascade lock-in into round-
+// robin fan-out. Has no effect once real tps_counts diverge.
+//
+// The KV$-aware-branch tie-break is `+tps_count, -bs` (same
+// rationale), keeping the same load metric chain across both
+// branches.
 
 #[cfg(feature = "preble-tps-q")]
 policy! {
@@ -168,12 +191,174 @@ policy! {
                 |o| (
                     preble_owned_match_blocks(o),
                     preble_tps_count(o),
+                    -(o.bs as i64),
                 ),
             ),
-            |t| select_max_by(t, preble_tps_count),
+            |t| select_max_by(
+                t,
+                |o| (
+                    preble_tps_count(o),
+                    -(o.bs as i64),
+                ),
+            ),
         )
     },
     after_extra: {
         preble_tps_compensate_idle(entry, &observations[chosen], all_sctx).await;
+    }
+}
+
+// =========================================================================
+// Policy-level regression tests
+// =========================================================================
+
+#[cfg(all(test, feature = "preble-bs-q"))]
+mod bs_q_policy_tests {
+    //! Locks Codex regression #2: the original 1094-burst on engine 13
+    //! (ali-h20 `_1p` campaign) lived in the policy ordering + after_extra
+    //! wiring, not just in the window primitive. These tests construct
+    //! real Entry values and call `PrebleBsQ::schedule` to assert that
+    //! the burst pattern does not return.
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::{mpsc, Mutex};
+    use tokio::time::Instant;
+    use tracing::Span;
+
+    use radixtree::BlockHash;
+
+    use super::PrebleBsQ;
+    use crate::gateway::validation::ValidGenerateRequest;
+    use crate::scheduler::kvcache::{BlockHashState, PrefixBlockHash};
+    use crate::scheduler::policies::Entry;
+    use crate::scheduler::policies::policy_trait::Policy;
+    use crate::scheduler::state::{LMetric, PREBLE_MATCH_RATIO_T, PREBLE_WINDOW_SECS};
+    use crate::types::GenerationParams;
+    use crate::ScheduleContext;
+
+    fn make_entry(request_id: u64, input_tokens: Vec<u32>, block_size: usize) -> Entry {
+        let (response_tx, _rx) = mpsc::unbounded_channel();
+        let block_hash_state = BlockHashState::new(&input_tokens, block_size);
+        let input_length = input_tokens.len() as u32;
+        let request = ValidGenerateRequest {
+            request_id,
+            messages: vec![],
+            inputs: String::new(),
+            input_length,
+            truncate: 0,
+            decoder_input_details: false,
+            params: GenerationParams {
+                temperature: 1.0,
+                repetition_penalty: 1.0,
+                top_k: 0,
+                top_p: 1.0,
+                seed: 0,
+                max_new_tokens: 1,
+                stop_sequences: vec![],
+                ignore_eos_token: false,
+            },
+            top_n_tokens: 0,
+            input_tokens,
+        };
+        Entry {
+            request,
+            block_hash_state,
+            response_tx,
+            span: Span::none(),
+            temp_span: None,
+            queue_time: Instant::now(),
+            batch_time: None,
+            generated_token_cnt: 0,
+            prev_token_time: None,
+            time_of_per_token: None,
+            max_time_between_tokens: Duration::from_micros(0),
+        }
+    }
+
+    fn make_pool(n: usize) -> Vec<Arc<Mutex<ScheduleContext>>> {
+        (0..n)
+            .map(|_| {
+                Arc::new(Mutex::new(ScheduleContext {
+                    lmetric: LMetric::default(),
+                    block_hash: PrefixBlockHash::new(1024),
+                }))
+            })
+            .collect()
+    }
+
+    fn max_consecutive_run(seq: &[usize]) -> usize {
+        let mut max_run = 1usize;
+        let mut run = 1usize;
+        for w in seq.windows(2) {
+            if w[0] == w[1] {
+                run += 1;
+                if run > max_run { max_run = run; }
+            } else {
+                run = 1;
+            }
+        }
+        max_run
+    }
+
+    /// THE regression test for ali-h20 `_1p` 1094-burst. THRESHOLD=1.0
+    /// masks the KV-aware branch entirely (filter never passes — the
+    /// strict `> 1.0` cannot be saturated; see kvcache.rs:185 only
+    /// hashes complete blocks). All admissions go through the
+    /// load-balancing branch `select_min_by(t, preble_bs_sum)`. Each
+    /// admission distinct (no shared prefix) so coincidental cache
+    /// state is irrelevant.
+    ///
+    /// Expected behavior under the push-both design: max consecutive
+    /// same-engine admissions is small (≤ 3, matching preble-q's
+    /// observed baseline of 3). The pre-fix engine-step-only design
+    /// produced runs up to 1094 on the same workload shape.
+    #[tokio::test]
+    async fn bs_q_no_burst_under_threshold_one_load_balancing_only() {
+        // Set policy hyperparameters. `let _ = ...set(...)` because
+        // OnceLock can only be set once per process; tests in the same
+        // binary share state. We're the only setter under preble-bs-q.
+        let _ = PREBLE_MATCH_RATIO_T.set(1.0);
+        let _ = PREBLE_WINDOW_SECS.set(180);
+
+        let pool = make_pool(16);
+        let mut gctx = ();
+        let mut chosen_seq = Vec::with_capacity(100);
+
+        for i in 0..100u64 {
+            // Disjoint token prefixes per request — no cache overlap,
+            // so even with threshold < 1.0 the KV-aware branch would
+            // not trigger here. With threshold = 1.0 it's masked
+            // unconditionally.
+            let base = (i as u32) * 10_000;
+            let tokens: Vec<u32> = (0..64).map(|j| base + j as u32).collect();
+            let entry = make_entry(i, tokens, 16);
+            let chosen = PrebleBsQ::schedule(&entry, &pool, &mut gctx)
+                .await
+                .expect("scheduler must admit (lossless contract)");
+            chosen_seq.push(chosen);
+        }
+
+        let max_run = max_consecutive_run(&chosen_seq);
+        assert!(
+            max_run <= 3,
+            "BURST REGRESSION: max consecutive same-engine admissions = {max_run}, \
+             expected ≤ 3 (preble-q baseline). The 1094-burst on engine 13 \
+             from ali-h20 _1p has returned. Sequence: {chosen_seq:?}"
+        );
+
+        // Stronger: per-engine admission counts should be balanced.
+        let mut counts = [0usize; 16];
+        for &c in &chosen_seq {
+            counts[c] += 1;
+        }
+        let min = *counts.iter().min().unwrap();
+        let max = *counts.iter().max().unwrap();
+        assert!(
+            max - min <= 1,
+            "fan-out should be near-perfect under load-balancing-only \
+             (threshold=1.0, no cache overlap); got per-engine counts {counts:?}"
+        );
     }
 }

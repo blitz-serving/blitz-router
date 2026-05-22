@@ -232,10 +232,12 @@ pub(crate) fn preble_owned_match_blocks(sctx: &Observation) -> usize {
     sctx.hit_blocks
 }
 
-/// Preble-BS load-balancing branch: sum of batch-size samples in
-/// the per-replica 3-min window. Engine-step-driven (one push per
-/// forward step from the colocation loop). Higher = more loaded;
-/// the policy minimizes.
+/// Preble-BS load-balancing branch: sum of BS snapshots in the
+/// per-replica 3-min window. **Push-both** signal — admission pushes
+/// from `preble_bs_update_after` (in `after_extra`) AND SSE
+/// forward-step pushes from the colocation loop. Higher = more
+/// loaded; the policy minimizes. See `PrebleBsBlockHash` docs for
+/// the two-regime behavior.
 #[cfg(feature = "preble-bs-q")]
 pub(crate) fn preble_bs_sum(sctx: &Observation) -> f64 {
     sctx.preble_bs_sum
@@ -276,6 +278,28 @@ pub(crate) async fn preble_tps_compensate_idle(
         let mut sctx = all_sctx[chosen.idx].lock().await;
         sctx.block_hash.compensate_idle_gap(std::time::Instant::now());
     }
+}
+
+/// `after_extra` hook for PrebleBsQ: snapshot the chosen engine's
+/// post-admission `sctx.lmetric.bs` into its 3-min window. Runs after
+/// `apply_default_after`, so `bs` here already includes the new
+/// admission (`LMetricInc { bs_inc: 1, ... }`).
+///
+/// This is the admission-driven half of preble-bs-q's push-both
+/// design — the colocation SSE loop pushes runtime BS samples too
+/// (`engine/colocation.rs`). Both push the engine's current BS at
+/// the event moment; combined samples approximate ∫ BS(t) dt over
+/// the window, with the admission push ensuring the metric is
+/// responsive *before* the next routing decision.
+#[cfg(feature = "preble-bs-q")]
+pub(crate) async fn preble_bs_update_after(
+    _entry: &Entry,
+    chosen: &Observation,
+    all_sctx: &[Arc<Mutex<ScheduleContext>>],
+) {
+    let mut sctx = all_sctx[chosen.idx].lock().await;
+    let bs_now = sctx.lmetric.bs;
+    sctx.block_hash.update_with_step(bs_now, std::time::Instant::now());
 }
 
 /// `after_extra` hook for PrebleQ: pushes a per-request cost

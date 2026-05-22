@@ -47,6 +47,7 @@ const ALLOWED_FNS: &[&str] = &[
     "preble_global_match_blocks",
     "preble_owned_match_blocks",
     "preble_update_after",
+    "preble_bs_update_after",
     "preble_tps_compensate_idle",
     // Helpers
     "root_target",
