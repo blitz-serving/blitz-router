@@ -76,6 +76,21 @@ struct Args {
     #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
     #[clap(default_value_t = 0.5, long, env)]
     preble_match_ratio_threshold: f32,
+    /// Preble-TPS sliding-window duration in seconds (default 180s
+    /// = 3 min, matching paper). Shorter windows react faster to load
+    /// shifts; longer windows smooth over noise.
+    #[cfg(feature = "preble-tps-q")]
+    #[clap(default_value_t = 180, long, env)]
+    preble_tps_window_secs: u64,
+    /// Preble-TPS idle-period compensation rate, in forward-steps per
+    /// second (default 120 = pure-decode peak rate). Sets the synthetic
+    /// rate used to backfill a recently-idle engine's tps_count when it
+    /// transitions from bs=0 to bs>0, so it looks competitive with a
+    /// continuously-busy peer instead of being penalised for having no
+    /// real samples.
+    #[cfg(feature = "preble-tps-q")]
+    #[clap(default_value_t = 120.0, long, env)]
+    preble_tps_decode_fps: f32,
     #[clap(default_value = "0.0.0.0", long, env)]
     hostname: String,
     #[clap(default_value = "3000", long, short, env)]
@@ -168,6 +183,10 @@ fn main() -> Result<(), RouterError> {
         bailian_gamma,
         #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
         preble_match_ratio_threshold,
+        #[cfg(feature = "preble-tps-q")]
+        preble_tps_window_secs,
+        #[cfg(feature = "preble-tps-q")]
+        preble_tps_decode_fps,
         kvcache_block_size,
         hostname,
         port,
@@ -213,6 +232,10 @@ fn main() -> Result<(), RouterError> {
     // preble-tps-q) since they share the KV$-aware-branch filter.
     #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
     router::init_preble_params(preble_match_ratio_threshold);
+
+    // Preble-TPS tunables: window duration + idle-compensation rate.
+    #[cfg(feature = "preble-tps-q")]
+    router::init_preble_tps_params(preble_tps_window_secs, preble_tps_decode_fps);
 
     // CORS allowed origins
     let cors_allow_origin: Option<AllowOrigin> = cors_allow_origin.map(|cors_allow_origin| {

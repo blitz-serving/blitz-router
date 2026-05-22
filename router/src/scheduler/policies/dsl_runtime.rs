@@ -50,12 +50,15 @@ pub(crate) struct Observation {
     /// preble-bs-q`.
     #[cfg(feature = "preble-bs-q")]
     pub preble_bs_sum: f64,
-    /// Preble-TPS: count of forward steps in the per-replica 3-min
-    /// window. Higher = more throughput, less loaded. Captured from
-    /// `sctx.block_hash.tps_count(now)` only under `--features
-    /// preble-tps-q`.
+    /// Preble-TPS: count of forward steps in the per-replica window
+    /// (window seconds CLI-tunable via `--preble-tps-window-secs`).
+    /// `None` if the engine is currently idle (`bs == 0`) — Design 1
+    /// sentinel: idle engines win admissions categorically over busy
+    /// ones via the `preble_tps_count` helper's `unwrap_or(usize::MAX)`.
+    /// Captured from `sctx.block_hash.tps_count(bs, now)` only under
+    /// `--features preble-tps-q`.
     #[cfg(feature = "preble-tps-q")]
-    pub preble_tps_count: usize,
+    pub preble_tps_count: Option<usize>,
 }
 
 /// Lock each sctx briefly, capture all fields needed by any policy.
@@ -80,6 +83,8 @@ pub(crate) async fn capture_observations(
         let epoch = sctx.block_hash.epoch();
         #[cfg(any(feature = "preble-q", feature = "preble-bs-q", feature = "preble-tps-q"))]
         let now = std::time::Instant::now();
+        #[cfg(feature = "preble-tps-q")]
+        let bs_now = sctx.lmetric.bs;
         Observation {
             idx,
             bs: sctx.lmetric.bs,
@@ -96,7 +101,7 @@ pub(crate) async fn capture_observations(
             #[cfg(feature = "preble-bs-q")]
             preble_bs_sum: sctx.block_hash.bs_sum(now),
             #[cfg(feature = "preble-tps-q")]
-            preble_tps_count: sctx.block_hash.tps_count(now),
+            preble_tps_count: sctx.block_hash.tps_count(bs_now, now),
         }
     });
     join_all(captures).await
@@ -237,11 +242,40 @@ pub(crate) fn preble_bs_sum(sctx: &Observation) -> f64 {
 }
 
 /// Preble-TPS load-balancing branch: count of forward steps in the
-/// per-replica 3-min window. Higher = more throughput, less loaded;
-/// the policy maximizes.
+/// per-replica window (Design 1 sentinel: `None` → `usize::MAX`, so
+/// idle engines win admissions categorically over busy ones via
+/// `select_max_by`). For a busy engine, returns the actual count
+/// from the sliding window (real busy samples + any synthetic
+/// idle-compensation samples retroactively pushed at the previous
+/// idle→busy transition).
 #[cfg(feature = "preble-tps-q")]
 pub(crate) fn preble_tps_count(sctx: &Observation) -> usize {
-    sctx.preble_tps_count
+    sctx.preble_tps_count.unwrap_or(usize::MAX)
+}
+
+/// `after_extra` hook for PrebleTpsQ: when an admission lifts the
+/// chosen engine from `bs=0` to `bs>0`, retroactively credit the
+/// idle gap at `decode_fps` rate (the "iff None then needs
+/// compensation" arc of the Design 1 ⇔ Design 2 state chain).
+///
+/// Detection of the transition uses the captured `chosen.bs == 0`,
+/// which reflects the engine's bs at scheduling time — before
+/// `apply_default_after` incremented it for this admission. So
+/// `chosen.bs == 0` is equivalent to "engine was idle when chosen,
+/// and this admission is what makes it busy."
+///
+/// No-op for cold-start engines (last_busy_at == None) and for
+/// admissions to already-busy engines.
+#[cfg(feature = "preble-tps-q")]
+pub(crate) async fn preble_tps_compensate_idle(
+    _entry: &Entry,
+    chosen: &Observation,
+    all_sctx: &[Arc<Mutex<ScheduleContext>>],
+) {
+    if chosen.bs == 0 {
+        let mut sctx = all_sctx[chosen.idx].lock().await;
+        sctx.block_hash.compensate_idle_gap(std::time::Instant::now());
+    }
 }
 
 /// `after_extra` hook for PrebleQ: pushes a per-request cost

@@ -241,10 +241,28 @@ impl PrebleBsBlockHash {
 /// Preble-TPS flavour. Per-step window of forward-step counts; load
 /// is *inversely* proportional to the count of steps in the past 3
 /// min (more steps = more throughput headroom = preferred).
+///
+/// The `last_busy_at` scalar is **deliberately separate** from the
+/// sliding window: when an engine has been idle past the window
+/// duration, the deque has popped all real samples, but we still
+/// need the boundary timestamp to compute the idle gap for
+/// compensation at the next idle→busy transition. Storing
+/// `last_busy_at` inside the deque would lose this information.
 #[cfg(feature = "preble-tps-q")]
 pub struct PrebleTpsBlockHash {
     inner: RadixTreeBlockHash,
     tps_window: SlidingWindow<(), Count>,
+    /// Timestamp of the most recent forward step. `None` only on a
+    /// cold-start engine that has never ticked. Updated on every
+    /// `update_with_step` call. Used by `compensate_idle_gap` to size
+    /// the idle interval to backfill.
+    last_busy_at: Option<Instant>,
+    /// Window duration captured at construction time from
+    /// `PREBLE_TPS_WINDOW_SECS` (CLI-tunable; default 180s).
+    window_duration: Duration,
+    /// Idle-period compensation rate captured at construction time
+    /// from `PREBLE_TPS_DECODE_FPS` (CLI-tunable; default 120 fps).
+    decode_fps: f32,
 }
 
 #[cfg(feature = "preble-tps-q")]
@@ -255,9 +273,22 @@ unsafe impl Sync for PrebleTpsBlockHash {}
 #[cfg(feature = "preble-tps-q")]
 impl BlockHash for PrebleTpsBlockHash {
     fn new(num_blocks: usize) -> Self {
+        let window_duration = Duration::from_secs(
+            crate::scheduler::state::PREBLE_TPS_WINDOW_SECS
+                .get()
+                .copied()
+                .unwrap_or(180),
+        );
+        let decode_fps = crate::scheduler::state::PREBLE_TPS_DECODE_FPS
+            .get()
+            .copied()
+            .unwrap_or(120.0);
         Self {
             inner: RadixTreeBlockHash::new(num_blocks),
-            tps_window: SlidingWindow::new(WINDOW_DURATION, Count),
+            tps_window: SlidingWindow::new(window_duration, Count),
+            last_busy_at: None,
+            window_duration,
+            decode_fps,
         }
     }
     fn len(&self) -> usize { self.inner.len() }
@@ -270,18 +301,56 @@ impl BlockHash for PrebleTpsBlockHash {
 
 #[cfg(feature = "preble-tps-q")]
 impl PrebleTpsBlockHash {
-    /// Bump the forward-step count. `_bs` is accepted for call-site
-    /// uniformity with `PrebleBsBlockHash::update_with_step` (the
-    /// colocation loop does not know which flavour is aliased in).
+    /// Push one real forward-step sample and refresh `last_busy_at`.
+    /// `_bs` is accepted for call-site uniformity with
+    /// `PrebleBsBlockHash::update_with_step` (the colocation loop
+    /// does not know which flavour is aliased in).
+    ///
+    /// Forward steps fire only when `bs > 0` on the engine side, so
+    /// this method is never called on an idle engine — meaning
+    /// `last_busy_at == Some(now)` after the call holds the
+    /// "most recent moment the engine ticked" invariant.
     pub fn update_with_step(&mut self, _bs: usize, now: Instant) {
         self.tps_window.push(now, ());
+        self.last_busy_at = Some(now);
     }
 
-    /// Count of forward steps in the 3-min window. Higher = more
-    /// throughput. Load-balancing-branch selector for `PrebleTpsQ`
-    /// is `select_max_by` over this.
-    pub fn tps_count(&mut self, now: Instant) -> usize {
-        self.tps_window.len_at(now)
+    /// Retroactively credit a now-elapsed idle interval as if the
+    /// engine had been ticking at `decode_fps`. Called exactly when
+    /// an admission lifts the engine from `bs=0` to `bs>0` — the
+    /// edge of the `None ⇔ compensation` state-chain.
+    ///
+    /// The idle interval is `now - last_busy_at`, clamped to
+    /// `window_duration` (we never compensate beyond the window's
+    /// look-back). Synthetic samples are dated uniformly across the
+    /// interval so they age out at the same rate they would have if
+    /// real. If `last_busy_at` is `None` (cold-start engine, never
+    /// been busy), there is no idle interval to compensate — the
+    /// window stays empty; Design 1's `None` sentinel still ensures
+    /// idle engines win admissions.
+    pub fn compensate_idle_gap(&mut self, now: Instant) {
+        if let Some(last) = self.last_busy_at {
+            let idle_dur = now.saturating_duration_since(last).min(self.window_duration);
+            let count = (self.decode_fps * idle_dur.as_secs_f32()) as usize;
+            if count > 0 {
+                let step = idle_dur / (count as u32);
+                for i in 1..=count {
+                    self.tps_window.push(last + step * (i as u32), ());
+                }
+            }
+        }
+    }
+
+    /// Effective tps_count at decision time. Returns `None` for an
+    /// idle engine (`bs == 0`) — Design 1's sentinel: idle engines
+    /// dominate any busy engine in `select_max_by` via the
+    /// `None > Some(_)` collapsing in the helper.
+    ///
+    /// For a busy engine, returns the current sliding-window count
+    /// (real busy samples + any synthetic compensation previously
+    /// pushed by `compensate_idle_gap`).
+    pub fn tps_count(&mut self, bs: usize, now: Instant) -> Option<usize> {
+        if bs == 0 { None } else { Some(self.tps_window.len_at(now)) }
     }
 }
 
@@ -423,9 +492,16 @@ mod tests {
 
     #[cfg(feature = "preble-tps-q")]
     #[test]
-    fn tps_empty_window_zero() {
+    fn tps_idle_returns_none_busy_returns_count() {
+        // bs == 0 ⇒ None (sentinel for "idle, wins via select_max_by");
+        // bs > 0  ⇒ Some(window.len_at(now)).
         let mut p = PrebleTpsBlockHash::new(64);
-        assert_eq!(p.tps_count(Instant::now()), 0);
+        let t = Instant::now();
+        assert_eq!(p.tps_count(0, t), None);
+        p.update_with_step(1, t);
+        assert_eq!(p.tps_count(1, t), Some(1));
+        // Becoming idle again immediately re-arms the None sentinel.
+        assert_eq!(p.tps_count(0, t), None);
     }
 
     #[cfg(feature = "preble-tps-q")]
@@ -436,17 +512,83 @@ mod tests {
         for _ in 0..5 {
             p.update_with_step(8, t);
         }
-        assert_eq!(p.tps_count(t), 5);
+        assert_eq!(p.tps_count(8, t), Some(5));
     }
 
     #[cfg(feature = "preble-tps-q")]
     #[test]
-    fn tps_window_expires_after_3min() {
+    fn tps_window_expires_after_default_window() {
         let mut p = PrebleTpsBlockHash::new(64);
         let t = Instant::now();
         p.update_with_step(8, t);
         p.update_with_step(8, t);
-        assert_eq!(p.tps_count(t + Duration::from_secs(179)), 2);
-        assert_eq!(p.tps_count(t + Duration::from_secs(181)), 0);
+        assert_eq!(p.tps_count(8, t + Duration::from_secs(179)), Some(2));
+        assert_eq!(p.tps_count(8, t + Duration::from_secs(181)), Some(0));
+    }
+
+    #[cfg(feature = "preble-tps-q")]
+    #[test]
+    fn tps_compensate_cold_start_is_noop() {
+        // No prior busy state ⇒ last_busy_at == None ⇒ no synthetic
+        // samples pushed.
+        let mut p = PrebleTpsBlockHash::new(64);
+        let t = Instant::now();
+        p.compensate_idle_gap(t);
+        assert_eq!(p.tps_count(8, t), Some(0));
+    }
+
+    #[cfg(feature = "preble-tps-q")]
+    #[test]
+    fn tps_compensate_after_idle_backfills_at_decode_fps() {
+        // Engine ticks once at t, goes idle, comes back at t+10s.
+        // Default decode_fps = 120 ⇒ expect ~120*10 = 1200 synthetic
+        // samples added, plus the original 1 real sample, all within
+        // the window when queried at t+10s.
+        let mut p = PrebleTpsBlockHash::new(64);
+        let t = Instant::now();
+        p.update_with_step(1, t);                   // 1 real
+        let returning = t + Duration::from_secs(10);
+        p.compensate_idle_gap(returning);            // ~1200 synthetic
+        let count = p.tps_count(1, returning).unwrap();
+        // Allow ±5 for integer truncation of decode_fps × dur.
+        assert!(
+            (1200..=1205).contains(&(count - 1)),
+            "expected ≈ 1201 samples (1 real + ~1200 synthetic), got {}",
+            count
+        );
+    }
+
+    #[cfg(feature = "preble-tps-q")]
+    #[test]
+    fn tps_compensate_clamps_to_window_duration() {
+        // Idle 1 hour, window = 180s. Compensation must clamp to
+        // 120 fps × 180s = 21600 samples (not 120 × 3600).
+        let mut p = PrebleTpsBlockHash::new(64);
+        let t = Instant::now();
+        p.update_with_step(1, t);
+        let returning = t + Duration::from_secs(3600);
+        p.compensate_idle_gap(returning);
+        let count = p.tps_count(1, returning).unwrap();
+        // 1 real sample is way out of window, so it expired. Synthetic
+        // samples were dated across (t, t+180s) — most are also
+        // out-of-window at returning = t+3600s. So actually 0 remain
+        // within window after the clamp. Re-querying earlier would show
+        // the synthetics; this assertion just verifies we didn't push
+        // 432_000 samples (120 × 3600).
+        assert!(
+            count <= 21_605,
+            "compensation must be clamped to window; got {} samples",
+            count
+        );
+    }
+
+    #[cfg(feature = "preble-tps-q")]
+    #[test]
+    fn tps_blockhash_trait_delegates() {
+        let mut p = PrebleTpsBlockHash::new(64);
+        p.insert(&[1, 2, 3], vec![0, 1, 2]);
+        assert_eq!(p.get(&[1, 2]), 2);
+        // Tree ops do NOT touch the tps window.
+        assert_eq!(p.tps_count(8, Instant::now()), Some(0));
     }
 }

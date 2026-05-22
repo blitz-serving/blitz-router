@@ -48,6 +48,30 @@ pub(crate) static PREBLE_MATCH_RATIO_T: OnceLock<f32> = OnceLock::new();
 pub fn init_preble_params(match_ratio_threshold: f32) {
     let _ = PREBLE_MATCH_RATIO_T.set(match_ratio_threshold);
 }
+
+/// Preble-TPS sliding-window duration in seconds. CLI-tunable via
+/// `--preble-tps-window-secs`; defaults to 180s (3 min) if unset.
+/// Shorter windows react faster to load shifts; longer windows give
+/// more statistical noise immunity.
+pub(crate) static PREBLE_TPS_WINDOW_SECS: OnceLock<u64> = OnceLock::new();
+
+/// Preble-TPS idle-period compensation rate in forward-steps per
+/// second. CLI-tunable via `--preble-tps-decode-fps`; defaults to 120
+/// (pure-decode peak rate for a saturated engine). When an engine
+/// transitions from idle (bs=0) to busy (bs>0), the gap is
+/// retroactively credited as if the engine had been ticking at this
+/// rate — so a recently-idle engine looks competitive with a
+/// continuously-busy peer, instead of being penalised for having no
+/// real samples in its window.
+pub(crate) static PREBLE_TPS_DECODE_FPS: OnceLock<f32> = OnceLock::new();
+
+/// Install the Preble-TPS tunables from CLI flags. Called once at
+/// startup; subsequent calls are no-ops.
+#[cfg(feature = "preble-tps-q")]
+pub fn init_preble_tps_params(window_secs: u64, decode_fps: f32) {
+    let _ = PREBLE_TPS_WINDOW_SECS.set(window_secs);
+    let _ = PREBLE_TPS_DECODE_FPS.set(decode_fps);
+}
 /// llm-d load-aware-scorer's queue-depth threshold (default in upstream)
 pub(crate) static LOAD_AWARE_QUEUE_T: f32 = 128.0;
 /// most-hit-load-q (llm-d precise-prefix-cache + load-aware combo)

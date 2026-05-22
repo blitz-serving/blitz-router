@@ -122,15 +122,28 @@ policy! {
 }
 
 // =========================================================================
-// PrebleTpsQ — load-balancing branch = max forward-step count over 3-min window
+// PrebleTpsQ — load-balancing branch = max forward-step count over window
 // =========================================================================
 //
 // Same KV$-aware branch shape as PrebleQ — filter by match ratio,
 // then max owned match blocks with the load-balancing-branch metric
 // as the tie-break. Load-balancing branch picks the replica with the
-// most forward steps in the past 3 min — i.e. highest throughput,
-// lowest load. Like PrebleBsQ, the window is engine-step-driven, no
-// `after_extra` hook.
+// most forward steps in the window — i.e. highest throughput, lowest
+// load. The window is engine-step-driven.
+//
+// Design 1 (idle-engine sentinel): idle engines (bs=0) get
+// `preble_tps_count = usize::MAX`, so they categorically win over
+// any busy engine. This prevents the cold-start mode-collapse where
+// the first chosen replica would otherwise lock in every subsequent
+// admission (only it has nonzero tps_count; idle peers stay at 0).
+//
+// Design 2 (idle-period compensation): when an admission lifts a
+// previously-idle engine to busy, the `after_extra` hook
+// retroactively credits the idle gap at decode_fps rate (default
+// 120). This keeps a recently-idle engine competitive with
+// continuously-busy peers in subsequent `select_max_by` rounds,
+// otherwise the engine would lose admissions until it briefly went
+// idle again (yo-yo dynamic).
 //
 // The KV$-aware-branch tie-break is `+tps_count` (no negation:
 // higher tps_count ⇒ less loaded ⇒ preferred), keeping the same
@@ -160,4 +173,7 @@ policy! {
             |t| select_max_by(t, preble_tps_count),
         )
     },
+    after_extra: {
+        preble_tps_compensate_idle(entry, &observations[chosen], all_sctx).await;
+    }
 }
