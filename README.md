@@ -21,6 +21,9 @@ End-to-end tests (router + yaullm + request-sim orchestration) live in the [Metr
 
 ## OSDI'26 Artifact Evaluation
 
+Paper: [Simple is Better: Multiplication May Be All You Need for LLM
+Request Scheduling](https://arxiv.org/pdf/2603.15202) (arXiv:2603.15202).
+
 The AE workflow is documented in [`ae/README.md`](ae/README.md). It explains
 how to prepare the required repositories, rerun the MetricsTestRunner
 experiments that produce `client.jsonl` and router logs, and regenerate the
@@ -50,10 +53,6 @@ To regenerate Figure 21 and Figure 22 from the archived data in
 bash ae/run_all.sh figures
 ```
 
-## Docs
-
-Full docs: <https://blitz-serving.github.io/blitzscale-doc/>
-
 ## Project Structure
 
 ```
@@ -68,6 +67,8 @@ blitz-router/
 ## Related Projects
 
 - **[yaullm](https://github.com/blitz-serving/yaullm)** — Patched vLLM engine with step-level SSE metrics
+- **[request-sim](https://github.com/blitz-serving/request-sim)** — Request-load generator used by the AE orchestration
+- **[MetricsTestRunner](https://github.com/blitz-serving/MetricsTestRunner)** — Cluster-level evaluation harness for router, yaullm, and request-sim experiments
 
 ## Acknowledgements
 
