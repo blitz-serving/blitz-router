@@ -421,8 +421,8 @@ canonical-data mapping is in `ae/slow_path_map.tsv`.
 | Figure 21(b) | Agent/API Qwen at scale 5.5, Qwen2.5-7B-Instruct concrete checkpoint, 5 plotted policies | `35,45,50,60,65` | 2-3 hours | `figs/e2e-cdf-v1/qwen2-to-b.pdf` |
 | Figure 21(c) | Coder at scale 2.4, 5 plotted policies | `72,82,87,97,102` | 2-3 hours | `figs/e2e-cdf-v1/qwen3-coder.pdf` |
 | Figure 21(d) | ToolAgent/Kimi at scale 1.6, 5 plotted policies | `107,115,119,127,131` | 2-3 hours | `figs/e2e-cdf-v1/qwen2-mooncake-tool.pdf` |
-| Figure 22 | Scaling blocks for all traces, 5 plotted policies | selected indices from `0-34`, `35-69`, `70-104`, `105-132` | 38-57 hours | `figs/scaling-test/scaling-fix-v1.pdf` |
-| All AE evaluation figures | Figure 21 plus Figure 22 | listed above | about 46-69 hours plus setup/retries | all AE PDFs |
+| Figure 22 | Scaling blocks for all traces, 6 plotted policies | selected indices from `0-34`, `35-69`, `70-104`, `105-132`, `133-151` | 46-68 hours | `figs/scaling-test/scaling-fix-v1.pdf` |
+| All AE evaluation figures | Figure 21 plus Figure 22 | listed above | about 54-80 hours plus setup/retries | all AE PDFs |
 
 Policy-name correspondence:
 
@@ -431,6 +431,7 @@ Policy-name correspondence:
 | X-Metric | `lmetric-q` | `lmetric-q` |
 | vLLM-v1 | `join-shortest-q-weight` | `join-shortest-weight-q` |
 | Dynamo | `dynamo-q`, `dynamo-decoupled-q` | `dynamo-q`, `dynamo-po-q` |
+| llm-d | `least-ttft-q` | `least-ttft-q` |
 | AIBrix | `aibrix-q` | `aibrix-q` |
 | Preble | `preble-q` | `preble-q` |
 | CompanyX / Bailian | `bailian-impl-q` | `bailian-impl-q` |
